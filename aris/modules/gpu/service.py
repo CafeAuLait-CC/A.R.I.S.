@@ -1,95 +1,286 @@
+# aris/modules/gpu/service.py
+
 from sqlalchemy.orm import Session
-from datetime import datetime
+
 from . import models, schemas
+from ...core.config import settings
 from ...core import events
 from ...core.notify import notify
 
 
 class GpuService:
-    def handle_slash(self, db: Session, user: models.User, text: str) -> str:
-        """
-        /gpu command (simplified):
-        - empty or 'status' -> return current status brief
-        - 'my' -> return my record
-        simple commands for now, expend to 'reserve' later.
-        """
-        args = (text or "").strip().split()
+    """GPU Related Services：
+    - internal /internal/gpu/* for agents
+    - Slack /slack/* Frontend can use the query methods (future features)
+    """
 
-        if len(args) == 0 or args[0] == "status":
-            return self._status_summary(db)
+    # ===== Basic Tools =====
 
-        if args[0] == "my":
-            return self._user_usage(db, user)
+    def _check_token(self, token: str) -> bool:
+        return token == settings.INTERNAL_API_TOKEN
 
-        return "Usage: `/gpu` status，`/gpu my` list your log。"
-
-    def _status_summary(self, db: Session) -> str:
-        latest = (
-            db.query(models.GpuStatus)
-            .order_by(models.GpuStatus.timestamp.desc())
-            .limit(50)
-            .all()
-        )
-        if not latest:
-            return "There is NO GPU status to report. Please check the agent configuration for each node. "
-
-        lines = []
-        for s in latest:
-            lines.append(
-                f"{s.node.name} [GPU{s.gpu_index}] "
-                f"{s.memory_used_mb}MB / procs:{s.process_count} / user:{s.username or '-'}"
+    def ensure_user_for_gpu_username(self, db: Session, username: str) -> models.User:
+        user = (
+            db.query(models.User)
+            .filter(
+                models.User.gpu_node_username == username,
+                models.User.active.is_(True),
             )
-        return "Recent GPU status:\n" + "\n".join(lines)
-
-    def _user_usage(self, db: Session, user: models.User) -> str:
-        # simply chech reservation, could be expended as needed
-        qs = (
-            db.query(models.GpuReservation)
-            .filter(models.GpuReservation.user_id == user.id)
-            .order_by(models.GpuReservation.start_time.desc())
-            .limit(10)
-            .all()
-        )
-        if not qs:
-            return "There is no GPU reservation/log related to you."
-
-        lines = []
-        for r in qs:
-            lines.append(
-                f"{r.gpu} {r.status} "
-                f"{r.start_time} -> {r.end_time or '...'}"
-            )
-        return "Your recent log: \n" + "\n".join(lines)
-
-    def handle_report(self, db: Session, report: schemas.GpuReport):
-        node = (
-            db.query(models.GpuNode)
-            .filter(models.GpuNode.name == report.node_name,
-                    models.GpuNode.token == report.token)
             .one_or_none()
         )
+        if user:
+            return user
+
+        # new user: create Unknown User first, wait for admin to complete registration for this user.
+        user = models.User(
+            name="Unknown User",
+            gpu_node_username=username,
+        )
+        db.add(user)
+        db.flush()
+
+        # TODO: Notify admin to complete user registration via Slack messages.
+        # notify.notify_channel("ADMIN_CHANNEL_ID", f"New GPU user detected: {username} (id={user.id})")
+        events.event_bus.publish(
+            "user.new_from_gpu",
+            {"user_id": user.id, "gpu_node_username": username},
+        )
+        return user
+
+    def _get_or_create_node(self, db: Session, hostname: str) -> models.GpuNode:
+        node = db.query(models.GpuNode).filter_by(hostname=hostname).one_or_none()
         if not node:
-            # decline if node not registered
-            return False
+            node = models.GpuNode(hostname=hostname)
+            db.add(node)
+            db.flush()
+        return node
 
-        node.last_report = report.timestamp
-
-        for p in report.processes:
-            s = models.GpuStatus(
+    def _get_or_create_gpu(
+        self,
+        db: Session,
+        node: models.GpuNode,
+        info: schemas.AgentGpuInfo,
+    ) -> models.Gpu:
+        gpu = db.query(models.Gpu).filter_by(uuid=info.uuid).one_or_none()
+        if not gpu:
+            gpu = models.Gpu(
                 node_id=node.id,
-                gpu_index=p.gpu_index,
-                username=p.username,
-                process_count=p.process_count,
-                memory_used_mb=p.memory_used_mb,
-                timestamp=report.timestamp,
+                index=info.index,
+                uuid=info.uuid,
+                name=info.name,
+                total_memory_mb=info.total_memory_mb,
             )
-            db.add(s)
+            db.add(gpu)
+            db.flush()
+        else:
+            gpu.node_id = node.id
+            gpu.index = info.index
+            if info.name:
+                gpu.name = info.name
+            if info.total_memory_mb:
+                gpu.total_memory_mb = info.total_memory_mb
+        return gpu
+
+    # ===== /internal/gpu/register =====
+
+    def handle_register(self, db: Session, payload: schemas.AgentRegisterRequest) -> dict:
+        if not self._check_token(payload.token):
+            return {"ok": False, "detail": "invalid token"}
+
+        node = self._get_or_create_node(db, payload.node)
+
+        gpu_mapping: dict[str, str] = {}
+        for g in payload.gpus:
+            gpu = self._get_or_create_gpu(db, node, g)
+            gpu_mapping[g.uuid] = gpu.id
 
         db.commit()
+        return {"ok": True, "node_id": node.id, "gpu_mapping": gpu_mapping}
 
-        # publish internal event (used to trigger warnings, etc.)
-        events.event_bus.publish("gpu.usage.updated", report.dict())
-        return True
+    # ===== /internal/gpu/session/start =====
+
+    def handle_session_start(
+        self, db: Session, payload: schemas.AgentSessionStartRequest
+    ) -> schemas.AgentSessionResponse:
+        if not self._check_token(payload.token):
+            return schemas.AgentSessionResponse(ok=False, detail="invalid token")
+
+        node = self._get_or_create_node(db, payload.node)
+        gpu = db.query(models.Gpu).filter_by(uuid=payload.gpu_uuid).one_or_none()
+        if not gpu:
+            # In case agent did not register this gpu
+            gpu_info = schemas.AgentGpuInfo(uuid=payload.gpu_uuid, index=0)
+            gpu = self._get_or_create_gpu(db, node, gpu_info)
+
+            # TODO: log.warning(f"gpu {payload.gpu_uuid} auto-created during session start (agent not registered?)")
+
+        user = self.ensure_user_for_gpu_username(db, payload.user)
+
+        # Check for reserved session (simple matching. Should improve matching method)
+        # TODO: Upgrade matching method. reserved_start < payload.start_at < reserved_until. Already added the line, should verify!
+        sess = (
+            db.query(models.GpuSession)
+            .filter(
+                models.GpuSession.user_id == user.id,
+                models.GpuSession.gpu_id == gpu.id,
+                models.GpuSession.state == models.SessionState.RESERVED,
+                models.GpuSession.reserved_until >= payload.started_at,
+                models.GpuSession.reserved_from <= payload.started_at,  # added this condition, but may cause problem: 
+                                                                        # what if start before reserved_from and end after it?
+            )
+            .order_by(models.GpuSession.reserved_from.asc())
+            .first()
+        )
+
+        if sess:
+            # Write reservation time range into UsageLog
+            if sess.reserved_from and sess.reserved_from < payload.started_at:
+                minutes = int(
+                    max(
+                        0,
+                        (payload.started_at - sess.reserved_from).total_seconds()
+                        // 60,
+                    )
+                )
+                if minutes > 0:
+                    db.add(
+                        models.UsageLog(
+                            user_id=user.id,
+                            gpu_id=gpu.id,
+                            node_id=node.id,
+                            session_id=sess.id,
+                            start_ts=sess.reserved_from,
+                            end_ts=payload.started_at,
+                            minutes=minutes,
+                            tag=models.UsageTag.RESERVED,   # TODO: maybe replace it with "WARM UP"?
+                        )
+                    )
+
+            sess.state = models.SessionState.RUNNING
+            sess.started_at = payload.started_at
+            sess.heartbeat_at = payload.started_at
+        else:
+            # 无预约，直接新建 RUNNING
+            sess = models.GpuSession(
+                user_id=user.id,
+                gpu_id=gpu.id,
+                node_id=node.id,
+                state=models.SessionState.RUNNING,
+                started_at=payload.started_at,
+                heartbeat_at=payload.started_at,
+                created_by="agent",
+            )
+            db.add(sess)
+
+        db.commit()
+        return schemas.AgentSessionResponse(ok=True, session_id=sess.id)
+
+    # ===== /internal/gpu/session/heartbeat =====
+
+    def handle_session_heartbeat(
+        self, db: Session, payload: schemas.AgentSessionHeartbeatRequest
+    ) -> schemas.AgentSessionResponse:
+        if not self._check_token(payload.token):
+            return schemas.AgentSessionResponse(ok=False, detail="invalid token")
+
+        node = self._get_or_create_node(db, payload.node)
+        gpu = db.query(models.Gpu).filter_by(uuid=payload.gpu_uuid).one_or_none()
+        if not gpu:
+            return schemas.AgentSessionResponse(ok=False, detail="unknown gpu")
+
+        user = self.ensure_user_for_gpu_username(db, payload.user)
+
+        sess = (
+            db.query(models.GpuSession)
+            .filter(
+                models.GpuSession.user_id == user.id,
+                models.GpuSession.gpu_id == gpu.id,
+                models.GpuSession.state == models.SessionState.RUNNING,
+            )
+            .order_by(models.GpuSession.started_at.desc())
+            .first()
+        )
+
+        if not sess:
+            # started session lost, create a new one
+            sess = models.GpuSession(
+                user_id=user.id,
+                gpu_id=gpu.id,
+                node_id=node.id,
+                state=models.SessionState.RUNNING,
+                started_at=payload.ts,
+                heartbeat_at=payload.ts,
+                created_by="agent",
+                note="auto-created by heartbeat",
+            )
+            db.add(sess)
+        else:
+            sess.heartbeat_at = payload.ts
+
+        db.commit()
+        return schemas.AgentSessionResponse(ok=True, session_id=sess.id)
+
+    # ===== /internal/gpu/session/end =====
+
+    def handle_session_end(
+        self, db: Session, payload: schemas.AgentSessionEndRequest
+    ) -> schemas.AgentSessionResponse:
+        if not self._check_token(payload.token):
+            return schemas.AgentSessionResponse(ok=False, detail="invalid token")
+
+        node = self._get_or_create_node(db, payload.node)
+        gpu = db.query(models.Gpu).filter_by(uuid=payload.gpu_uuid).one_or_none()
+        if not gpu:
+            return schemas.AgentSessionResponse(ok=False, detail="unknown gpu")
+
+        user = self.ensure_user_for_gpu_username(db, payload.user)
+
+        sess = (
+            db.query(models.GpuSession)
+            .filter(
+                models.GpuSession.user_id == user.id,
+                models.GpuSession.gpu_id == gpu.id,
+                models.GpuSession.state == models.SessionState.RUNNING,
+            )
+            .order_by(models.GpuSession.started_at.desc())
+            .first()
+        )
+
+        if not sess:
+            # session lost, silent success, return details
+            return schemas.AgentSessionResponse(
+                ok=False, detail="no active session to end"
+            )
+
+        ended_at = payload.ended_at
+        sess.state = models.SessionState.ENDED
+        sess.ended_at = ended_at
+        sess.heartbeat_at = ended_at
+
+        if sess.started_at:
+            total_secs = (ended_at - sess.started_at).total_seconds()
+            minutes = max(1, int(total_secs // 60))
+            db.add(
+                models.UsageLog(
+                    user_id=user.id,
+                    gpu_id=gpu.id,
+                    node_id=node.id,
+                    session_id=sess.id,
+                    start_ts=sess.started_at,
+                    end_ts=ended_at,
+                    minutes=minutes,
+                    tag=models.UsageTag.NORMAL,
+                )
+            )
+
+        db.commit()
+        return schemas.AgentSessionResponse(ok=True, session_id=sess.id)
+
+    # ===== Slack / GPU Placeholder (Future Features) =====
+
+    def handle_slash(self, db: Session, user: models.User, text: str) -> str:
+        # TODO: implement /gpu status, /gpu my, /reserve, etc.
+        return "ARIS GPU module is online. Commands to be implemented."
 
 
 gpu_service = GpuService()
