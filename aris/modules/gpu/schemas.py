@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 # ========= Agent → ARIS Protocal =========
 
+
 class AgentGpuInfo(BaseModel):
     uuid: str
     index: int
@@ -16,24 +17,23 @@ class AgentGpuInfo(BaseModel):
 
 
 class AgentRegisterRequest(BaseModel):
-    node: str = Field(..., description="GPU node hostname")
-    token: str
+    hostname: str = Field(..., description="GPU node hostname")
+    agent_version: str | None = Field(None, description="GPU agent version")
     gpus: List[AgentGpuInfo]
     ts: Optional[datetime] = None
 
 
 class AgentSessionStartRequest(BaseModel):
-    node: str
-    token: str
+    hostname: str
+    agent_version: str | None = Field(None, description="GPU agent version")
     gpu_uuid: str
-    user: str    # gpu_node_username
+    user: str  # gpu_node_username
     pids: List[int] = Field(default_factory=list)
     started_at: datetime
 
 
 class AgentSessionHeartbeatRequest(BaseModel):
-    node: str
-    token: str
+    hostname: str
     gpu_uuid: str
     user: str
     pids: List[int] = Field(default_factory=list)
@@ -41,8 +41,7 @@ class AgentSessionHeartbeatRequest(BaseModel):
 
 
 class AgentSessionEndRequest(BaseModel):
-    node: str
-    token: str
+    hostname: str
     gpu_uuid: str
     user: str
     ended_at: datetime
@@ -56,6 +55,7 @@ class AgentSessionResponse(BaseModel):
 
 
 # ========= Lagecy (To Explore) =========
+
 
 class GpuProcessReport(BaseModel):
     gpu_index: int
@@ -72,7 +72,7 @@ class GpuReport(BaseModel):
 
 
 class GpuStatusView(BaseModel):
-    node: str
+    hostname: str
     gpu_index: int
     username: str
     process_count: int

@@ -3,18 +3,27 @@ import uuid
 import datetime as dt
 
 from sqlalchemy import (
-    String, Integer, Boolean, DateTime, Enum, ForeignKey, Text,
-    UniqueConstraint, Index
+    String,
+    Integer,
+    Boolean,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Text,
+    UniqueConstraint,
+    Index,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ...core.db import Base
+
 
 def gen_uuid() -> str:
     return str(uuid.uuid4())
 
 
 # ===== User =====
+
 
 class UserRole(str, enum.Enum):
     ADMIN = "admin"
@@ -37,10 +46,14 @@ class User(Base):
     slack_uid: Mapped[str | None] = mapped_column(String(64), nullable=True)
     slack_display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
-    role: Mapped[UserRole] = mapped_column(Enum(UserRole), default=UserRole.MEMBER, nullable=False)
+    role: Mapped[UserRole] = mapped_column(
+        Enum(UserRole), default=UserRole.MEMBER, nullable=False
+    )
 
     # GPU Weekly Usage Quota, 100 hours by default
-    weekly_quota_minutes: Mapped[int] = mapped_column(Integer, default=100 * 60, nullable=False)
+    weekly_quota_minutes: Mapped[int] = mapped_column(
+        Integer, default=100 * 60, nullable=False
+    )
 
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True),
@@ -60,6 +73,7 @@ class User(Base):
 
 # ===== GPU Node / GPU =====
 
+
 class GpuNode(Base):
     __tablename__ = "gpu_nodes"
 
@@ -67,6 +81,7 @@ class GpuNode(Base):
 
     # GPU server host name
     hostname: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    agent_version = mapped_column(String(32), nullable=True)
 
     description: Mapped[str | None] = mapped_column(String(256), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
@@ -95,18 +110,17 @@ class Gpu(Base):
     # GPU Model
     name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     total_memory_mb: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    
+
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     node: Mapped[GpuNode] = relationship("GpuNode", back_populates="gpus")
 
-    __table_args__ = (
-        UniqueConstraint("node_id", "index", name="uq_gpu_node_index"),
-    )
+    __table_args__ = (UniqueConstraint("node_id", "index", name="uq_gpu_node_index"),)
 
 
 # ===== Session / UsageLog =====
+
 
 class SessionState(str, enum.Enum):
     RESERVED = "reserved"
@@ -139,7 +153,9 @@ class GpuSession(Base):
     ended_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     heartbeat_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
 
-    created_by: Mapped[str | None] = mapped_column(String(32), nullable=True)  # agent/manual/slack
+    created_by: Mapped[str | None] = mapped_column(
+        String(32), nullable=True
+    )  # agent/manual/slack
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     user: Mapped[User] = relationship()
@@ -163,7 +179,9 @@ class UsageLog(Base):
     node_id: Mapped[str] = mapped_column(ForeignKey("gpu_nodes.id"), nullable=False)
     session_id: Mapped[str | None] = mapped_column(ForeignKey("gpu_sessions.id"))
 
-    start_ts: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    start_ts: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
     end_ts: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     minutes: Mapped[int] = mapped_column(Integer, nullable=False)
 

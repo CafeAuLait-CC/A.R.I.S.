@@ -16,9 +16,6 @@ class GpuService:
 
     # ===== Basic Tools =====
 
-    def _check_token(self, token: str) -> bool:
-        return token == settings.INTERNAL_API_TOKEN
-
     def ensure_user_for_gpu_username(self, db: Session, username: str) -> models.User:
         user = (
             db.query(models.User)
@@ -83,11 +80,11 @@ class GpuService:
 
     # ===== /internal/gpu/register =====
 
-    def handle_register(self, db: Session, payload: schemas.AgentRegisterRequest) -> dict:
-        if not self._check_token(payload.token):
-            return {"ok": False, "detail": "invalid token"}
-
-        node = self._get_or_create_node(db, payload.node)
+    def handle_register(
+        self, db: Session, payload: schemas.AgentRegisterRequest
+    ) -> dict:
+        node = self._get_or_create_node(db, payload.hostname)
+        node.agent_version = payload.agent_version
 
         gpu_mapping: dict[str, str] = {}
         for g in payload.gpus:
@@ -102,10 +99,7 @@ class GpuService:
     def handle_session_start(
         self, db: Session, payload: schemas.AgentSessionStartRequest
     ) -> schemas.AgentSessionResponse:
-        if not self._check_token(payload.token):
-            return schemas.AgentSessionResponse(ok=False, detail="invalid token")
-
-        node = self._get_or_create_node(db, payload.node)
+        node = self._get_or_create_node(db, payload.hostname)
         gpu = db.query(models.Gpu).filter_by(uuid=payload.gpu_uuid).one_or_none()
         if not gpu:
             # In case agent did not register this gpu
@@ -125,8 +119,9 @@ class GpuService:
                 models.GpuSession.gpu_id == gpu.id,
                 models.GpuSession.state == models.SessionState.RESERVED,
                 models.GpuSession.reserved_until >= payload.started_at,
-                models.GpuSession.reserved_from <= payload.started_at,  # added this condition, but may cause problem: 
-                                                                        # what if start before reserved_from and end after it?
+                models.GpuSession.reserved_from
+                <= payload.started_at,  # added this condition, but may cause problem:
+                # what if start before reserved_from and end after it?
             )
             .order_by(models.GpuSession.reserved_from.asc())
             .first()
@@ -138,8 +133,7 @@ class GpuService:
                 minutes = int(
                     max(
                         0,
-                        (payload.started_at - sess.reserved_from).total_seconds()
-                        // 60,
+                        (payload.started_at - sess.reserved_from).total_seconds() // 60,
                     )
                 )
                 if minutes > 0:
@@ -152,7 +146,7 @@ class GpuService:
                             start_ts=sess.reserved_from,
                             end_ts=payload.started_at,
                             minutes=minutes,
-                            tag=models.UsageTag.RESERVED,   # TODO: maybe replace it with "WARM UP"?
+                            tag=models.UsageTag.RESERVED,  # TODO: maybe replace it with "WARM UP"?
                         )
                     )
 
@@ -180,10 +174,7 @@ class GpuService:
     def handle_session_heartbeat(
         self, db: Session, payload: schemas.AgentSessionHeartbeatRequest
     ) -> schemas.AgentSessionResponse:
-        if not self._check_token(payload.token):
-            return schemas.AgentSessionResponse(ok=False, detail="invalid token")
-
-        node = self._get_or_create_node(db, payload.node)
+        node = self._get_or_create_node(db, payload.hostname)
         gpu = db.query(models.Gpu).filter_by(uuid=payload.gpu_uuid).one_or_none()
         if not gpu:
             return schemas.AgentSessionResponse(ok=False, detail="unknown gpu")
@@ -225,10 +216,7 @@ class GpuService:
     def handle_session_end(
         self, db: Session, payload: schemas.AgentSessionEndRequest
     ) -> schemas.AgentSessionResponse:
-        if not self._check_token(payload.token):
-            return schemas.AgentSessionResponse(ok=False, detail="invalid token")
-
-        node = self._get_or_create_node(db, payload.node)
+        node = self._get_or_create_node(db, payload.hostname)
         gpu = db.query(models.Gpu).filter_by(uuid=payload.gpu_uuid).one_or_none()
         if not gpu:
             return schemas.AgentSessionResponse(ok=False, detail="unknown gpu")
