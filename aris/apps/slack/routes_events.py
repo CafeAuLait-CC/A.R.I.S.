@@ -1,6 +1,8 @@
 from fastapi import APIRouter, Request, Response, Header, BackgroundTasks
 from typing import Optional
 
+from ...modules.gpu.service import gpu_service
+from ...core.db import SessionLocal
 from ...core.slack import (
     slack_client,
     verify_slack_signature,
@@ -21,69 +23,167 @@ def reply_message(channel: str, text: str = "", thread_ts: Optional[str] = None)
 
 
 def build_home_view(user_id: str):
-    """Simple Home Tab Demo"""
+    """Pull real-time GPU status from DB"""
+    db = SessionLocal()
+    try:
+        cluster = gpu_service.get_realtime_cluster_view(db)
+    finally:
+        db.close()
+
+    updated_at = cluster["updated_at"]
+    updated_str = updated_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+    total = cluster["total_gpus"]
+    active = cluster["active_gpus"]
+    idle = cluster["idle_gpus"]
+
+    blocks: list[dict] = []
+
+    # 1) Welcome
+    blocks.append(
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"👋 Welcome back, <@{user_id}>!",
+            },
+        }
+    )
+
+    blocks.append({"type": "divider"})
+
+    # 2) System Status (Based on real-time summary)
+    blocks.append(
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "🧠 *System Status*"},
+        }
+    )
+
+    if total == 0:
+        status_text = "No GPUs registered yet."
+    else:
+        status_text = (
+            f"Nodes / GPUs: `{total}` GPUs  ·  Active: `{active}`  ·  Idle: `{idle}`"
+        )
+
+    blocks.append(
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": status_text,
+                }
+            ],
+        }
+    )
+
+    blocks.append({"type": "divider"})
+
+    # 3) GPU status of each node
+    for node in cluster["nodes"]:
+        hostname = node["hostname"]
+        gpus = node["gpus"]
+
+        # Node header
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*{hostname}*",
+                },
+            }
+        )
+
+        if not gpus:
+            blocks.append(
+                {
+                    "type": "context",
+                    "elements": [
+                        {
+                            "type": "mrkdwn",
+                            "text": "_No GPUs discovered on this node._",
+                        }
+                    ],
+                }
+            )
+        else:
+            for gpu in gpus:
+                if gpu["state"] == "in_use":
+                    emoji = "🔴"
+                else:
+                    emoji = "🟢"
+
+                mem = f"{gpu['memory_mb']}MB" if gpu["memory_mb"] else "memory N/A"
+
+                line = (
+                    f"{emoji} GPU-{gpu['index']} · {gpu['name']} ({mem})"
+                    f" · {gpu['summary']}"
+                )
+
+                blocks.append(
+                    {
+                        "type": "context",
+                        "elements": [
+                            {
+                                "type": "mrkdwn",
+                                "text": line,
+                            }
+                        ],
+                    }
+                )
+
+        blocks.append({"type": "divider"})
+
+    # 4) Quick Actions（Two simple actions for now）
+    blocks.append(
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "⚙️ *Quick Actions*"},
+        }
+    )
+
+    blocks.append(
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "🔁 Refresh"},
+                    "action_id": "refresh_home",
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "📊 Open Dashboard"},
+                    "url": "https://example.com/aris/dashboard",  # TODO: replace with real url.
+                },
+            ],
+        }
+    )
+
+    # 5) Footer: Last updated & Version (Version number should read from config）
+    blocks.append(
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"Last updated: {updated_str}",
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": "Version: `v0.1.0-prototype`",  # TODO: load from settings.
+                },
+            ],
+        }
+    )
+
     return {
         "type": "home",
-        "callback_id": "home_view",
-        "blocks": [
-            # Header
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"👋 *Welcome back, <@{user_id}>!*",
-                },
-            },
-            {"type": "divider"},
-            # System info (TODO: replace with real query result)
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": (
-                        "🧠 *System Status:*\n"
-                        "- GPU Usage: `32%`\n"
-                        "- Running Jobs: `2`\n"
-                        "- Idle Time: `15 min`"
-                    ),
-                },
-            },
-            {"type": "divider"},
-            # Quick Actions (Placeholder, use real function in the future)
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": "⚙️ *Quick Actions*"},
-            },
-            {
-                "type": "actions",
-                "elements": [
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "Start Job"},
-                        "style": "primary",
-                        "action_id": "start_job",
-                    },
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "Check Logs"},
-                        "action_id": "check_logs",
-                    },
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "Open Dashboard"},
-                        "url": "https://your-dashboard.example.com",
-                    },
-                ],
-            },
-            {"type": "divider"},
-            {
-                "type": "context",
-                "elements": [
-                    {"type": "mrkdwn", "text": "Last updated: 2025-11-02 21:00"},
-                    {"type": "mrkdwn", "text": "Version: `v0.1.3-prototype`"},
-                ],
-            },
-        ],
+        "callback_id": "aris_home",
+        "blocks": blocks,
     }
 
 
@@ -153,7 +253,7 @@ async def handle_slack_events(
     return {"ok": True}
 
 
-@router.post("/slack/events")
+@router.post("/events")
 async def slack_events(
     request: Request,
     background: BackgroundTasks,
