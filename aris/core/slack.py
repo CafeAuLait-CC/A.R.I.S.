@@ -1,16 +1,20 @@
 import hmac
 import hashlib
-import os
 import time
-from typing import Optional
+import ssl
 
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
+import certifi
 
 from .config import settings
 
 
-slack_client = WebClient(token=settings.SLACK_BOT_TOKEN)
+_ssl_context = ssl.create_default_context(cafile=certifi.where())
+slack_client = WebClient(
+    token=settings.SLACK_BOT_TOKEN,
+    ssl=_ssl_context,
+)
 
 
 def verify_slack_signature(body: bytes, sig: str | None, ts: str | None) -> bool:
@@ -32,7 +36,9 @@ def verify_slack_signature(body: bytes, sig: str | None, ts: str | None) -> bool
     base = f"v0:{ts}:{body.decode()}".encode()
     expected = (
         "v0="
-        + hmac.new(settings.SLACK_SIGNING_SECRET.encode(), base, hashlib.sha256).hexdigest()
+        + hmac.new(
+            settings.SLACK_SIGNING_SECRET.encode(), base, hashlib.sha256
+        ).hexdigest()
     )
     return hmac.compare_digest(expected, sig)
 

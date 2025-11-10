@@ -5,6 +5,7 @@ description = "Aetherial Resource Intelligence System"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "certifi>=2025.10.5",
     "fastapi[standard]>=0.121.0",
     "psycopg2-binary>=2.9.11",
     "pydantic-settings>=2.11.0",
