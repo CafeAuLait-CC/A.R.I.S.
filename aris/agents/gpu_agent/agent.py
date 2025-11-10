@@ -218,8 +218,8 @@ def main_loop():
         ts = now()
 
         if (not registered_ok) and (
-            last_register_ts
-            and (ts - last_register_ts).total_seconds() > register_interval_secs
+            last_register_ts is None
+            or (ts - last_register_ts).total_seconds() > register_interval_secs
         ):
             # Report to ARIS the set of GPUs installed
             gpus = nsmi_query_gpus()
