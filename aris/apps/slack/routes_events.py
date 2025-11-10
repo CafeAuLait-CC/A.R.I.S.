@@ -1,3 +1,5 @@
+import json
+from urllib.parse import parse_qs
 from fastapi import APIRouter, Request, Response, Header, BackgroundTasks
 from typing import Optional
 
@@ -206,10 +208,35 @@ async def handle_slack_events(
 ):
     raw = await request.body()
 
+    # Verify Slack Signature
     if not verify_slack_signature(raw, x_slack_signature, x_slack_request_timestamp):
         return Response(status_code=401)
 
-    data = await request.json()
+    content_type = request.headers.get("content-type", "")
+
+    # ============ 1) Handle Interactivity Event (Refresh Button) ============
+    if "application/x-www-form-urlencoded" in content_type:
+        # Slack interactive payload: payload=<json>
+        qs = parse_qs(raw.decode())
+        payload_raw = qs.get("payload", ["{}"])[0]
+        data = json.loads(payload_raw)
+
+        if data.get("type") == "block_actions":
+            user = data.get("user", {}) or {}
+            user_id = user.get("id")
+            actions = data.get("actions", []) or []
+
+            for act in actions:
+                if act.get("action_id") == "refresh_home" and user_id:
+                    # Background refresh Home Tab
+                    background.add_task(publish_home_tab, user_id)
+                    break
+
+        # Immediate return 200 for interactivity requests
+        return {"ok": True}
+
+    # ============ 2) handle general event subscriptions ============
+    data = json.loads(raw.decode())
 
     # URL verification
     if data.get("type") == "url_verification":
