@@ -8,8 +8,12 @@ import time
 
 import pytz
 import requests
+from dotenv import load_dotenv
 
 # ==== Basic Configuration ====
+
+load_dotenv()
+
 AGENT_VERSION = "0.1.0"
 GATEWAY_URL = os.getenv("ARIS_GATEWAY_URL", "http://hostname")
 BASE_PATH = os.getenv("GPU_AGENT_BASE_PATH", "/internal/gpu")
@@ -213,7 +217,7 @@ def main_loop():
     while True:
         ts = now()
 
-        if (not registered_ok) or (
+        if (not registered_ok) and (
             last_register_ts
             and (ts - last_register_ts).total_seconds() > register_interval_secs
         ):
