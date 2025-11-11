@@ -1,7 +1,10 @@
 import datetime as dt
 from sqlalchemy.orm import Session
 from ...core.config import settings
+from ...core.logging import get_logger
 from . import models, repo as gpu_repo
+
+logger = get_logger(__name__)
 
 
 def _choose_user_label(u: models.User) -> str:

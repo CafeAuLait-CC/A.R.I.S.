@@ -6,6 +6,7 @@ from typing import Optional
 from ...modules.gpu.service import gpu_service
 from ...modules.gpu import views as gpu_views
 from ...core.db import SessionLocal
+from ...core.logging import get_logger
 from ...core.slack import (
     slack_client,
     verify_slack_signature,
@@ -13,6 +14,7 @@ from ...core.slack import (
 )
 
 router = APIRouter(tags=["slack-events"])
+logger = get_logger("aris.slack")
 
 
 def reply_message(channel: str, text: str = "", thread_ts: Optional[str] = None):

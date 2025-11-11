@@ -5,6 +5,9 @@ from sqlalchemy.orm import Session
 from . import models, schemas, repo as gpu_repo
 from ...core import events
 from ...core.notify import notify
+from ...core.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class GpuService:
@@ -59,7 +62,9 @@ class GpuService:
             gpu_info = schemas.AgentGpuInfo(uuid=payload.gpu_uuid, index=0)
             gpu = gpu_repo.get_or_create_gpu(db, node, gpu_info)
 
-            # TODO: log.warning(f"gpu {payload.gpu_uuid} auto-created during session start (agent not registered?)")
+            logger.warning(
+                f"gpu {payload.gpu_uuid} auto-created during session start (agent not registered?)"
+            )
 
         user = self.ensure_user_for_gpu_username(db, payload.user)
 

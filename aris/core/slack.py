@@ -8,6 +8,7 @@ from slack_sdk.errors import SlackApiError
 import certifi
 
 from .config import settings
+from .logging import get_logger
 
 
 _ssl_context = ssl.create_default_context(cafile=certifi.where())
@@ -15,6 +16,8 @@ slack_client = WebClient(
     token=settings.SLACK_BOT_TOKEN,
     ssl=_ssl_context,
 )
+
+logger = get_logger("aris.core")
 
 
 def verify_slack_signature(body: bytes, sig: str | None, ts: str | None) -> bool:
@@ -48,7 +51,6 @@ def safe_chat_post_message(channel: str, **kwargs) -> None:
     try:
         slack_client.chat_postMessage(channel=channel, **kwargs)
     except SlackApiError as e:
-        # TODO: change to logging
-        print(f"[Slack] chat_postMessage error: {e.response.data}")
+        logger.error(f"[Slack] chat_postMessage error: {e.response.data}")
     except Exception as e:
-        print(f"[Slack] chat_postMessage error: {e}")
+        logger.error(f"[Slack] chat_postMessage error: {e}")

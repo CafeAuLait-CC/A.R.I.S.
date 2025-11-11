@@ -7,7 +7,7 @@ from ...modules.gpu import schemas
 from ...modules.gpu.service import gpu_service
 
 router = APIRouter(prefix="/gpu", tags=["internal-gpu"])
-logger = get_logger(__name__)
+logger = get_logger("aris.internal")
 
 
 @router.post("/register")
@@ -57,7 +57,6 @@ def gpu_session_end(
     # Handle non-successful states gracefully instead of throwing 4xx errors directly,
     # to prevent the agent from getting stuck due to state desynchronization.
 
-    # TODO: ADD loggings:
-    # if not resp.ok:
-    #     logger.warning(f"[GPU-END] {payload.gpu_uuid}/{payload.user}: {resp.detail}")
+    if not resp.ok:
+        logger.warning(f"[GPU-END] {payload.gpu_uuid}/{payload.user}: {resp.detail}")
     return resp

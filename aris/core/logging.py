@@ -1,4 +1,4 @@
-import logging
+import logging as _logging
 import sys
 from contextvars import ContextVar
 
@@ -15,34 +15,48 @@ def get_request_id() -> str | None:
     return _request_id_ctx.get()
 
 
-class RequestIDLogFilter(logging.Filter):
+class RequestIDLogFilter(_logging.Filter):
     def filter(self, record):
         record.request_id = get_request_id() or "-"
         return True
 
 
+class HeartbeatFilter(_logging.Filter):
+    def filter(self, record: _logging.LogRecord) -> bool:
+        # record.args 通常是 ('POST /internal/gpu/session/heartbeat HTTP/1.1', status_code)
+        msg = str(record.getMessage())
+        if "/internal/gpu/session/heartbeat" in msg:
+            return False
+        return True
+
+
+def mute_heartbeat_access_log():
+    logger = _logging.getLogger("uvicorn.access")
+    logger.addFilter(HeartbeatFilter())
+
+
 def _setup_root_logger():
     """Initialize root logger (called once on import)."""
-    root = logging.getLogger()
+    root = _logging.getLogger()
     if root.handlers:
         # already configured (e.g. by uvicorn)
         return
 
-    handler = logging.StreamHandler(sys.stdout)
+    handler = _logging.StreamHandler(sys.stdout)
     fmt = "[%(asctime)s] %(levelname)-7s [%(name)s] [%(request_id)s] %(message)s"
     datefmt = "%Y-%m-%d %H:%M:%S"
-    formatter = logging.Formatter(fmt=fmt, datefmt=datefmt)
+    formatter = _logging.Formatter(fmt=fmt, datefmt=datefmt)
     handler.setFormatter(formatter)
     handler.addFilter(RequestIDLogFilter())
 
     root.addHandler(handler)
-    root.setLevel(logging.INFO)
+    root.setLevel(_logging.INFO)
 
 
-def get_logger(name: str | None = None) -> logging.Logger:
+def get_logger(name: str | None = None) -> _logging.Logger:
     """Get a logger with unified format and request ID support."""
     _setup_root_logger()
-    return logging.getLogger(name or "ARIS")
+    return _logging.getLogger(name or "ARIS")
 
 
 # Auto-init

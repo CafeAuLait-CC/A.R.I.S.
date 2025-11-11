@@ -10,6 +10,7 @@ from sqlalchemy.sql.sqltypes import (
 )
 
 from ...core.db import Base, engine
+from ...core.logging import get_logger
 
 # Import all modules that contains model definations.
 # Necessary to register SQLAlchemy models
@@ -39,6 +40,7 @@ router = APIRouter(
     prefix="/admin",
     tags=["internal-admin"],
 )
+logger = get_logger("aris.internal")
 
 
 @router.post("/init-db")

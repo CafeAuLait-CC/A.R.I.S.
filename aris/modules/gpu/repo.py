@@ -1,5 +1,8 @@
 from sqlalchemy.orm import Session
 from . import models
+from ...core.logging import get_logger
+
+logger = get_logger(__name__)
 
 # ==== User ====
 

@@ -4,9 +4,12 @@ from sqlalchemy.orm import Session
 
 from ...core.db import get_db
 from ...core.auth import get_or_create_user
+from ...core.logging import get_logger
 from ...modules.gpu.service import gpu_service
 
 router = APIRouter()
+logger = get_logger("aris.slack")
+
 
 @router.post("/commands")
 async def slack_commands(
