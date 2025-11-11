@@ -2,10 +2,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from ...core.db import get_db
+from ...core.logging import get_logger
 from ...modules.gpu import schemas
 from ...modules.gpu.service import gpu_service
 
 router = APIRouter(prefix="/gpu", tags=["internal-gpu"])
+logger = get_logger(__name__)
 
 
 @router.post("/register")
@@ -13,9 +15,14 @@ def gpu_register(
     payload: schemas.AgentRegisterRequest,
     db: Session = Depends(get_db),
 ):
+    logger.info(
+        f"Received GPU register from host={payload.hostname}, gpus={len(payload.gpus)}"
+    )
     result = gpu_service.handle_register(db, payload)
     if not result.get("ok"):
-        raise HTTPException(status_code=403, detail=result.get("detail", "invalid token"))
+        raise HTTPException(
+            status_code=403, detail=result.get("detail", "invalid token")
+        )
     return result
 
 
@@ -47,10 +54,10 @@ def gpu_session_end(
     db: Session = Depends(get_db),
 ):
     resp = gpu_service.handle_session_end(db, payload)
-    # Handle non-successful states gracefully instead of throwing 4xx errors directly, 
+    # Handle non-successful states gracefully instead of throwing 4xx errors directly,
     # to prevent the agent from getting stuck due to state desynchronization.
-    
-    # TODO: ADD loggings: 
+
+    # TODO: ADD loggings:
     # if not resp.ok:
     #     logger.warning(f"[GPU-END] {payload.gpu_uuid}/{payload.user}: {resp.detail}")
     return resp
