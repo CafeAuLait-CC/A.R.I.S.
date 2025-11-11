@@ -4,6 +4,7 @@ from fastapi import APIRouter, Request, Response, Header, BackgroundTasks
 from typing import Optional
 
 from ...modules.gpu.service import gpu_service
+from ...modules.gpu import views as gpu_views
 from ...core.db import SessionLocal
 from ...core.slack import (
     slack_client,
@@ -28,7 +29,7 @@ def build_home_view(user_id: str):
     """Pull real-time GPU status from DB"""
     db = SessionLocal()
     try:
-        cluster = gpu_service.get_realtime_cluster_view(db)
+        cluster = gpu_views.get_realtime_cluster_view(db)
     finally:
         db.close()
 
