@@ -253,6 +253,10 @@ def main_loop():
 
         # Actual key set that is currently active
         current_keys = set()
+
+        # Gather all heartbeat items
+        heartbeat_items = []
+
         for uuid, user_pids in by_uuid_users.items():
             for user, pids in user_pids.items():
                 key = (uuid, user)
@@ -278,16 +282,24 @@ def main_loop():
                     sess = sessions[key]
                     sess.last_seen = ts
 
-                    post(
-                        "/session/heartbeat",
+                    heartbeat_items.append(
                         {
-                            "hostname": HOSTNAME,
                             "gpu_uuid": uuid,
                             "user": user,
                             "ts": ts.isoformat(),
                             "pids": sorted(list(pids)),
                         },
                     )
+
+        # Send one heartbeat request for all sessions
+        if heartbeat_items:
+            post(
+                "/session/heartbeat",
+                {
+                    "hostname": HOSTNAME,
+                    "items": heartbeat_items,
+                },
+            )
 
         # Find sessions that no longer exist, check for ending process
         to_delete = []
