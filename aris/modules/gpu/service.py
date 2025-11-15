@@ -119,42 +119,55 @@ class GpuService:
     def handle_session_heartbeat(
         self, db: Session, payload: schemas.AgentSessionHeartbeatRequest
     ) -> schemas.AgentSessionResponse:
+        """
+        Handle batched heartbeat updates from GPU Agent.
+        Each item reprents (gpu_uuid, user) state observed at the current polling.
+        """
         node = gpu_repo.get_or_create_node(db, payload.hostname)
-        gpu = gpu_repo.get_gpu_by_uuid(db, payload.gpu_uuid)
-        if not gpu:
-            return schemas.AgentSessionResponse(ok=False, detail="unknown gpu")
+        updated_count = 0
 
-        user = self.ensure_user_for_gpu_username(db, payload.user)
+        for item in payload.items:
+            gpu = gpu_repo.get_gpu_by_uuid(db, item.gpu_uuid)
+            if not gpu:
+                # return schemas.AgentSessionResponse(ok=False, detail="unknown gpu")
+                # TODO: Handle unknown gpu.
+                continue
 
-        sess = (
-            db.query(models.GpuSession)
-            .filter(
-                models.GpuSession.user_id == user.id,
-                models.GpuSession.gpu_id == gpu.id,
-                models.GpuSession.state == models.SessionState.RUNNING,
+            user = self.ensure_user_for_gpu_username(db, item.user)
+
+            sess = (
+                db.query(models.GpuSession)
+                .filter(
+                    models.GpuSession.user_id == user.id,
+                    models.GpuSession.gpu_id == gpu.id,
+                    models.GpuSession.state == models.SessionState.RUNNING,
+                )
+                .order_by(models.GpuSession.started_at.desc())
+                .first()
             )
-            .order_by(models.GpuSession.started_at.desc())
-            .first()
-        )
 
-        if not sess:
-            # started session lost, create a new one
-            sess = models.GpuSession(
-                user_id=user.id,
-                gpu_id=gpu.id,
-                node_id=node.id,
-                state=models.SessionState.RUNNING,
-                started_at=payload.ts,
-                heartbeat_at=payload.ts,
-                created_by="agent",
-                note="auto-created by heartbeat",
-            )
-            db.add(sess)
-        else:
-            sess.heartbeat_at = payload.ts
+            if not sess:
+                # started session lost, create a new one
+                sess = models.GpuSession(
+                    user_id=user.id,
+                    gpu_id=gpu.id,
+                    node_id=node.id,
+                    state=models.SessionState.RUNNING,
+                    started_at=item.ts,
+                    heartbeat_at=item.ts,
+                    created_by="agent",
+                    note="auto-created by heartbeat",
+                )
+                db.add(sess)
+            else:
+                sess.heartbeat_at = item.ts
+
+            updated_count += 1
 
         db.commit()
-        return schemas.AgentSessionResponse(ok=True, session_id=sess.id)
+        return schemas.AgentSessionResponse(
+            ok=True, detail=f"updated {updated_count} sessions"
+        )
 
     # ===== /internal/gpu/session/end =====
 

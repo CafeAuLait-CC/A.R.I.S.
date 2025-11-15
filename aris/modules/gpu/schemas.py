@@ -32,12 +32,16 @@ class AgentSessionStartRequest(BaseModel):
     started_at: datetime
 
 
-class AgentSessionHeartbeatRequest(BaseModel):
-    hostname: str
+class AgentSessionHeartbeatItem(BaseModel):
     gpu_uuid: str
     user: str
-    pids: List[int] = Field(default_factory=list)
+    pids: list[int] = Field(default_factory=list)
     ts: datetime
+
+
+class AgentSessionHeartbeatRequest(BaseModel):
+    hostname: str
+    items: list[AgentSessionHeartbeatItem]
 
 
 class AgentSessionEndRequest(BaseModel):
