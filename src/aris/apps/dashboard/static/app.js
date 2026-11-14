@@ -40,6 +40,25 @@ function gpuCard(gpu,node,connected){
   const trend=chart(gpu,node.observed_at,known);card.append(trend.box);const note=make("div","chart-note");note.append(make("span","","利用率 · 最近 "+trend.count+" 次真实采样"),make("span","",known?"0 — 100%":"等待新鲜数据"));card.append(note);
   const bottom=make("div","gpu-bottom"), temp=make("span","","温度");temp.append(make("strong","",known && gpu.temperature_c!==null?gpu.temperature_c+" °C":"—"));bottom.append(temp,make("span","","采样 "+clock(node.observed_at)));card.append(bottom);return card;
 }
+const qualityLabel = (quality) => ({warming:"建立采样基线",error:"采集异常",unsupported:"不支持",unknown:"未知"})[quality]||"等待新鲜采样";
+function systemPanel(node,connected){
+  const system=connected && node.system_freshness==="CURRENT"?node.system:null;
+  const compute=connected && node.compute_freshness==="CURRENT"?node.compute:null;
+  const cpu=system?.cpu, memory=system?.memory;
+  const cpuKnown=cpu?.quality==="ok", memoryKnown=memory?.quality==="ok", computeKnown=compute?.quality==="ok";
+  const panel=make("div","system-panel"), metrics=make("div","system-metrics");
+  const entries=[
+    ["CPU 使用率",cpuKnown?cpu.utilization_percent.toFixed(1)+"%":"—",cpuKnown?cpu.logical_count+" 逻辑核心 · "+cpu.window_seconds.toFixed(1)+" 秒窗口":qualityLabel(cpu?.quality)],
+    ["系统内存",memoryKnown?((memory.total_bytes-memory.available_bytes)/2**30).toFixed(1)+" / "+(memory.total_bytes/2**30).toFixed(1)+" GiB":"—",memoryKnown?"可用 "+(memory.available_bytes/2**30).toFixed(1)+" GiB（内核估计）":qualityLabel(memory?.quality)],
+    ["报告的计算进程",computeKnown?String(compute.reported_processes):"—",computeKnown?"驱动报告 · 用户归属未知":qualityLabel(compute?.quality)],
+  ];
+  for(const [label,value,note] of entries){const cell=make("div","system-cell");cell.append(make("span","data-label",label),make("strong","system-value",value),make("span","metric-note",note));metrics.append(cell);}
+  const stamps=make("div","system-stamps");stamps.append(make("span","","CPU / 内存采样 "+clock(node.system_observed_at)),make("span","","计算进程采样 "+clock(node.compute_observed_at)+" · 约每15秒查询"));
+  panel.append(metrics,stamps);return panel;
+}
+function normalizedSnapshot(snapshot){
+  return {...snapshot,nodes:(snapshot.nodes||[]).map(item=>item.node?({...item,...item.node}):item)};
+}
 function render(snapshot,connected){
   const nodes=snapshot.nodes||[], gpus=nodes.flatMap(n=>n.gpus.filter(g=>g.present).map(g=>({gpu:g,node:n})));
   const known=gpus.filter(x=>connected && x.node.status==="ONLINE" && x.node.telemetry_status==="CURRENT" && x.gpu.observed_state!=="unknown");
@@ -61,7 +80,7 @@ function render(snapshot,connected){
     meta.append(make("span","",connected?(node.preview_label||qualityNames[node.telemetry_status]||"未知"):"数据新鲜度未知"));heading.append(title,meta);
     const grid=make("div","gpu-grid");for(const gpu of node.gpus) grid.append(gpuCard(gpu,node,connected));
     if(!node.gpus.length) grid.append(make("div","empty-state","该节点尚无 GPU 观测数据。"));
-    section.append(heading,grid);fragment.append(section);
+    section.append(heading,systemPanel(node,connected),grid);fragment.append(section);
   }
   $("nodes").replaceChildren(fragment);
 }
@@ -73,6 +92,8 @@ function previewSnapshot(){
     const base=archived.get(id)||{}, preview=previews.get(id), fresh=preview?.quality==="live";
     const gpus=fresh?preview.gpus.map(g=>({...g,present:true,observed_state:g.utilization_percent>0||g.memory_used_mib>0?"busy":"idle"})):(base.gpus||[]);
     return {...base,node_id:id,hostname:preview?.hostname||base.hostname||"",gpus,
+      system:preview?.system||null,system_freshness:preview?.system_freshness||"MISSING",system_observed_at:preview?.system_observed_at,
+      compute:preview?.compute||null,compute_freshness:preview?.compute_freshness||"MISSING",compute_observed_at:preview?.compute_observed_at,
       status:fresh?"ONLINE":preview?.connected?"STALE":"OFFLINE",observed_at:preview?.observed_at,
       telemetry_status:fresh?"CURRENT":"MISSING",
       preview_label:({live:"实时预览 · 未归档",waiting:"等待首帧",stale:"预览已超时",error:"实时采集异常",offline:"实时通道未连接"})[preview?.quality]||"等待 Vega 实时通道"};
@@ -102,7 +123,7 @@ function connect(){
   if(!liveMode){healthy=false;if(lastSnapshot)render(lastSnapshot,false);}
   source=new EventSource("/events");
   source.addEventListener("resources",event=>{
-    try{const snapshot=JSON.parse(event.data);lastSnapshot=snapshot;if(!liveMode){lastReceived=Date.now();healthy=true;connection("归档观测","connected");notice("");render(snapshot,true);}}catch{if(!liveMode)unavailable("无法解析状态数据，正在等待下一次更新。");}
+    try{const snapshot=normalizedSnapshot(JSON.parse(event.data));lastSnapshot=snapshot;if(!liveMode){lastReceived=Date.now();healthy=true;connection("归档观测","connected");notice("");render(snapshot,true);}}catch{if(!liveMode)unavailable("无法解析状态数据，正在等待下一次更新。");}
   });
   source.addEventListener("dependency_error",()=>{if(!liveMode)unavailable("资源数据暂时不可用。指标按未知显示，连接会自动重试。");});
   source.onerror=()=>{if(!liveMode)unavailable("状态连接已断开。指标按未知显示，正在自动重连。");};

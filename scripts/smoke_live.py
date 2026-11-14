@@ -14,14 +14,15 @@ import uvicorn
 from aris.apps.agent.collector import collect, parse_nvidia_csv
 from aris.apps.agent.config import AgentSettings
 from aris.apps.agent.live import LiveClient
+from aris.apps.agent.resource_sampler import ResourceSampler
 from aris.apps.agent.sampler import Sampler
 from aris.apps.api.main import create_app
 from aris.core.config import Settings
 from aris.interfaces.slack.config import SlackSettings
-from aris.modules.vega.live_schemas import LiveSnapshot
+from aris.modules.vega.live_schemas import LiveSnapshot, ResourceLiveSnapshot
 
 
-def smoke(real_gpu: bool) -> dict[str, object]:
+def smoke(real_gpu: bool, resources: bool = False) -> dict[str, object]:
     root = Path(".local")
     root.mkdir(exist_ok=True)
     calls: list[float] = []
@@ -67,8 +68,9 @@ def smoke(real_gpu: bool) -> dict[str, object]:
                 api_url=base,
                 token="live-smoke-node-credential",
                 live_enabled=True,
+                resource_enabled=resources,
             ),
-            Sampler(sample),
+            ResourceSampler(sample) if resources else Sampler(sample),
         )
         server_thread.start()
         try:
@@ -84,7 +86,7 @@ def smoke(real_gpu: bool) -> dict[str, object]:
             with httpx.Client(timeout=10, trust_env=False) as client:
                 with client.stream(
                     "GET",
-                    base + "/internal/v1/live",
+                    base + ("/internal/v2/live" if resources else "/internal/v1/live"),
                     headers={"Authorization": "Bearer " + config.read_token.get_secret_value()},
                 ) as response:
                     response.raise_for_status()
@@ -94,7 +96,9 @@ def smoke(real_gpu: bool) -> dict[str, object]:
                             raise RuntimeError("live samples did not arrive")
                         if not line.startswith("data: "):
                             continue
-                        snapshot = LiveSnapshot.model_validate_json(line[6:])
+                        snapshot = (
+                            ResourceLiveSnapshot if resources else LiveSnapshot
+                        ).model_validate_json(line[6:])
                         for node in snapshot.nodes:
                             if node.quality == "live" and (
                                 not frames or node.seq != frames[-1].seq
@@ -104,6 +108,25 @@ def smoke(real_gpu: bool) -> dict[str, object]:
                             break
             assert len(frames) >= 3
             assert len({frame.observed_at for frame in frames}) == len(frames)
+            resource_result = {}
+            if resources:
+                last = frames[-1]
+                assert last.system is not None and last.compute is not None
+                assert len({frame.system_observed_at for frame in frames}) == len(frames)
+                assert len({frame.compute_observed_at for frame in frames}) == 1
+                if real_gpu:
+                    assert last.system.cpu.quality == "ok"
+                    assert last.system.memory.quality == "ok"
+                    assert last.compute.quality == "ok"
+                resource_result = {
+                    "system_freshness": last.system_freshness,
+                    "cpu_quality": last.system.cpu.quality,
+                    "cpu_logical_count": last.system.cpu.logical_count,
+                    "memory_quality": last.system.memory.quality,
+                    "compute_quality": last.compute.quality,
+                    "compute_own_observation_time_preserved": True,
+                    "process_user_scope": last.compute.user_scope,
+                }
             time.sleep(1.5)
             calls_after_stop = len(calls)
             time.sleep(1.2)
@@ -121,6 +144,7 @@ def smoke(real_gpu: bool) -> dict[str, object]:
                 "driver_reads_stopped_without_viewers": True,
                 "database_created": database.exists(),
                 "spool_used": False,
+                **resource_result,
             }
         finally:
             if collector.thread.is_alive():
@@ -133,5 +157,6 @@ def smoke(real_gpu: bool) -> dict[str, object]:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--real-gpu", action="store_true")
+    parser.add_argument("--resources", action="store_true")
     args = parser.parse_args()
-    print(json.dumps(smoke(args.real_gpu)))
+    print(json.dumps(smoke(args.real_gpu, args.resources)))

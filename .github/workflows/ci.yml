@@ -33,6 +33,8 @@ jobs:
       - run: ./scripts/check
       - name: On-demand outbound WebSocket preview and stop-on-unsubscribe
         run: ./scripts/uv run --locked --extra server python scripts/smoke_live.py
+      - name: Component resource preview with independent timestamps and no database
+        run: ./scripts/uv run --locked --extra server python scripts/smoke_live.py --resources
       - name: PostgreSQL contracts, migrations and concurrent ingestion
         env:
           ARIS_TEST_DATABASE_URL: postgresql+psycopg://aris_test:ci-test-only-password@127.0.0.1:5432/aris_test

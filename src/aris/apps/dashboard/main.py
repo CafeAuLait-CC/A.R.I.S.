@@ -20,7 +20,7 @@ from starlette.responses import Response
 
 from aris.core.config import Settings
 from aris.core.db import build_engine, session_factory
-from aris.modules.vega.live_schemas import LiveSnapshot
+from aris.modules.vega.live_schemas import LiveSnapshot, ResourceLiveSnapshot
 from aris.modules.vega.service import VegaService
 
 logger = logging.getLogger(__name__)
@@ -28,12 +28,17 @@ ASSETS = Path(__file__).with_name("static")
 
 
 async def resource_events(
-    service: VegaService, disconnected: Callable[[], Awaitable[bool]], interval: float = 15
+    service: VegaService,
+    disconnected: Callable[[], Awaitable[bool]],
+    interval: float = 15,
+    resource_mode: bool = False,
 ) -> AsyncIterator[str]:
     yield "retry: 3000\n\n"
     while not await disconnected():
         try:
-            snapshot = await run_in_threadpool(service.status)
+            snapshot = await run_in_threadpool(
+                service.resource_status if resource_mode else service.status
+            )
             yield "event: resources\ndata: " + snapshot.model_dump_json() + "\n\n"
         except Exception as exc:
             logger.warning("dashboard_snapshot failure_type=%s", type(exc).__name__)
@@ -46,7 +51,10 @@ async def resource_events(
 
 
 async def preview_proxy(
-    config: Settings, api_url: str, disconnected: Callable[[], Awaitable[bool]]
+    config: Settings,
+    api_url: str,
+    disconnected: Callable[[], Awaitable[bool]],
+    resource_mode: bool = False,
 ) -> AsyncIterator[str]:
     yield "retry: 3000\n\n"
     try:
@@ -55,7 +63,8 @@ async def preview_proxy(
         ) as client:
             async with client.stream(
                 "GET",
-                api_url.rstrip("/") + "/internal/v1/live",
+                api_url.rstrip("/")
+                + ("/internal/v2/live" if resource_mode else "/internal/v1/live"),
                 headers={"Authorization": "Bearer " + config.read_token.get_secret_value()},
             ) as response:
                 response.raise_for_status()
@@ -65,7 +74,9 @@ async def preview_proxy(
                     if line.startswith("data: "):
                         if len(line) > 1048576:
                             raise ValueError("preview too large")
-                        snapshot = LiveSnapshot.model_validate_json(line[6:])
+                        snapshot = (
+                            ResourceLiveSnapshot if resource_mode else LiveSnapshot
+                        ).model_validate_json(line[6:])
                         yield "event: preview\ndata: " + snapshot.model_dump_json() + "\n\n"
     except Exception as exc:
         logger.warning("dashboard_preview failure_type=%s", type(exc).__name__)
@@ -77,6 +88,7 @@ def create_dashboard(
     interval: float = 15,
     time_zone: str = "UTC",
     api_url: str | None = None,
+    resource_mode: bool = False,
 ) -> FastAPI:
     if not 1 <= interval <= 30:
         raise ValueError("dashboard interval must be between 1 and 30 seconds")
@@ -160,7 +172,7 @@ def create_dashboard(
     @app.get("/events")
     async def events(request: Request) -> StreamingResponse:
         return StreamingResponse(
-            resource_events(service, request.is_disconnected, interval),
+            resource_events(service, request.is_disconnected, interval, resource_mode),
             media_type="text/event-stream",
             headers={"X-Accel-Buffering": "no"},
         )
@@ -175,7 +187,7 @@ def create_dashboard(
                 media_type="text/event-stream",
             )
         return StreamingResponse(
-            preview_proxy(config, api_url, request.is_disconnected),
+            preview_proxy(config, api_url, request.is_disconnected, resource_mode),
             media_type="text/event-stream",
             headers={"X-Accel-Buffering": "no"},
         )
@@ -190,9 +202,14 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--time-zone", default="UTC", help="IANA display time zone")
     parser.add_argument("--api-url", help="Control-plane URL for optional live preview")
+    parser.add_argument(
+        "--resources", action="store_true", help="Use V2 CPU/RAM/compute observations"
+    )
     args = parser.parse_args()
     uvicorn.run(
-        create_dashboard(time_zone=args.time_zone, api_url=args.api_url),
+        create_dashboard(
+            time_zone=args.time_zone, api_url=args.api_url, resource_mode=args.resources
+        ),
         host="127.0.0.1",
         port=args.port,
         access_log=False,

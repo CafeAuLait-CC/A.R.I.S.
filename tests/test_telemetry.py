@@ -86,6 +86,7 @@ def test_external_paths_use_vega_collector_without_redundant_api_prefix(client):
         "/slack/commands",
         "/slack/events",
         "/internal/v1/live",
+        "/internal/v2/live",
         "/vega/v2/telemetry/batch",
         "/public/v2/resources",
     }

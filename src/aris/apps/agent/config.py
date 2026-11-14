@@ -17,6 +17,7 @@ class AgentSettings(BaseSettings):
     interval_seconds: int = Field(default=15, ge=1)
     max_buffered_batches: int = Field(default=10000, ge=1)
     live_enabled: bool = False
+    resource_enabled: bool = False
     flush_max_messages: int = Field(default=100, ge=3, le=1000)
     flush_budget_seconds: float = Field(default=5, ge=1, le=30)
 

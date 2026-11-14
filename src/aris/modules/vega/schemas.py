@@ -5,6 +5,8 @@ from pydantic import AwareDatetime, Field, model_validator
 
 from aris.core.contracts import Contract
 
+Capability = Literal["gpu.telemetry/v1", "agent.heartbeat/v1", "node.resources/v2"]
+
 
 class GpuSample(Contract):
     gpu_uuid: str = Field(min_length=1, max_length=128)
@@ -55,9 +57,7 @@ class TelemetryBatch(AgentEnvelope):
 class Heartbeat(AgentEnvelope):
     schema_version: Literal["aris.heartbeat/v1"] = "aris.heartbeat/v1"
     collector_status: Literal["ok", "error"]
-    capabilities: list[Literal["gpu.telemetry/v1", "agent.heartbeat/v1"]] = Field(
-        min_length=1, max_length=2
-    )
+    capabilities: list[Capability] = Field(min_length=1, max_length=3)
 
     @model_validator(mode="after")
     def unique_capabilities(self) -> "Heartbeat":

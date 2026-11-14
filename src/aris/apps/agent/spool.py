@@ -55,8 +55,10 @@ class Spool:
         assert isinstance(message, TelemetryBatch)
         return message
 
-    def enqueue_heartbeat(self, hostname: str, status: Literal["ok", "error"]) -> Heartbeat:
-        message = self._enqueue(hostname, None, status)
+    def enqueue_heartbeat(
+        self, hostname: str, status: Literal["ok", "error"], *, resource_enabled: bool = False
+    ) -> Heartbeat:
+        message = self._enqueue(hostname, None, status, resource_enabled=resource_enabled)
         assert isinstance(message, Heartbeat)
         return message
 
@@ -76,6 +78,7 @@ class Spool:
         status: Literal["ok", "error"] = "ok",
         observed_at: datetime | None = None,
         resources: ResourceObservation | None = None,
+        resource_enabled: bool = False,
     ) -> AgentReport:
         now = datetime.now(UTC)
         kind = "heartbeat" if samples is None and resources is None else "telemetry"
@@ -106,7 +109,10 @@ class Spool:
                     {
                         **envelope,
                         "collector_status": status,
-                        "capabilities": ["gpu.telemetry/v1", "agent.heartbeat/v1"],
+                        "capabilities": [
+                            "node.resources/v2" if resource_enabled else "gpu.telemetry/v1",
+                            "agent.heartbeat/v1",
+                        ],
                     }
                 )
             else:

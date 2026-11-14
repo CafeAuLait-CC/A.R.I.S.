@@ -63,29 +63,40 @@ def tick(
     settings: AgentSettings,
     client: httpx.Client,
     fixture: Path | None = None,
-    sampler: Sampler | None = None,
+    sampler: Sampler | ResourceSampler | None = None,
 ) -> dict[str, int]:
     error: Exception | None = None
     collected = False
     try:
-        observation = sampler.sample() if sampler else None
-        samples = (
-            observation.gpus
-            if observation
-            else (
-                TypeAdapter(list[GpuSample]).validate_json(fixture.read_text())
-                if fixture
-                else collect()
+        if isinstance(sampler, ResourceSampler):
+            resources = sampler.sample()
+            collected = resources.gpu.quality == "ok"
+            spool.enqueue_resource(socket.gethostname(), resources)
+            if not collected:
+                error = CollectionFailed("GPU collection unavailable")
+        else:
+            observation = sampler.sample() if sampler else None
+            samples = (
+                observation.gpus
+                if observation
+                else (
+                    TypeAdapter(list[GpuSample]).validate_json(fixture.read_text())
+                    if fixture
+                    else collect()
+                )
             )
-        )
-        collected = True
-        spool.enqueue(
-            socket.gethostname(), samples, observation.observed_at if observation else None
-        )
+            collected = True
+            spool.enqueue(
+                socket.gethostname(), samples, observation.observed_at if observation else None
+            )
     except Exception as exc:
         error = exc
     try:
-        heartbeat = spool.enqueue_heartbeat(socket.gethostname(), "ok" if collected else "error")
+        heartbeat = spool.enqueue_heartbeat(
+            socket.gethostname(),
+            "ok" if collected else "error",
+            resource_enabled=isinstance(sampler, ResourceSampler),
+        )
     finally:
         # Even a full spool or a broken collector must allow the backlog to drain.
         delivered = flush(spool, settings, client)
@@ -138,7 +149,8 @@ def main() -> None:
     os.umask(0o077)
     settings = AgentSettings()
     spool = Spool(settings.spool_path, settings.id, settings.node_id, settings.max_buffered_batches)
-    sampler = Sampler(
+    sampler_type = ResourceSampler if settings.resource_enabled else Sampler
+    sampler = sampler_type(
         (lambda: TypeAdapter(list[GpuSample]).validate_json(args.fixture.read_text()))
         if args.fixture
         else collect

@@ -6,6 +6,11 @@ from uuid import UUID
 from pydantic import AwareDatetime, Field, model_validator
 
 from aris.core.contracts import Contract
+from aris.modules.vega.resource_schemas import (
+    ComputeObservation,
+    ResourceObservation,
+    SystemObservation,
+)
 from aris.modules.vega.schemas import GpuSample
 
 
@@ -61,3 +66,47 @@ class LiveSnapshot(Contract):
     schema_version: Literal["aris.live-preview/v1"] = "aris.live-preview/v1"
     generated_at: AwareDatetime
     nodes: list[LiveNode]
+
+
+class ResourceLiveHello(Contract):
+    schema_version: Literal["aris.live/v2"] = "aris.live/v2"
+    type: Literal["hello"] = "hello"
+    agent_id: str = Field(min_length=1, max_length=128)
+    node_id: str = Field(min_length=1, max_length=128)
+    hostname: str = Field(min_length=1, max_length=256)
+    session_id: UUID
+
+
+class ResourceLiveFrame(Contract):
+    schema_version: Literal["aris.live/v2"] = "aris.live/v2"
+    type: Literal["sample"] = "sample"
+    session_id: UUID
+    seq: int = Field(ge=1, le=9223372036854775807)
+    resources: ResourceObservation
+
+    @property
+    def observed_at(self) -> AwareDatetime:
+        return self.resources.gpu.observed_at
+
+    @property
+    def quality(self) -> Literal["ok", "error"]:
+        return "ok" if self.resources.gpu.quality == "ok" else "error"
+
+    @property
+    def gpus(self) -> list[GpuSample]:
+        return self.resources.gpu.gpus
+
+
+class ResourceLiveNode(LiveNode):
+    system_freshness: Literal["CURRENT", "STALE", "MISSING"]
+    system_observed_at: AwareDatetime | None = None
+    system: SystemObservation | None = None
+    compute_freshness: Literal["CURRENT", "STALE", "MISSING"]
+    compute_observed_at: AwareDatetime | None = None
+    compute: ComputeObservation | None = None
+
+
+class ResourceLiveSnapshot(Contract):
+    schema_version: Literal["aris.live-preview/v2"] = "aris.live-preview/v2"
+    generated_at: AwareDatetime
+    nodes: list[ResourceLiveNode]
