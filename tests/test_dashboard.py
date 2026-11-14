@@ -1,0 +1,101 @@
+import asyncio
+import json
+
+import pytest
+from fastapi.testclient import TestClient
+
+from aris.apps.dashboard.main import create_dashboard, resource_events
+from aris.core.db import session_factory
+from aris.modules.vega.service import VegaService
+from tests.conftest import AGENT_TOKEN, READ_TOKEN
+from tests.test_telemetry import batch, post
+
+
+def local_client(settings, **kwargs):
+    return TestClient(
+        create_dashboard(settings),
+        base_url="http://127.0.0.1",
+        client=("127.0.0.1", 50000),
+        **kwargs,
+    )
+
+
+def test_dashboard_is_local_and_has_no_browser_credentials(settings):
+    with local_client(settings) as client:
+        response = client.get("/")
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store"
+        assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
+        assert "资源观测" in response.text
+        assert READ_TOKEN not in response.text
+        assert AGENT_TOKEN not in response.text
+        script = client.get("/assets/app.js")
+        assert script.status_code == 200
+        assert READ_TOKEN not in script.text
+        assert AGENT_TOKEN not in script.text
+
+
+def test_dashboard_rejects_remote_client_host_rebinding_and_foreign_origin(settings):
+    with local_client(settings) as client:
+        assert client.get("/", headers={"host": "evil.example"}).status_code == 400
+        assert client.get("/events", headers={"origin": "https://evil.example"}).status_code == 403
+        assert client.get("/events", headers={"origin": "http://[invalid"}).status_code == 403
+    with TestClient(
+        create_dashboard(settings), base_url="http://localhost", client=("203.0.113.1", 50000)
+    ) as client:
+        assert client.get("/").status_code == 403
+
+
+def test_stream_preserves_fact_freshness_and_never_exposes_tokens(client, settings):
+    assert post(client, batch(seconds_ago=90)).status_code == 200
+    service = VegaService(session_factory(client.app.state.engine), settings)
+
+    async def connected():
+        return False
+
+    async def consume():
+        stream = resource_events(service, connected)
+        assert await anext(stream) == "retry: 3000\n\n"
+        frame = await anext(stream)
+        assert frame.startswith("event: resources\ndata: ")
+        snapshot = json.loads(frame.split("data: ", 1)[1])
+        node = snapshot["nodes"][0]
+        assert node["status"] == "STALE"
+        assert node["gpus"][0]["observed_state"] == "unknown"
+        assert READ_TOKEN not in frame and AGENT_TOKEN not in frame
+        await stream.aclose()
+
+    asyncio.run(consume())
+
+
+def test_stream_reports_dependency_failure_without_leaking_exception():
+    class BrokenService:
+        def status(self):
+            raise RuntimeError("password=private-database-password")
+
+    async def connected():
+        return False
+
+    async def consume():
+        stream = resource_events(BrokenService(), connected)
+        await anext(stream)
+        frame = await anext(stream)
+        assert "event: dependency_error" in frame
+        assert "DEPENDENCY_UNAVAILABLE" in frame
+        assert "private-database-password" not in frame
+        await stream.aclose()
+
+    asyncio.run(consume())
+
+
+def test_stream_stops_when_browser_disconnects(settings):
+    async def disconnected():
+        return True
+
+    async def consume():
+        stream = resource_events(None, disconnected)
+        await anext(stream)
+        with pytest.raises(StopAsyncIteration):
+            await anext(stream)
+
+    asyncio.run(consume())
