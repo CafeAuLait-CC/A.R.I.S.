@@ -8,7 +8,7 @@ from aris.core.storage import inspect_storage
 from aris.modules.vega.service import VegaService
 
 
-def main() -> None:
+def run() -> None:
     parser = argparse.ArgumentParser(description="Read-only capacity and retention preview")
     parser.add_argument("--older-than-days", type=int, help="Count old messages; never delete them")
     args = parser.parse_args()
@@ -37,9 +37,13 @@ def main() -> None:
         engine.dispose()
 
 
-if __name__ == "__main__":
+def main() -> None:
     try:
-        main()
+        run()
     except Exception as exc:
         print(json.dumps({"error_type": type(exc).__name__, "read_only": True}))
         raise SystemExit(1) from None
+
+
+if __name__ == "__main__":
+    main()
