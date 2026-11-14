@@ -46,6 +46,16 @@ def test_dashboard_rejects_remote_client_host_rebinding_and_foreign_origin(setti
         assert client.get("/").status_code == 403
 
 
+def test_dashboard_display_zone_is_explicit_and_validated(settings):
+    app = create_dashboard(settings, interval=5, time_zone="Europe/London")
+    with TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 50000)) as client:
+        text = client.get("/").text
+        assert 'data-time-zone="Europe/London"' in text
+        assert 'data-refresh-seconds="5"' in text
+    with pytest.raises(ValueError, match="time zone"):
+        create_dashboard(settings, time_zone="not-a-time-zone")
+
+
 def test_stream_preserves_fact_freshness_and_never_exposes_tokens(client, settings):
     assert post(client, batch(seconds_ago=90)).status_code == 200
     service = VegaService(session_factory(client.app.state.engine), settings)

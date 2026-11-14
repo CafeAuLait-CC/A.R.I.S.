@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-time-zone="UTC" data-refresh-seconds="3">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -22,13 +22,13 @@
       <div class="overview-cell"><span class="metric-label">在线节点</span><strong id="online-count">—</strong><span id="node-count" class="metric-note">等待观测</span></div>
       <div class="overview-cell"><span class="metric-label">已发现 GPU</span><strong id="gpu-count">—</strong><span id="known-count" class="metric-note">等待观测</span></div>
       <div class="overview-cell"><span class="metric-label">已知显存使用</span><strong id="memory-total">—</strong><span id="memory-note" class="metric-note">仅汇总新鲜观测</span></div>
-      <div class="overview-cell time-cell"><span class="metric-label">状态接收时间</span><strong id="received-time">—</strong><span class="metric-note">约每 3 秒自动更新</span></div>
+      <div class="overview-cell time-cell"><span class="metric-label">状态接收时间</span><strong id="received-time">—</strong><span id="refresh-note" class="metric-note">约每 3 秒自动更新</span></div>
     </section>
     <div id="notice" class="notice" role="status" hidden></div>
     <section id="nodes" aria-label="节点与 GPU">
       <div class="empty-state"><div class="empty-symbol">◎</div><h2>等待 Vega 观测数据</h2><p>连接后将在这里显示节点与 GPU 状态。</p></div>
     </section>
-    <footer><span><span class="footer-dot"></span>只读观测 · 预约可用性尚未评估</span><span>页面更新频率与硬件采样频率分别计算</span></footer>
+    <footer><span><span class="footer-dot"></span>只读观测 · 预约可用性尚未评估</span><span>页面更新频率与硬件采样频率分别计算 · <span id="time-zone">UTC</span></span></footer>
   </main>
 </body>
 </html>

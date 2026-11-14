@@ -2,7 +2,9 @@
 const $ = (id) => document.getElementById(id);
 const samplesByGpu = new Map();
 let source = null, lastSnapshot = null, lastReceived = 0, healthy = false;
-const clock = (value) => value ? new Date(value).toLocaleTimeString("zh-CN", {hour12:false}) : "—";
+const displayZone=document.documentElement.dataset.timeZone||"UTC";
+const refreshSeconds=Number(document.documentElement.dataset.refreshSeconds)||3;
+const clock = (value) => value ? new Date(value).toLocaleTimeString("zh-CN", {hour12:false,timeZone:displayZone}) : "—";
 const make = (tag, className, text) => {const el=document.createElement(tag); if(className) el.className=className; if(text!==undefined) el.textContent=text; return el;};
 const qualityNames = {CURRENT:"采样新鲜",STALE:"采样陈旧",MISSING:"尚无采样",ERROR:"采集异常"};
 function connection(label, mode){$("connection").textContent=label; $("connection").className="connection "+mode;}
@@ -72,6 +74,9 @@ function connect(){
   source.onerror=()=>unavailable("状态连接已断开。指标按未知显示，正在自动重连。");
 }
 $("reconnect").addEventListener("click",connect);
-setInterval(()=>{if(healthy && Date.now()-lastReceived>10000)unavailable("超过 10 秒未收到状态。指标按未知显示，正在等待连接恢复。");},1000);
+const watchdogMs=Math.max(10000,refreshSeconds*3000+1000);
+setInterval(()=>{if(healthy && Date.now()-lastReceived>watchdogMs)unavailable("长时间未收到状态。指标按未知显示，正在等待连接恢复。");},1000);
 window.addEventListener("pagehide",()=>source&&source.close());
+$("time-zone").textContent=displayZone;
+$("refresh-note").textContent="约每 "+refreshSeconds+" 秒自动更新";
 connect();
