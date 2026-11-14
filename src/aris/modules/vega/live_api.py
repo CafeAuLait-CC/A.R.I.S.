@@ -14,6 +14,7 @@ from aris.modules.vega.live import CollectorConnection, LiveHub, Viewer
 from aris.modules.vega.live_schemas import (
     LiveFrame,
     LiveHello,
+    RelayStatus,
     ResourceLiveFrame,
     ResourceLiveHello,
 )
@@ -117,5 +118,10 @@ def build_live_router(hub: LiveHub, settings: Settings) -> APIRouter:
     @router.get("/internal/v2/live", tags=["live-preview-v2"])
     async def subscribe_resources(request: Request) -> StreamingResponse:
         return await subscription(request, True)
+
+    @router.get("/internal/v1/live/status", tags=["live-preview-status"])
+    async def relay_status(request: Request) -> RelayStatus:
+        require_read(settings, request.headers.get("authorization"))
+        return hub.relay_status()
 
     return router

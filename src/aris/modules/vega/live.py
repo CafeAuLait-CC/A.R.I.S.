@@ -16,6 +16,8 @@ from aris.modules.vega.live_schemas import (
     LiveNode,
     LiveSnapshot,
     PreviewLease,
+    RelayNodeStatus,
+    RelayStatus,
     ResourceLiveFrame,
     ResourceLiveHello,
     ResourceLiveNode,
@@ -35,6 +37,11 @@ class CollectorConnection:
     frame: LiveFrame | ResourceLiveFrame | None = None
     received: float = 0
     connected: bool = True
+    received_frames: int = 0
+    accepted_frames: int = 0
+    ignored_inactive_frames: int = 0
+    last_input_seq: int | None = None
+    last_input_received: float | None = None
 
 
 @dataclass
@@ -93,8 +100,12 @@ class LiveHub:
             or (connection.frame is not None and frame.seq <= connection.frame.seq)
         ):
             raise ValueError("invalid preview session or sequence")
+        connection.received_frames += 1
+        connection.last_input_seq = frame.seq
+        connection.last_input_received = now
         if not self.active():
-            # Allow the one in-flight frame that races the stop notification.
+            # In-flight frames can race the stop notification; never publish them.
+            connection.ignored_inactive_frames += 1
             return
         if connection.frame is not None and now - connection.received < 0.4:
             raise ValueError("preview rate exceeded")
@@ -107,6 +118,7 @@ class LiveHub:
             raise ValueError("preview observation is in the future")
         connection.frame = frame
         connection.received = now
+        connection.accepted_frames += 1
         self.notify()
 
     def lease(self, connection: CollectorConnection) -> PreviewLease:
@@ -193,3 +205,59 @@ class LiveHub:
                 values[name] = part if current else None
             nodes.append(ResourceLiveNode.model_validate(values))
         return ResourceLiveSnapshot(generated_at=base.generated_at, nodes=nodes)
+
+    def relay_status(self) -> RelayStatus:
+        wall_now, monotonic_now = datetime.now(UTC), self.clock()
+        # Counting cannot renew, prune or signal a viewer/Collector lease.
+        active_viewers = sum(viewer.expires > monotonic_now for viewer in self.viewers.values())
+        nodes: list[RelayNodeStatus] = []
+        for node_id, connection in sorted(self.collectors.items()):
+            frame = connection.frame
+            frame_age = monotonic_now - connection.received if frame else None
+            input_age = (
+                monotonic_now - connection.last_input_received
+                if connection.last_input_received is not None
+                else None
+            )
+            state: Literal["idle", "waiting", "live", "stale", "error", "offline"]
+            if not connection.connected:
+                state = "offline"
+            elif not active_viewers:
+                state = "idle"
+            elif frame is None:
+                state = "waiting"
+            elif frame_age is None or frame_age < 0 or frame_age > 3:
+                state = "stale"
+            elif not -3 <= (wall_now - frame.observed_at).total_seconds() <= 3:
+                state = "stale"
+            else:
+                state = "live" if frame.quality == "ok" else "error"
+            nodes.append(
+                RelayNodeStatus(
+                    node_id=node_id,
+                    protocol=connection.hello.schema_version,
+                    session_id=connection.hello.session_id,
+                    connected=connection.connected,
+                    preview_requested=bool(active_viewers and connection.connected),
+                    state=state,
+                    last_frame_seq=frame.seq if frame else None,
+                    last_frame_observed_at=frame.observed_at if frame else None,
+                    last_frame_age_seconds=frame_age
+                    if frame_age is not None and frame_age >= 0
+                    else None,
+                    received_frames=connection.received_frames,
+                    accepted_frames=connection.accepted_frames,
+                    ignored_inactive_frames=connection.ignored_inactive_frames,
+                    last_input_seq=connection.last_input_seq,
+                    last_input_age_seconds=input_age
+                    if input_age is not None and input_age >= 0
+                    else None,
+                )
+            )
+        return RelayStatus(
+            generated_at=wall_now,
+            active_viewers=active_viewers,
+            viewer_capacity=self.max_viewers,
+            connected_collectors=sum(node.connected for node in nodes),
+            nodes=nodes,
+        )

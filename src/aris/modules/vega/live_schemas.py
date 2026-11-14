@@ -110,3 +110,30 @@ class ResourceLiveSnapshot(Contract):
     schema_version: Literal["aris.live-preview/v2"] = "aris.live-preview/v2"
     generated_at: AwareDatetime
     nodes: list[ResourceLiveNode]
+
+
+class RelayNodeStatus(Contract):
+    node_id: str
+    protocol: Literal["aris.live/v1", "aris.live/v2"]
+    session_id: UUID
+    connected: bool
+    preview_requested: bool
+    state: Literal["idle", "waiting", "live", "stale", "error", "offline"]
+    last_frame_seq: int | None
+    last_frame_observed_at: AwareDatetime | None
+    last_frame_age_seconds: float | None
+    received_frames: int = Field(ge=0)
+    accepted_frames: int = Field(ge=0)
+    ignored_inactive_frames: int = Field(ge=0)
+    last_input_seq: int | None
+    last_input_age_seconds: float | None
+
+
+class RelayStatus(Contract):
+    schema_version: Literal["aris.live-relay-status/v1"] = "aris.live-relay-status/v1"
+    scope: Literal["api_process"] = "api_process"
+    generated_at: AwareDatetime
+    active_viewers: int = Field(ge=0)
+    viewer_capacity: int = Field(ge=0)
+    connected_collectors: int = Field(ge=0)
+    nodes: list[RelayNodeStatus]
