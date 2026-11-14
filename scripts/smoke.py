@@ -244,9 +244,7 @@ def main() -> None:
                     f"PASS: {backend} -> API -> {mode} + heartbeat -> status -> Worker inspection"
                 )
                 print("PASS: collection failure -> ONLINE + unknown GPU facts -> recovered facts")
-                print(
-                    "PASS: resource CLI -> three observations + three heartbeats, atomic records"
-                )
+                print("PASS: resource CLI -> three observations + three heartbeats, atomic records")
             finally:
                 process.terminate()
                 try:
