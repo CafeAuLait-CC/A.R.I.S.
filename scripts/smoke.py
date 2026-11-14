@@ -47,6 +47,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--real-gpu", action="store_true", help="Collect real NVIDIA GPUs")
     parser.add_argument("--postgres", action="store_true", help="Use an isolated PostgreSQL schema")
+    parser.add_argument(
+        "--resources", action="store_true", help="Exercise V2 resource CLI reporting"
+    )
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     os.chdir(root)
@@ -69,6 +72,7 @@ def main() -> None:
             "ARIS_AGENT_NODE_ID": "smoke-node",
             "ARIS_AGENT_TOKEN": agent_token,
             "ARIS_AGENT_SPOOL_PATH": str(state / "spool.sqlite3"),
+            "ARIS_AGENT_RESOURCE_ENABLED": str(args.resources).lower(),
         }
         with socket.socket() as candidate:
             candidate.bind(("127.0.0.1", 0))
@@ -173,6 +177,17 @@ def main() -> None:
                     assert failed_node["telemetry_status"] == "ERROR"
                     assert failed_node["observed_at"] == node["observed_at"]
                     assert all(gpu["observed_state"] == "unknown" for gpu in failed_node["gpus"])
+                    if args.resources:
+                        partial = client.get(
+                            "/public/v2/resources",
+                            headers={"Authorization": f"Bearer {read_token}"},
+                        )
+                        partial.raise_for_status()
+                        partial_node = partial.json()["nodes"][0]
+                        assert partial_node["system_freshness"] == "CURRENT"
+                        assert partial_node["system"] is not None
+                        if args.real_gpu:
+                            assert partial_node["system"]["memory"]["quality"] == "ok"
                     subprocess.run(agent_command, env=env, check=True, timeout=30)
                     recovered = client.get(
                         "/public/v1/resources",
@@ -180,6 +195,52 @@ def main() -> None:
                     )
                     recovered.raise_for_status()
                     assert recovered.json()["nodes"][0]["telemetry_status"] == "CURRENT"
+                    if args.resources:
+                        resource = client.get(
+                            "/public/v2/resources",
+                            headers={"Authorization": f"Bearer {read_token}"},
+                        )
+                        resource.raise_for_status()
+                        components = resource.json()["nodes"][0]
+                        assert components["system_freshness"] == "CURRENT"
+                        assert components["system"] is not None
+                        # --once starts a new sampler: never invent a CPU delta.
+                        assert components["system"]["cpu"]["quality"] in {"warming", "unsupported"}
+                        assert components["system"]["cpu"]["utilization_percent"] is None
+                        if args.real_gpu:
+                            assert components["system"]["memory"]["quality"] == "ok"
+                            assert components["compute"]["quality"] == "ok"
+                        assert components["compute"]["user_scope"] == "unknown"
+                engine = create_engine(database_url)
+                try:
+                    with engine.connect() as db:
+                        payloads = [
+                            json.loads(value) if isinstance(value, str) else value
+                            for value in db.scalars(text("SELECT payload FROM agent_messages"))
+                        ]
+                        expected = 6 if args.resources else 5
+                        for table in (
+                            "agent_messages",
+                            "domain_events",
+                            "event_outbox",
+                            "audit_logs",
+                        ):
+                            assert db.scalar(text("SELECT count(*) FROM " + table)) == expected
+                        if args.resources:
+                            resources = [
+                                p for p in payloads if p["schema_version"] == "aris.telemetry/v2"
+                            ]
+                            assert len(resources) == 3
+                            assert sorted(p["resources"]["gpu"]["quality"] for p in resources) == [
+                                "error",
+                                "ok",
+                                "ok",
+                            ]
+                            assert sorted(p["seq"] for p in payloads) == list(range(1, 7))
+                            assert len({p["message_id"] for p in payloads}) == 6
+                            assert db.scalar(text("SELECT count(*) FROM node_resources")) == 1
+                finally:
+                    engine.dispose()
                 subprocess.run(
                     [sys.executable, "-m", "aris.apps.worker.main", "--once"],
                     env=env,
@@ -192,6 +253,11 @@ def main() -> None:
                     f"PASS: {backend} -> API -> {mode} + heartbeat -> status -> Worker inspection"
                 )
                 print("PASS: collection failure -> ONLINE + unknown GPU facts -> recovered facts")
+                if args.resources:
+                    print(
+                        "PASS: resource CLI -> three V2 observations + three heartbeats, "
+                        "atomic records"
+                    )
             finally:
                 process.terminate()
                 try:
