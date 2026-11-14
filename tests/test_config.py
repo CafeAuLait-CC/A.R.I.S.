@@ -50,3 +50,12 @@ def test_non_ascii_credentials_fail_closed_instead_of_crashing():
         require_read(settings, "Bearer 非法凭据")
     with pytest.raises(DomainError):
         require_agent(settings, "a", "a", "非法凭据")
+
+
+def test_settings_repr_does_not_expose_database_credentials():
+    from aris.core.config import Settings
+
+    settings = Settings(
+        _env_file=None, database_url="postgresql+psycopg://user:private-password@localhost/aris"
+    )
+    assert "private-password" not in repr(settings)

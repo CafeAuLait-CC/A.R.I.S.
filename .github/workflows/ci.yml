@@ -35,3 +35,7 @@ jobs:
         env:
           ARIS_TEST_DATABASE_URL: postgresql+psycopg://aris_test:ci-test-only-password@127.0.0.1:5432/aris_test
         run: ./scripts/uv run --locked --extra server pytest -q
+      - name: PostgreSQL API, Agent heartbeat and collection recovery
+        env:
+          ARIS_TEST_DATABASE_URL: postgresql+psycopg://aris_test:ci-test-only-password@127.0.0.1:5432/aris_test
+        run: ./scripts/uv run --locked --extra server python scripts/smoke.py --postgres

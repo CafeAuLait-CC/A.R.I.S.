@@ -15,7 +15,7 @@ class Settings(BaseSettings):
         env_prefix="ARIS_", env_file=".env", extra="ignore", hide_input_in_errors=True
     )
     environment: Literal["development", "test", "production"] = "development"
-    database_url: str = "sqlite+pysqlite:///.local/aris.db"
+    database_url: str = Field(default="sqlite+pysqlite:///.local/aris.db", repr=False)
     read_token: SecretStr = SecretStr("")
     agent_credentials: dict[str, AgentCredential] = Field(default_factory=dict)
     stale_after_seconds: int = Field(default=60, ge=1)

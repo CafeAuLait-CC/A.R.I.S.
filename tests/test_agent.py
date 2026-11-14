@@ -1,3 +1,5 @@
+import json
+import sqlite3
 from pathlib import Path
 from uuid import uuid4
 
@@ -7,8 +9,9 @@ from pydantic import ValidationError
 
 from aris.apps.agent.collector import parse_nvidia_csv
 from aris.apps.agent.config import AgentSettings
-from aris.apps.agent.main import flush, main, tick
+from aris.apps.agent.main import CollectionFailed, flush, main, tick
 from aris.apps.agent.spool import Spool
+from aris.modules.vega.schemas import Heartbeat
 
 
 def samples():
@@ -42,6 +45,65 @@ def test_spool_restart_sequence_and_capacity(tmp_path):
     assert restarted.enqueue("host-a", samples()).seq == 2
     with pytest.raises(ValueError, match="another agent"):
         Spool(path, "agent-b", "node-a")
+
+
+def test_existing_spool_upgrades_without_changing_unacknowledged_messages(tmp_path):
+    path = tmp_path / "old.sqlite3"
+    original = Spool(path, "agent-a", "node-a").enqueue("host-a", samples())
+    with sqlite3.connect(path) as db:
+        db.execute("ALTER TABLE pending DROP COLUMN kind")
+        before = json.dumps(original.model_dump(mode="json"), sort_keys=True)
+        db.execute("UPDATE pending SET payload=?", (before,))
+    spool = Spool(path, "agent-a", "node-a", max_batches=1)
+    heartbeat = spool.enqueue_heartbeat("host-a", "error")
+    assert heartbeat.seq == 2
+    with pytest.raises(RuntimeError, match="spool full"):
+        spool.enqueue_heartbeat("host-a", "ok")
+    restarted = Spool(path, "agent-a", "node-a")
+    assert restarted.pending() == [original, heartbeat]
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT payload FROM pending WHERE seq=1").fetchone()[0] == before
+    restarted.acknowledge(original)
+    assert restarted.pending() == [heartbeat]
+
+
+def test_collector_failure_sends_only_error_heartbeat_and_keeps_sequence(tmp_path, monkeypatch):
+    def fail():
+        raise ValueError("sensitive collector detail")
+
+    monkeypatch.setattr("aris.apps.agent.main.collect", fail)
+    spool = Spool(tmp_path / "failed.sqlite3", "agent-a", "node-a")
+    settings = AgentSettings(
+        _env_file=None, id="agent-a", node_id="node-a", token="test-agent-credential-12345"
+    )
+    requests = []
+
+    def acknowledge(request):
+        payload = json.loads(request.content)
+        requests.append((request.url.path, payload))
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "message_id": payload["message_id"],
+                "duplicate": False,
+                "applied_to_current": True,
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(acknowledge)) as client:
+        with pytest.raises(CollectionFailed, match="^ValueError$"):
+            tick(spool, settings, client)
+        assert requests[0][0] == "/api/agent/v1/heartbeat"
+        assert Heartbeat.model_validate(requests[0][1]).collector_status == "error"
+        assert "sensitive" not in json.dumps(requests)
+        assert spool.pending() == []
+        monkeypatch.setattr("aris.apps.agent.main.collect", samples)
+        assert tick(spool, settings, client) == {"seq": 3, "delivered": 2}
+        assert [path for path, _ in requests[1:]] == [
+            "/api/agent/v1/telemetry/batch",
+            "/api/agent/v1/heartbeat",
+        ]
 
 
 def test_transport_retains_failed_and_mismatched_messages_then_replays_exactly(tmp_path):
@@ -115,7 +177,7 @@ def test_full_spool_can_drain_and_collection_recovers(tmp_path, monkeypatch):
         with pytest.raises(RuntimeError, match="spool full"):
             tick(spool, settings, client)
         assert spool.pending() == []
-        assert tick(spool, settings, client) == {"seq": 2, "delivered": 1}
+        assert tick(spool, settings, client) == {"seq": 4, "delivered": 2}
 
 
 def test_inspection_needs_no_credentials_and_creates_no_spool_or_http_client(monkeypatch, capsys):

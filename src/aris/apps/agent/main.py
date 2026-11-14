@@ -15,21 +15,26 @@ from aris.apps.agent.collector import collect
 from aris.apps.agent.config import AgentSettings
 from aris.apps.agent.schemas import AgentInspection
 from aris.apps.agent.spool import Spool
-from aris.modules.vega.schemas import GpuSample, IngestResult
+from aris.modules.vega.schemas import GpuSample, Heartbeat, IngestResult
+
+
+class CollectionFailed(RuntimeError):
+    """Heartbeat delivered, but GPU collection failed; keep the heartbeat cadence."""
 
 
 def flush(spool: Spool, settings: AgentSettings, client: httpx.Client) -> int:
     delivered = 0
     for batch in spool.pending():
+        endpoint = "heartbeat" if isinstance(batch, Heartbeat) else "telemetry/batch"
         response = client.post(
-            f"{settings.api_url.rstrip('/')}/api/agent/v1/telemetry/batch",
+            f"{settings.api_url.rstrip('/')}/api/agent/v1/{endpoint}",
             headers={"X-Agent-Token": settings.token.get_secret_value()},
             json=batch.model_dump(mode="json"),
         )
         response.raise_for_status()
         receipt = IngestResult.model_validate(response.json())
         if receipt.message_id != batch.message_id:
-            raise ValueError("mismatched telemetry acknowledgement")
+            raise ValueError("mismatched agent acknowledgement")
         spool.acknowledge(batch)
         delivered += 1
     return delivered
@@ -38,17 +43,28 @@ def flush(spool: Spool, settings: AgentSettings, client: httpx.Client) -> int:
 def tick(
     spool: Spool, settings: AgentSettings, client: httpx.Client, fixture: Path | None = None
 ) -> dict[str, int]:
+    error: Exception | None = None
+    collected = False
     try:
         samples = (
             TypeAdapter(list[GpuSample]).validate_json(fixture.read_text())
             if fixture
             else collect()
         )
-        batch = spool.enqueue(socket.gethostname(), samples)
+        collected = True
+        spool.enqueue(socket.gethostname(), samples)
+    except Exception as exc:
+        error = exc
+    try:
+        heartbeat = spool.enqueue_heartbeat(socket.gethostname(), "ok" if collected else "error")
     finally:
         # Even a full spool or a broken collector must allow the backlog to drain.
         delivered = flush(spool, settings, client)
-    return {"seq": batch.seq, "delivered": delivered}
+    if error:
+        if not collected:
+            raise CollectionFailed(type(error).__name__) from None
+        raise error
+    return {"seq": heartbeat.seq, "delivered": delivered}
 
 
 def main() -> None:
@@ -94,7 +110,7 @@ def main() -> None:
                 )
                 if args.once:
                     raise SystemExit(1) from None
-                failures += 1
+                failures = 0 if isinstance(exc, CollectionFailed) else failures + 1
             if args.once:
                 return
             delay = min(settings.interval_seconds * (2 ** min(failures, 4)), 60)

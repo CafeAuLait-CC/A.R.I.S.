@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import (
     JSON,
@@ -25,6 +25,16 @@ class Node(Base):
     last_seq: Mapped[int] = mapped_column(BigInteger, default=0)
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # observed_at/received_at are liveness; GPU facts have independent freshness.
+    telemetry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    telemetry_received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    telemetry_seq: Mapped[int] = mapped_column(BigInteger, server_default="0")
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    heartbeat_received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    heartbeat_seq: Mapped[int] = mapped_column(BigInteger, server_default="0")
+    collector_status: Mapped[Literal["ok", "error", "unknown"]] = mapped_column(
+        String(16), server_default="unknown"
+    )
 
 
 class GpuDevice(Base):
@@ -40,8 +50,8 @@ class GpuDevice(Base):
     present: Mapped[bool] = mapped_column(Boolean)
 
 
-class TelemetryMessage(Base):
-    __tablename__ = "telemetry_messages"
+class AgentMessage(Base):
+    __tablename__ = "agent_messages"
     __table_args__ = (
         UniqueConstraint("agent_id", "message_id", name="uq_telemetry_message"),
         UniqueConstraint("agent_id", "seq", name="uq_telemetry_sequence"),
@@ -51,6 +61,7 @@ class TelemetryMessage(Base):
     agent_id: Mapped[str] = mapped_column(String(128))
     node_id: Mapped[str] = mapped_column(ForeignKey("nodes.id"))
     seq: Mapped[int] = mapped_column(BigInteger)
+    message_kind: Mapped[str] = mapped_column(String(16), server_default="telemetry")
     fingerprint: Mapped[str] = mapped_column(String(64))
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

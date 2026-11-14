@@ -22,8 +22,7 @@ class GpuSample(Contract):
         return self
 
 
-class TelemetryBatch(Contract):
-    schema_version: Literal["aris.agent/v1"] = "aris.agent/v1"
+class AgentEnvelope(Contract):
     message_id: UUID
     agent_id: str = Field(min_length=1, max_length=128)
     node_id: str = Field(min_length=1, max_length=128)
@@ -32,6 +31,16 @@ class TelemetryBatch(Contract):
     seq: int = Field(ge=1, le=9223372036854775807)
     sent_at: AwareDatetime
     observed_at: AwareDatetime
+
+    @model_validator(mode="after")
+    def validate_times(self) -> "AgentEnvelope":
+        if self.observed_at > self.sent_at:
+            raise ValueError("observation must not follow send time")
+        return self
+
+
+class TelemetryBatch(AgentEnvelope):
+    schema_version: Literal["aris.agent/v1"] = "aris.agent/v1"
     gpus: list[GpuSample] = Field(max_length=64)
 
     @model_validator(mode="after")
@@ -40,9 +49,24 @@ class TelemetryBatch(Contract):
             raise ValueError("duplicate GPU UUID")
         if len({gpu.index for gpu in self.gpus}) != len(self.gpus):
             raise ValueError("duplicate GPU index")
-        if self.observed_at > self.sent_at:
-            raise ValueError("observation must not follow send time")
         return self
+
+
+class Heartbeat(AgentEnvelope):
+    schema_version: Literal["aris.heartbeat/v1"] = "aris.heartbeat/v1"
+    collector_status: Literal["ok", "error"]
+    capabilities: list[Literal["gpu.telemetry/v1", "agent.heartbeat/v1"]] = Field(
+        min_length=1, max_length=2
+    )
+
+    @model_validator(mode="after")
+    def unique_capabilities(self) -> "Heartbeat":
+        if len(set(self.capabilities)) != len(self.capabilities):
+            raise ValueError("duplicate capability")
+        return self
+
+
+AgentReport = TelemetryBatch | Heartbeat
 
 
 class IngestResult(Contract):
@@ -64,8 +88,14 @@ class NodeStatus(Contract):
     agent_id: str
     agent_version: str
     status: Literal["ONLINE", "STALE", "OFFLINE"]
-    observed_at: AwareDatetime
-    received_at: AwareDatetime
+    observed_at: AwareDatetime | None
+    received_at: AwareDatetime | None
+    last_seen_at: AwareDatetime
+    last_received_at: AwareDatetime
+    heartbeat_at: AwareDatetime | None
+    heartbeat_received_at: AwareDatetime | None
+    collector_status: Literal["ok", "error", "unknown"]
+    telemetry_status: Literal["CURRENT", "STALE", "MISSING", "ERROR"]
     seq: int
     gpus: list[GpuStatus]
 

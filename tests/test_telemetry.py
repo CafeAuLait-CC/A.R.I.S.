@@ -14,7 +14,7 @@ from aris.apps.api.main import create_app
 from aris.core.audit import AuditEntry
 from aris.core.config import Settings
 from aris.core.events import DomainEvent, OutboxEntry
-from aris.modules.vega.models import Node, TelemetryMessage
+from aris.modules.vega.models import AgentMessage, Node
 from tests.conftest import AGENT_TOKEN, READ_TOKEN
 
 
@@ -70,7 +70,7 @@ def test_idle_snapshot_is_persistent_and_audited(client):
     assert node["gpus"][0]["observed_state"] == "idle"
     assert node["gpus"][0]["availability"] == "not_evaluated"
     with Session(client.app.state.engine) as session:
-        for model in (TelemetryMessage, DomainEvent, OutboxEntry, AuditEntry):
+        for model in (AgentMessage, DomainEvent, OutboxEntry, AuditEntry):
             assert session.scalar(select(func.count()).select_from(model)) == 1
         assert session.scalars(select(AuditEntry)).one().request_id == "contract-test"
 
@@ -136,7 +136,7 @@ def test_node_cannot_claim_another_nodes_gpu_and_transaction_rolls_back(client):
     assert response.status_code == 409
     with Session(client.app.state.engine) as session:
         assert session.get(Node, "node-b") is None
-        for model in (TelemetryMessage, DomainEvent, OutboxEntry, AuditEntry):
+        for model in (AgentMessage, DomainEvent, OutboxEntry, AuditEntry):
             assert session.scalar(select(func.count()).select_from(model)) == 1
 
 
@@ -154,7 +154,7 @@ def test_configuration_cannot_rebind_a_persisted_agent_to_another_node(client, s
     assert [node["node_id"] for node in status(client)["nodes"]] == ["node-a"]
     with Session(client.app.state.engine) as session:
         assert session.get(Node, "node-b") is None
-        for model in (TelemetryMessage, DomainEvent, OutboxEntry, AuditEntry):
+        for model in (AgentMessage, DomainEvent, OutboxEntry, AuditEntry):
             assert session.scalar(select(func.count()).select_from(model)) == 1
 
 
@@ -217,5 +217,5 @@ def test_postgres_concurrent_duplicate_is_serialized(client):
     assert [response.status_code for response in responses] == [200, 200]
     assert sorted(response.json()["duplicate"] for response in responses) == [False, True]
     with Session(client.app.state.engine) as session:
-        for model in (Node, TelemetryMessage, DomainEvent, OutboxEntry, AuditEntry):
+        for model in (Node, AgentMessage, DomainEvent, OutboxEntry, AuditEntry):
             assert session.scalar(select(func.count()).select_from(model)) == 1

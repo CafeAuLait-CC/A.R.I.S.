@@ -3,10 +3,11 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
 from aris import __version__
-from aris.modules.vega.schemas import GpuSample, TelemetryBatch
+from aris.modules.vega.schemas import AgentReport, GpuSample, Heartbeat, TelemetryBatch
 
 
 @contextmanager
@@ -36,6 +37,9 @@ class Spool:
                 "CREATE TABLE IF NOT EXISTS pending "
                 "(seq INTEGER PRIMARY KEY, payload TEXT NOT NULL)"
             )
+            columns = {row[1] for row in db.execute("PRAGMA table_info(pending)")}
+            if "kind" not in columns:
+                db.execute("ALTER TABLE pending ADD COLUMN kind TEXT NOT NULL DEFAULT 'telemetry'")
             for key, value in (("agent_id", agent_id), ("node_id", node_id), ("last_seq", "0")):
                 db.execute("INSERT OR IGNORE INTO metadata VALUES (?, ?)", (key, value))
             metadata = dict(db.execute("SELECT key, value FROM metadata"))
@@ -43,16 +47,33 @@ class Spool:
                 raise ValueError("spool belongs to another agent/node; use a separate spool")
 
     def enqueue(self, hostname: str, samples: list[GpuSample]) -> TelemetryBatch:
+        message = self._enqueue(hostname, samples)
+        assert isinstance(message, TelemetryBatch)
+        return message
+
+    def enqueue_heartbeat(self, hostname: str, status: Literal["ok", "error"]) -> Heartbeat:
+        message = self._enqueue(hostname, None, status)
+        assert isinstance(message, Heartbeat)
+        return message
+
+    def _enqueue(
+        self,
+        hostname: str,
+        samples: list[GpuSample] | None,
+        status: Literal["ok", "error"] = "ok",
+    ) -> AgentReport:
         now = datetime.now(UTC)
+        kind = "heartbeat" if samples is None else "telemetry"
         with connection(self.path) as db:
             db.execute("BEGIN IMMEDIATE")
-            count = db.execute("SELECT count(*) FROM pending").fetchone()[0]
-            if count >= self.max_batches:
+            count = db.execute("SELECT count(*) FROM pending WHERE kind=?", (kind,)).fetchone()[0]
+            # One reserved heartbeat slot keeps collection failures observable at capacity.
+            if count >= (1 if kind == "heartbeat" else self.max_batches):
                 raise RuntimeError("agent spool full; unacknowledged data retained")
             seq = (
                 int(db.execute("SELECT value FROM metadata WHERE key='last_seq'").fetchone()[0]) + 1
             )
-            batch = TelemetryBatch(
+            envelope = dict(
                 message_id=uuid4(),
                 agent_id=self.agent_id,
                 node_id=self.node_id,
@@ -61,22 +82,45 @@ class Spool:
                 seq=seq,
                 observed_at=now,
                 sent_at=now,
-                gpus=samples,
             )
-            db.execute("INSERT INTO pending VALUES (?, ?)", (seq, batch.model_dump_json()))
+            batch: AgentReport
+            if samples is None:
+                batch = Heartbeat.model_validate(
+                    {
+                        **envelope,
+                        "collector_status": status,
+                        "capabilities": ["gpu.telemetry/v1", "agent.heartbeat/v1"],
+                    }
+                )
+            else:
+                batch = TelemetryBatch.model_validate({**envelope, "gpus": samples})
+            db.execute(
+                "INSERT INTO pending (seq, payload, kind) VALUES (?, ?, ?)",
+                (seq, batch.model_dump_json(), kind),
+            )
             db.execute("UPDATE metadata SET value=? WHERE key='last_seq'", (str(seq),))
             return batch
 
-    def pending(self) -> list[TelemetryBatch]:
+    def pending(self) -> list[AgentReport]:
         with connection(self.path) as db:
             return [
-                TelemetryBatch.model_validate_json(row[0])
-                for row in db.execute("SELECT payload FROM pending ORDER BY seq")
+                (Heartbeat if row[1] == "heartbeat" else TelemetryBatch).model_validate_json(row[0])
+                for row in db.execute("SELECT payload, kind FROM pending ORDER BY seq")
             ]
 
-    def acknowledge(self, batch: TelemetryBatch) -> None:
+    def acknowledge(self, batch: AgentReport) -> None:
         with connection(self.path) as db:
+            row = db.execute(
+                "SELECT payload, kind FROM pending WHERE seq=?", (batch.seq,)
+            ).fetchone()
+            if row is None:
+                return
+            stored = (Heartbeat if row[1] == "heartbeat" else TelemetryBatch).model_validate_json(
+                row[0]
+            )
+            if stored != batch:
+                return
             db.execute(
                 "DELETE FROM pending WHERE seq=? AND payload=?",
-                (batch.seq, batch.model_dump_json()),
+                (batch.seq, row[0]),
             )
