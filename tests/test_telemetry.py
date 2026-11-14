@@ -64,6 +64,7 @@ def status(client):
 def test_idle_snapshot_is_persistent_and_audited(client):
     assert client.get("/health/live").status_code == 200
     assert client.get("/health/ready").status_code == 200
+    assert client.get("/health/ready").json()["schema_revision"] == "0002"
     assert post(client, batch()).status_code == 200
     node = status(client)["nodes"][0]
     assert node["status"] == "ONLINE"

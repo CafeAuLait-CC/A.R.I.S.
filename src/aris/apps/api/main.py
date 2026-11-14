@@ -14,7 +14,7 @@ from starlette.responses import Response
 from aris import __version__
 from aris.core.config import Settings
 from aris.core.contracts import DomainError, ErrorDetail, ErrorResponse
-from aris.core.db import build_engine, check_database, session_factory
+from aris.core.db import SCHEMA_REVISION, build_engine, check_database, session_factory
 from aris.modules.vega.api import build_router
 from aris.modules.vega.service import VegaService
 
@@ -92,7 +92,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise DomainError(
                 "DEPENDENCY_UNAVAILABLE", "Database migration or access required", 503
             ) from exc
-        return {"status": "ready", "schema_revision": "0001"}
+        return {"status": "ready", "schema_revision": SCHEMA_REVISION}
 
     return app
 
