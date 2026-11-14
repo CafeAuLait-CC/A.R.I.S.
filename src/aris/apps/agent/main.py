@@ -27,7 +27,7 @@ def flush(spool: Spool, settings: AgentSettings, client: httpx.Client) -> int:
     for batch in spool.pending():
         endpoint = "heartbeat" if isinstance(batch, Heartbeat) else "telemetry/batch"
         response = client.post(
-            f"{settings.api_url.rstrip('/')}/api/agent/v1/{endpoint}",
+            f"{settings.api_url.rstrip('/')}/vega/v1/{endpoint}",
             headers={"X-Agent-Token": settings.token.get_secret_value()},
             json=batch.model_dump(mode="json"),
         )
@@ -68,7 +68,7 @@ def tick(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Read-only NVIDIA GPU telemetry agent")
+    parser = argparse.ArgumentParser(description="Vega Collector: read-only NVIDIA GPU telemetry")
     parser.add_argument("--once", action="store_true")
     source = parser.add_mutually_exclusive_group()
     source.add_argument(

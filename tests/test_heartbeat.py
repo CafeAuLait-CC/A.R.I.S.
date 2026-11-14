@@ -28,7 +28,7 @@ def heartbeat(seq=1, seconds_ago=0, **changes):
 
 
 def beat(client, payload, token=AGENT_TOKEN):
-    return client.post("/api/agent/v1/heartbeat", json=payload, headers={"X-Agent-Token": token})
+    return client.post("/vega/v1/heartbeat", json=payload, headers={"X-Agent-Token": token})
 
 
 def test_heartbeat_registers_alive_node_without_inventing_gpu_facts(client):

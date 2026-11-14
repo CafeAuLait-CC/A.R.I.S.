@@ -94,15 +94,15 @@ def test_collector_failure_sends_only_error_heartbeat_and_keeps_sequence(tmp_pat
     with httpx.Client(transport=httpx.MockTransport(acknowledge)) as client:
         with pytest.raises(CollectionFailed, match="^ValueError$"):
             tick(spool, settings, client)
-        assert requests[0][0] == "/api/agent/v1/heartbeat"
+        assert requests[0][0] == "/vega/v1/heartbeat"
         assert Heartbeat.model_validate(requests[0][1]).collector_status == "error"
         assert "sensitive" not in json.dumps(requests)
         assert spool.pending() == []
         monkeypatch.setattr("aris.apps.agent.main.collect", samples)
         assert tick(spool, settings, client) == {"seq": 3, "delivered": 2}
         assert [path for path, _ in requests[1:]] == [
-            "/api/agent/v1/telemetry/batch",
-            "/api/agent/v1/heartbeat",
+            "/vega/v1/telemetry/batch",
+            "/vega/v1/heartbeat",
         ]
 
 

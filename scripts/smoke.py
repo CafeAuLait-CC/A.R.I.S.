@@ -119,7 +119,7 @@ def main() -> None:
                         timeout=30,
                     )
                     response = client.get(
-                        "/api/public/v1/resources",
+                        "/public/v1/resources",
                         headers={"Authorization": f"Bearer {read_token}"},
                     )
                     response.raise_for_status()
@@ -164,7 +164,7 @@ def main() -> None:
                     )
                     assert failed.returncode == 1
                     broken = client.get(
-                        "/api/public/v1/resources",
+                        "/public/v1/resources",
                         headers={"Authorization": f"Bearer {read_token}"},
                     )
                     broken.raise_for_status()
@@ -175,7 +175,7 @@ def main() -> None:
                     assert all(gpu["observed_state"] == "unknown" for gpu in failed_node["gpus"])
                     subprocess.run(agent_command, env=env, check=True, timeout=30)
                     recovered = client.get(
-                        "/api/public/v1/resources",
+                        "/public/v1/resources",
                         headers={"Authorization": f"Bearer {read_token}"},
                     )
                     recovered.raise_for_status()

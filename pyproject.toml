@@ -24,7 +24,7 @@ debug = ["debugpy>=1.8,<2"]
 
 [project.scripts]
 aris-api = "aris.apps.api.main:main"
-aris-agent = "aris.apps.agent.main:main"
+aris-vega-collector = "aris.apps.agent.main:main"
 aris-worker = "aris.apps.worker.main:main"
 
 [tool.hatch.build.targets.wheel]
