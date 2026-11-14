@@ -4,7 +4,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from aris.apps.dashboard.main import create_dashboard, resource_events
+from aris.apps.dashboard.main import create_dashboard, preview_proxy, resource_events
 from aris.core.db import session_factory
 from aris.modules.vega.service import VegaService
 from tests.conftest import AGENT_TOKEN, READ_TOKEN
@@ -54,6 +54,72 @@ def test_dashboard_display_zone_is_explicit_and_validated(settings):
         assert 'data-refresh-seconds="5"' in text
     with pytest.raises(ValueError, match="time zone"):
         create_dashboard(settings, time_zone="not-a-time-zone")
+
+
+def test_preview_proxy_keeps_read_credentials_server_side_and_closes_upstream(
+    settings, monkeypatch
+):
+    import httpx
+
+    requests = []
+    real_client = httpx.AsyncClient
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(
+            200, text='event: preview\ndata: {"generated_at":"2026-01-01T00:00:00Z","nodes":[]}\n\n'
+        )
+
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: real_client(**kwargs, transport=httpx.MockTransport(respond)),
+    )
+
+    async def connected():
+        return False
+
+    async def consume():
+        stream = preview_proxy(settings, "http://127.0.0.1:8000", connected)
+        await anext(stream)
+        line = await anext(stream)
+        assert "event: preview" in line
+        assert READ_TOKEN not in line
+        await stream.aclose()
+
+    asyncio.run(consume())
+    assert requests[0].headers["Authorization"] == "Bearer " + READ_TOKEN
+    assert requests[0].url.path == "/internal/v1/live"
+    for url in ["http://remote.example", "https://user:password@host"]:
+        with pytest.raises(ValueError, match="preview API"):
+            create_dashboard(settings, api_url=url)
+
+
+def test_preview_failure_is_unknown_and_does_not_leak_upstream_body(settings, monkeypatch):
+    import httpx
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: real_client(
+            **kwargs,
+            transport=httpx.MockTransport(lambda _: httpx.Response(403, text="private token")),
+        ),
+    )
+
+    async def connected():
+        return False
+
+    async def consume():
+        stream = preview_proxy(settings, "http://127.0.0.1:8000", connected)
+        await anext(stream)
+        failure = await anext(stream)
+        assert "preview_error" in failure
+        assert "private" not in failure
+        await stream.aclose()
+
+    asyncio.run(consume())
 
 
 def test_stream_preserves_fact_freshness_and_never_exposes_tokens(client, settings):

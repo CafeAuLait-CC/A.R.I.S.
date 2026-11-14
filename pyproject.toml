@@ -7,7 +7,12 @@ name = "aris"
 version = "2.0.0.dev0"
 description = "Adaptive Resource Intelligence System"
 requires-python = ">=3.12,<3.14"
-dependencies = ["pydantic>=2.11,<3", "pydantic-settings>=2.11,<3", "httpx>=0.28,<1"]
+dependencies = [
+    "pydantic>=2.11,<3",
+    "pydantic-settings>=2.11,<3",
+    "httpx>=0.28,<1",
+    "websockets>=15,<18",
+]
 
 [project.optional-dependencies]
 server = [

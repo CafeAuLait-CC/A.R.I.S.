@@ -85,6 +85,7 @@ def test_external_paths_use_vega_collector_without_redundant_api_prefix(client):
         "/health/ready",
         "/slack/commands",
         "/slack/events",
+        "/internal/v1/live",
     }
     for old in ("/api/agent/v1/heartbeat", "/api/public/v1/resources"):
         assert client.get(old).status_code == 404

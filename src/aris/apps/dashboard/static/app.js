@@ -2,8 +2,9 @@
 const $ = (id) => document.getElementById(id);
 const samplesByGpu = new Map();
 let source = null, lastSnapshot = null, lastReceived = 0, healthy = false;
+let liveSource=null, liveMode=false, lastPreview=null;
 const displayZone=document.documentElement.dataset.timeZone||"UTC";
-const refreshSeconds=Number(document.documentElement.dataset.refreshSeconds)||3;
+const refreshSeconds=Number(document.documentElement.dataset.refreshSeconds)||15;
 const clock = (value) => value ? new Date(value).toLocaleTimeString("zh-CN", {hour12:false,timeZone:displayZone}) : "—";
 const make = (tag, className, text) => {const el=document.createElement(tag); if(className) el.className=className; if(text!==undefined) el.textContent=text; return el;};
 const qualityNames = {CURRENT:"采样新鲜",STALE:"采样陈旧",MISSING:"尚无采样",ERROR:"采集异常"};
@@ -53,30 +54,70 @@ function render(snapshot,connected){
   const fragment=document.createDocumentFragment();
   for(const node of nodes){
     const section=make("section","node"), heading=make("div","node-heading"), title=make("div","node-title"), health=connected?node.status:"UNKNOWN";
-    title.append(make("h2","",node.node_id),make("span","badge "+(health==="ONLINE"?"":health.toLowerCase()),({ONLINE:"在线",STALE:"陈旧",OFFLINE:"离线",UNKNOWN:"连接中断"})[health]));
+    const healthNames=liveMode?{ONLINE:"实时预览",STALE:"等待新帧",OFFLINE:"通道未连接",UNKNOWN:"连接中断"}:{ONLINE:"在线",STALE:"陈旧",OFFLINE:"离线",UNKNOWN:"连接中断"};
+    title.append(make("h2","",node.node_id),make("span","badge "+(health==="ONLINE"?"":health.toLowerCase()),healthNames[health]));
     title.append(make("span","hostname",node.hostname));const meta=make("div","node-meta");
-    for(const [label,value] of [["采样",node.observed_at],["心跳",node.heartbeat_at]]){const item=make("span","",label);item.append(make("time","",clock(value)));meta.append(item);}
-    meta.append(make("span","",connected?(qualityNames[node.telemetry_status]||"未知"):"数据新鲜度未知"));heading.append(title,meta);
+    for(const [label,value] of [[liveMode?"预览采样":"采样",node.observed_at],["心跳归档",node.heartbeat_at]]){const item=make("span","",label);item.append(make("time","",clock(value)));meta.append(item);}
+    meta.append(make("span","",connected?(node.preview_label||qualityNames[node.telemetry_status]||"未知"):"数据新鲜度未知"));heading.append(title,meta);
     const grid=make("div","gpu-grid");for(const gpu of node.gpus) grid.append(gpuCard(gpu,node,connected));
     if(!node.gpus.length) grid.append(make("div","empty-state","该节点尚无 GPU 观测数据。"));
     section.append(heading,grid);fragment.append(section);
   }
   $("nodes").replaceChildren(fragment);
 }
-function unavailable(message){healthy=false;connection("连接异常","disconnected");notice(message);if(lastSnapshot)render(lastSnapshot,false);}
+function previewSnapshot(){
+  const archived=new Map((lastSnapshot?.nodes||[]).map(n=>[n.node_id,n]));
+  const previews=new Map((lastPreview?.nodes||[]).map(n=>[n.node_id,n]));
+  const ids=new Set([...archived.keys(),...previews.keys()]);
+  return {nodes:[...ids].map(id=>{
+    const base=archived.get(id)||{}, preview=previews.get(id), fresh=preview?.quality==="live";
+    const gpus=fresh?preview.gpus.map(g=>({...g,present:true,observed_state:g.utilization_percent>0||g.memory_used_mib>0?"busy":"idle"})):(base.gpus||[]);
+    return {...base,node_id:id,hostname:preview?.hostname||base.hostname||"",gpus,
+      status:fresh?"ONLINE":preview?.connected?"STALE":"OFFLINE",observed_at:preview?.observed_at,
+      telemetry_status:fresh?"CURRENT":"MISSING",
+      preview_label:({live:"实时预览 · 未归档",waiting:"等待首帧",stale:"预览已超时",error:"实时采集异常",offline:"实时通道未连接"})[preview?.quality]||"等待 Vega 实时通道"};
+  })};
+}
+function currentSnapshot(){return liveMode?previewSnapshot():lastSnapshot;}
+function unavailable(message){healthy=false;connection("连接异常","disconnected");notice(message);const snapshot=currentSnapshot();if(snapshot)render(snapshot,false);}
+function startPreview(){
+  if(liveSource)liveSource.close();lastPreview=null;healthy=false;connection("等待实时预览","connecting");
+  render(previewSnapshot(),false);notice("正在申请只读实时采样。预览不会逐帧归档。");
+  liveSource=new EventSource("/live");
+  liveSource.addEventListener("preview",event=>{
+    if(!liveMode)return;
+    try{
+      lastPreview=JSON.parse(event.data);lastReceived=Date.now();healthy=true;
+      const fresh=lastPreview.nodes.filter(n=>n.quality==="live").length;
+      connection(fresh?"实时预览 · 未归档":"等待实时采样",fresh?"connected":"connecting");
+      notice(fresh?"":"实时帧尚未就绪，指标按未知显示。归档数据保留在常规视图。");
+      render(previewSnapshot(),true);
+    }catch{unavailable("无法解析实时预览，正在等待下一帧。");}
+  });
+  liveSource.addEventListener("preview_error",()=>unavailable("实时预览暂不可用。可关闭预览查看归档观测；连接会自动重试。"));
+  liveSource.onerror=()=>{if(liveMode)unavailable("实时链路已断开，正在自动重连。预览指标按未知显示。");};
+}
 function connect(){
   if(source)source.close();connection("连接中","connecting");
   source=new EventSource("/events");
   source.addEventListener("resources",event=>{
-    try{const snapshot=JSON.parse(event.data);lastSnapshot=snapshot;lastReceived=Date.now();healthy=true;connection("已连接","connected");notice("");render(snapshot,true);}catch{unavailable("无法解析状态数据，正在等待下一次更新。");}
+    try{const snapshot=JSON.parse(event.data);lastSnapshot=snapshot;if(!liveMode){lastReceived=Date.now();healthy=true;connection("归档观测","connected");notice("");render(snapshot,true);}}catch{if(!liveMode)unavailable("无法解析状态数据，正在等待下一次更新。");}
   });
-  source.addEventListener("dependency_error",()=>unavailable("资源数据暂时不可用。指标按未知显示，连接会自动重试。"));
-  source.onerror=()=>unavailable("状态连接已断开。指标按未知显示，正在自动重连。");
+  source.addEventListener("dependency_error",()=>{if(!liveMode)unavailable("资源数据暂时不可用。指标按未知显示，连接会自动重试。");});
+  source.onerror=()=>{if(!liveMode)unavailable("状态连接已断开。指标按未知显示，正在自动重连。");};
 }
-$("reconnect").addEventListener("click",connect);
+$("reconnect").addEventListener("click",()=>{connect();if(liveMode)startPreview();});
+$("live-toggle").disabled=document.documentElement.dataset.liveEnabled!=="true";
+$("live-toggle").addEventListener("click",()=>{
+  liveMode=!liveMode;samplesByGpu.clear();$("live-toggle").setAttribute("aria-pressed",String(liveMode));
+  $("live-toggle").textContent=liveMode?"关闭实时预览":"开启实时预览";
+  $("node-metric-label").textContent=liveMode?"实时采样节点":"在线节点";
+  $("refresh-note").textContent=liveMode?"约每秒预览 · 不逐帧归档":"归档观测 · 约每 "+refreshSeconds+" 秒更新";
+  if(liveMode)startPreview();else{if(liveSource)liveSource.close();liveSource=null;lastPreview=null;healthy=false;connect();}
+});
 const watchdogMs=Math.max(10000,refreshSeconds*3000+1000);
-setInterval(()=>{if(healthy && Date.now()-lastReceived>watchdogMs)unavailable("长时间未收到状态。指标按未知显示，正在等待连接恢复。");},1000);
-window.addEventListener("pagehide",()=>source&&source.close());
+setInterval(()=>{if(healthy && Date.now()-lastReceived>(liveMode?5000:watchdogMs))unavailable("长时间未收到状态。指标按未知显示，正在等待连接恢复。");},1000);
+window.addEventListener("pagehide",()=>{if(source)source.close();if(liveSource)liveSource.close();});
 $("time-zone").textContent=displayZone;
-$("refresh-note").textContent="约每 "+refreshSeconds+" 秒自动更新";
+$("refresh-note").textContent="归档观测 · 约每 "+refreshSeconds+" 秒更新";
 connect();

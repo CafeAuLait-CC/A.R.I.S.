@@ -5,6 +5,7 @@ import random
 import socket
 import sys
 import time
+from contextlib import ExitStack
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -13,6 +14,8 @@ from pydantic import TypeAdapter
 
 from aris.apps.agent.collector import collect
 from aris.apps.agent.config import AgentSettings
+from aris.apps.agent.live import LiveClient
+from aris.apps.agent.sampler import Sampler
 from aris.apps.agent.schemas import AgentInspection
 from aris.apps.agent.spool import Spool
 from aris.modules.vega.schemas import GpuSample, Heartbeat, IngestResult
@@ -41,18 +44,29 @@ def flush(spool: Spool, settings: AgentSettings, client: httpx.Client) -> int:
 
 
 def tick(
-    spool: Spool, settings: AgentSettings, client: httpx.Client, fixture: Path | None = None
+    spool: Spool,
+    settings: AgentSettings,
+    client: httpx.Client,
+    fixture: Path | None = None,
+    sampler: Sampler | None = None,
 ) -> dict[str, int]:
     error: Exception | None = None
     collected = False
     try:
+        observation = sampler.sample() if sampler else None
         samples = (
-            TypeAdapter(list[GpuSample]).validate_json(fixture.read_text())
-            if fixture
-            else collect()
+            observation.gpus
+            if observation
+            else (
+                TypeAdapter(list[GpuSample]).validate_json(fixture.read_text())
+                if fixture
+                else collect()
+            )
         )
         collected = True
-        spool.enqueue(socket.gethostname(), samples)
+        spool.enqueue(
+            socket.gethostname(), samples, observation.observed_at if observation else None
+        )
     except Exception as exc:
         error = exc
     try:
@@ -94,11 +108,21 @@ def main() -> None:
     os.umask(0o077)
     settings = AgentSettings()
     spool = Spool(settings.spool_path, settings.id, settings.node_id, settings.max_buffered_batches)
+    sampler = Sampler(
+        (lambda: TypeAdapter(list[GpuSample]).validate_json(args.fixture.read_text()))
+        if args.fixture
+        else collect
+    )
+    live = LiveClient(settings, sampler) if settings.live_enabled and not args.once else None
     failures = 0
-    with httpx.Client(timeout=15, trust_env=False) as client:
+    with ExitStack() as resources:
+        if live:
+            live.start()
+            resources.callback(live.close)
+        client = resources.enter_context(httpx.Client(timeout=15, trust_env=False))
         while True:
             try:
-                result = tick(spool, settings, client, args.fixture)
+                result = tick(spool, settings, client, args.fixture, sampler)
                 print(json.dumps(result), flush=True)
                 failures = 0
             except Exception as exc:

@@ -46,8 +46,10 @@ class Spool:
             if metadata["agent_id"] != agent_id or metadata["node_id"] != node_id:
                 raise ValueError("spool belongs to another agent/node; use a separate spool")
 
-    def enqueue(self, hostname: str, samples: list[GpuSample]) -> TelemetryBatch:
-        message = self._enqueue(hostname, samples)
+    def enqueue(
+        self, hostname: str, samples: list[GpuSample], observed_at: datetime | None = None
+    ) -> TelemetryBatch:
+        message = self._enqueue(hostname, samples, observed_at=observed_at)
         assert isinstance(message, TelemetryBatch)
         return message
 
@@ -61,6 +63,7 @@ class Spool:
         hostname: str,
         samples: list[GpuSample] | None,
         status: Literal["ok", "error"] = "ok",
+        observed_at: datetime | None = None,
     ) -> AgentReport:
         now = datetime.now(UTC)
         kind = "heartbeat" if samples is None else "telemetry"
@@ -80,7 +83,7 @@ class Spool:
                 hostname=hostname,
                 agent_version=__version__,
                 seq=seq,
-                observed_at=now,
+                observed_at=observed_at or now,
                 sent_at=now,
             )
             batch: AgentReport

@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN" data-time-zone="UTC" data-refresh-seconds="3">
+<html lang="zh-CN" data-time-zone="UTC" data-refresh-seconds="15" data-live-enabled="false">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -16,13 +16,13 @@
   <main>
     <section class="page-heading">
       <div><p class="eyebrow">RESOURCE OBSERVATORY</p><h1>资源观测</h1><p class="subtitle">GPU 使用情况与节点健康，自动保持更新。</p></div>
-      <button id="reconnect" type="button"><span aria-hidden="true">↻</span> 重新连接</button>
+      <div class="view-actions"><button id="live-toggle" type="button" aria-pressed="false">开启实时预览</button><button id="reconnect" type="button"><span aria-hidden="true">↻</span> 重新连接</button></div>
     </section>
     <section class="overview" aria-label="观测概览">
-      <div class="overview-cell"><span class="metric-label">在线节点</span><strong id="online-count">—</strong><span id="node-count" class="metric-note">等待观测</span></div>
+      <div class="overview-cell"><span id="node-metric-label" class="metric-label">在线节点</span><strong id="online-count">—</strong><span id="node-count" class="metric-note">等待观测</span></div>
       <div class="overview-cell"><span class="metric-label">已发现 GPU</span><strong id="gpu-count">—</strong><span id="known-count" class="metric-note">等待观测</span></div>
       <div class="overview-cell"><span class="metric-label">已知显存使用</span><strong id="memory-total">—</strong><span id="memory-note" class="metric-note">仅汇总新鲜观测</span></div>
-      <div class="overview-cell time-cell"><span class="metric-label">状态接收时间</span><strong id="received-time">—</strong><span id="refresh-note" class="metric-note">约每 3 秒自动更新</span></div>
+      <div class="overview-cell time-cell"><span class="metric-label">状态接收时间</span><strong id="received-time">—</strong><span id="refresh-note" class="metric-note">归档观测 · 约每 15 秒更新</span></div>
     </section>
     <div id="notice" class="notice" role="status" hidden></div>
     <section id="nodes" aria-label="节点与 GPU">

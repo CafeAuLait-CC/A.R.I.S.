@@ -16,6 +16,7 @@ class AgentSettings(BaseSettings):
     spool_path: Path = Path(".local/agent-spool.sqlite3")
     interval_seconds: int = Field(default=15, ge=1)
     max_buffered_batches: int = Field(default=10000, ge=1)
+    live_enabled: bool = False
 
     @model_validator(mode="after")
     def validate_transport(self) -> "AgentSettings":

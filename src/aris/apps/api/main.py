@@ -19,6 +19,8 @@ from aris.interfaces.slack.api import build_router as build_slack_router
 from aris.interfaces.slack.config import SlackSettings
 from aris.interfaces.slack.service import SlackService
 from aris.modules.vega.api import build_router
+from aris.modules.vega.live import LiveHub
+from aris.modules.vega.live_api import build_live_router
 from aris.modules.vega.service import VegaService
 
 logger = logging.getLogger(__name__)
@@ -53,6 +55,8 @@ def create_app(
     sessions = session_factory(engine)
     vega = VegaService(sessions, config)
     app.include_router(build_router(vega, config))
+    app.state.live_hub = LiveHub()
+    app.include_router(build_live_router(app.state.live_hub, config))
     app.include_router(
         build_slack_router(SlackService(sessions, slack_settings or SlackSettings(), vega))
     )
@@ -110,7 +114,14 @@ def create_app(
 def main() -> None:
     import uvicorn
 
-    uvicorn.run("aris.apps.api.main:create_app", factory=True, host="127.0.0.1", port=8000)
+    uvicorn.run(
+        "aris.apps.api.main:create_app",
+        factory=True,
+        host="127.0.0.1",
+        port=8000,
+        ws_max_size=65536,
+        ws_max_queue=2,
+    )
 
 
 if __name__ == "__main__":
