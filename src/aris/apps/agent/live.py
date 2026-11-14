@@ -35,6 +35,7 @@ class PreviewSession:
         self.interval = 1
         self.next_sample = 0.0
         self.seq = 0
+        self.last_observed_at: datetime | None = None
 
     def apply(self, lease: PreviewLease) -> None:
         self.deadline = self.clock() + lease.lease_seconds if lease.lease_seconds else 0
@@ -47,7 +48,7 @@ class PreviewSession:
         self.next_sample = now + self.interval
         self.seq += 1
         try:
-            observation = self.sampler.sample()
+            observation = self.sampler.sample(fresh_after=self.last_observed_at)
             frame = LiveFrame(
                 session_id=self.session_id,
                 seq=self.seq,
@@ -63,7 +64,10 @@ class PreviewSession:
                 quality="error",
             )
         # A slow driver call may have outlived its lease. Never renew it ourselves.
-        return frame if self.clock() < self.deadline else None
+        if self.clock() >= self.deadline:
+            return None
+        self.last_observed_at = frame.observed_at
+        return frame
 
 
 def live_url(settings: AgentSettings) -> str:

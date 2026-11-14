@@ -25,9 +25,12 @@ class Sampler:
         self.last_attempt = float("-inf")
         self.latest: Observation | None = None
 
-    def sample(self) -> Observation:
+    def sample(self, *, fresh_after: datetime | None = None) -> Observation:
         with self.lock:
-            if self.clock() - self.last_attempt >= 0.75:
+            needs_new_observation = fresh_after is not None and (
+                self.latest is None or self.latest.observed_at <= fresh_after
+            )
+            if needs_new_observation or self.clock() - self.last_attempt >= 0.75:
                 self.latest = None
                 try:
                     gpus = self.collect()

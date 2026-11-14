@@ -78,6 +78,30 @@ def test_live_and_archive_share_observation_time_without_changing_durable_sequen
     assert len(spool.pending()) == 1  # Live frames never entered this spool.
 
 
+def test_slow_driver_never_turns_a_cached_observation_into_a_new_preview_frame():
+    now = [100.0]
+    calls = []
+
+    def slow_driver():
+        calls.append(now[0])
+        now[0] += 0.4
+        return samples()
+
+    sampler = Sampler(slow_driver, clock=lambda: now[0])
+    preview = PreviewSession(sampler, uuid4(), clock=lambda: now[0])
+    preview.apply(PreviewLease(lease_seconds=30))
+    first = preview.frame()
+    now[0] = 101.0  # Next preview is due, but completion-based cache is only 0.6s old.
+    second = preview.frame()
+    assert second.observed_at != first.observed_at
+    assert len(calls) == 2
+    now[0] = 103.0
+    archive = sampler.sample()
+    third = preview.frame()
+    assert third.observed_at == archive.observed_at
+    assert len(calls) == 3  # A newer archival read can still be shared.
+
+
 def test_failed_or_slow_collection_never_replays_current_metrics_past_lease():
     now = [10.0]
 
