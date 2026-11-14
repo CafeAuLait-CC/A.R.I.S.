@@ -22,12 +22,30 @@ from aris.modules.vega.schemas import (
     NodeStatus,
     TelemetryBatch,
 )
+from aris.modules.vega.storage_schemas import ObservationStorage
 
 
 class VegaService:
     def __init__(self, sessions: sessionmaker[Session], settings: Settings) -> None:
         self.sessions = sessions
         self.settings = settings
+
+    def storage(self, cutoff: datetime | None = None) -> ObservationStorage:
+        if cutoff is not None and (cutoff.tzinfo is None or cutoff.utcoffset() is None):
+            raise ValueError("retention preview requires a time zone")
+        cutoff = utc(cutoff) if cutoff is not None else None
+        with self.sessions() as session:
+            messages = VegaRepository(session).message_storage(cutoff)
+        return ObservationStorage(
+            generated_at=datetime.now(UTC),
+            cutoff=cutoff,
+            messages=messages,
+            blockers=[
+                "Raw message IDs and fingerprints currently provide durable deduplication",
+                "Domain events, pending Outbox, audit and future ledger need separate retention",
+                "Retention periods and recovery requirements have not been approved",
+            ],
+        )
 
     def ingest(self, batch: AgentReport, request_id: str) -> IngestResult:
         now = datetime.now(UTC)

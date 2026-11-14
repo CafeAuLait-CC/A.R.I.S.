@@ -1,13 +1,15 @@
 from collections.abc import Sequence
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
+from aris.core.time import utc
 from aris.modules.vega.models import AgentMessage, GpuDevice, Node
 from aris.modules.vega.schemas import AgentReport
+from aris.modules.vega.storage_schemas import MessageStorage
 
 
 class VegaRepository:
@@ -65,3 +67,31 @@ class VegaRepository:
 
     def gpu(self, gpu_uuid: str) -> GpuDevice | None:
         return self.session.get(GpuDevice, gpu_uuid)
+
+    def message_storage(self, cutoff: datetime | None) -> list[MessageStorage]:
+        before = (
+            func.sum(case((AgentMessage.received_at < cutoff, 1), else_=0))
+            if cutoff
+            else func.count()
+        )
+        rows = self.session.execute(
+            select(
+                AgentMessage.message_kind,
+                func.count(),
+                func.min(AgentMessage.received_at),
+                func.max(AgentMessage.received_at),
+                before,
+            )
+            .group_by(AgentMessage.message_kind)
+            .order_by(AgentMessage.message_kind)
+        )
+        return [
+            MessageStorage(
+                message_kind=row[0],
+                count=row[1],
+                first_received_at=utc(row[2]),
+                last_received_at=utc(row[3]),
+                before_cutoff=row[4] if cutoff else None,
+            )
+            for row in rows
+        ]
