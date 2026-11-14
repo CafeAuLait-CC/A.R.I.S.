@@ -1,0 +1,16 @@
+#!/bin/sh
+# Keep newly downloaded packages, interpreters and tools inside this checkout.
+set -eu
+ARIS_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+export UV_CACHE_DIR="$ARIS_ROOT/.local/uv-cache"
+export UV_PYTHON_INSTALL_DIR="$ARIS_ROOT/.local/python"
+export UV_TOOL_DIR="$ARIS_ROOT/.local/tools"
+export UV_TOOL_BIN_DIR="$ARIS_ROOT/.local/bin"
+export UV_PYTHON_BIN_DIR="$ARIS_ROOT/.local/bin"
+export UV_PROJECT_ENVIRONMENT="$ARIS_ROOT/.venv"
+unset VIRTUAL_ENV
+cd "$ARIS_ROOT"
+if test -x "$ARIS_ROOT/.local/bin/uv"; then
+    exec "$ARIS_ROOT/.local/bin/uv" "$@"
+fi
+exec uv "$@"

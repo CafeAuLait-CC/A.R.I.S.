@@ -1,15 +1,48 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
 [project]
 name = "aris"
-version = "0.1.0"
-description = "Aetherial Resource Intelligence System"
-readme = "README.md"
-requires-python = ">=3.12"
-dependencies = [
-    "certifi>=2025.10.5",
-    "fastapi[standard]>=0.121.0",
-    "psycopg2-binary>=2.9.11",
-    "pydantic-settings>=2.11.0",
-    "python-dotenv>=1.2.1",
-    "slack-sdk>=3.37.0",
-    "sqlalchemy>=2.0.44",
+version = "2.0.0.dev0"
+description = "Adaptive Resource Intelligence System"
+requires-python = ">=3.12,<3.14"
+dependencies = ["pydantic>=2.11,<3", "pydantic-settings>=2.11,<3", "httpx>=0.28,<1"]
+
+[project.optional-dependencies]
+server = [
+  "fastapi>=0.121,<1",
+  "uvicorn>=0.38,<1",
+  "sqlalchemy>=2.0.44,<2.1",
+  "alembic>=1.17,<2",
+  "psycopg[binary]>=3.2,<4",
 ]
+
+[dependency-groups]
+dev = ["pytest>=8.4,<10", "ruff>=0.14,<1", "mypy>=1.18,<2"]
+debug = ["debugpy>=1.8,<2"]
+
+[project.scripts]
+aris-api = "aris.apps.api.main:main"
+aris-agent = "aris.apps.agent.main:main"
+aris-worker = "aris.apps.worker.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aris"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src"]
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --basetemp=.local/pytest"

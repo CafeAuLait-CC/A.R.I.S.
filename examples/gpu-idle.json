@@ -1,0 +1,11 @@
+[
+  {
+    "gpu_uuid": "GPU-example-only",
+    "index": 0,
+    "model": "Simulated NVIDIA GPU",
+    "memory_total_mib": 49140,
+    "memory_used_mib": 0,
+    "utilization_percent": 0,
+    "temperature_c": 32
+  }
+]
