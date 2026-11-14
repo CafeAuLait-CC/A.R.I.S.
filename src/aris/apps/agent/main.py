@@ -20,7 +20,7 @@ from aris.apps.agent.resource_sampler import ResourceSampler
 from aris.apps.agent.sampler import Sampler
 from aris.apps.agent.schemas import AgentInspection
 from aris.apps.agent.spool import Spool
-from aris.modules.vega.resource_schemas import ResourceInspection
+from aris.modules.vega.resource_schemas import ResourceInspection, ResourceTelemetryBatch
 from aris.modules.vega.schemas import GpuSample, Heartbeat, IngestResult
 
 
@@ -40,8 +40,9 @@ def flush(
     batches = spool.delivery_batch(settings.flush_max_messages)
     for batch in batches:
         endpoint = "heartbeat" if isinstance(batch, Heartbeat) else "telemetry/batch"
+        version = "v2" if isinstance(batch, ResourceTelemetryBatch) else "v1"
         response = client.post(
-            f"{settings.api_url.rstrip('/')}/vega/v1/{endpoint}",
+            f"{settings.api_url.rstrip('/')}/vega/{version}/{endpoint}",
             headers={"X-Agent-Token": settings.token.get_secret_value()},
             json=batch.model_dump(mode="json"),
         )

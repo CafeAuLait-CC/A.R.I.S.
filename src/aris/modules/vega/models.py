@@ -35,6 +35,18 @@ class Node(Base):
     collector_status: Mapped[Literal["ok", "error", "unknown"]] = mapped_column(
         String(16), server_default="unknown"
     )
+    collector_health_seq: Mapped[int] = mapped_column(BigInteger, server_default="0")
+    collector_health_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class NodeResource(Base):
+    __tablename__ = "node_resources"
+    node_id: Mapped[str] = mapped_column(ForeignKey("nodes.id"), primary_key=True)
+    seq: Mapped[int] = mapped_column(BigInteger)
+    last_seq: Mapped[int] = mapped_column(BigInteger)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    observation: Mapped[dict[str, Any]] = mapped_column(JSON)
 
 
 class GpuDevice(Base):

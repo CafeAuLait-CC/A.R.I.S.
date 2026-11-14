@@ -71,6 +71,7 @@ def test_postgres_storage_sizes_are_scoped_to_current_test_schema_and_read_only(
         "event_outbox",
         "audit_logs",
         "slack_receipts",
+        "node_resources",
         "slack_home_jobs",
     }
     assert result.relation_bytes == sum(row.total_bytes for row in result.relations)

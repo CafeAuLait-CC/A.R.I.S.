@@ -7,8 +7,8 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from aris.core.time import utc
-from aris.modules.vega.models import AgentMessage, GpuDevice, Node
-from aris.modules.vega.schemas import AgentReport
+from aris.modules.vega.models import AgentMessage, GpuDevice, Node, NodeResource
+from aris.modules.vega.reports import AgentReport
 from aris.modules.vega.storage_schemas import MessageStorage
 
 
@@ -27,7 +27,7 @@ class VegaRepository:
                 hostname=batch.hostname,
                 agent_version=batch.agent_version,
                 last_seq=0,
-                observed_at=batch.observed_at,
+                observed_at=utc(batch.observed_at),
                 received_at=now,
             )
             # Both identities are unique; concurrent first reports may hit either index.
@@ -67,6 +67,9 @@ class VegaRepository:
 
     def gpu(self, gpu_uuid: str) -> GpuDevice | None:
         return self.session.get(GpuDevice, gpu_uuid)
+
+    def resource(self, node_id: str) -> NodeResource | None:
+        return self.session.get(NodeResource, node_id)
 
     def message_storage(self, cutoff: datetime | None) -> list[MessageStorage]:
         before = (

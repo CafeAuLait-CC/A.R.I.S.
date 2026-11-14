@@ -1,13 +1,23 @@
 """Component observations with independent quality and timestamps."""
 
+from datetime import UTC, datetime
 from typing import Literal
 
-from pydantic import AwareDatetime, Field, model_validator
+from pydantic import AwareDatetime, Field, field_validator, model_validator
 
 from aris.core.contracts import Contract
-from aris.modules.vega.schemas import GpuSample
+from aris.modules.vega.schemas import AgentEnvelope, GpuSample, NodeStatus
 
 Quality = Literal["ok", "error", "unsupported"]
+
+
+class TimedObservation(Contract):
+    observed_at: AwareDatetime
+
+    @field_validator("observed_at")
+    @classmethod
+    def utc_time(cls, value: datetime) -> datetime:
+        return value.astimezone(UTC)
 
 
 class CpuObservation(Contract):
@@ -43,15 +53,13 @@ class MemoryObservation(Contract):
         return self
 
 
-class SystemObservation(Contract):
-    observed_at: AwareDatetime
+class SystemObservation(TimedObservation):
     source: Literal["linux_procfs"] = "linux_procfs"
     cpu: CpuObservation
     memory: MemoryObservation
 
 
-class GpuObservation(Contract):
-    observed_at: AwareDatetime
+class GpuObservation(TimedObservation):
     quality: Quality
     gpus: list[GpuSample] = Field(default_factory=list, max_length=64)
 
@@ -72,8 +80,7 @@ class GpuComputeSummary(Contract):
     reported_memory_mib: int | None = Field(default=None, ge=0)
 
 
-class ComputeObservation(Contract):
-    observed_at: AwareDatetime
+class ComputeObservation(TimedObservation):
     quality: Literal["ok", "error", "unsupported", "unknown"]
     scope: Literal["driver_reported_compute_apps"] = "driver_reported_compute_apps"
     user_scope: Literal["unknown"] = "unknown"
@@ -94,9 +101,8 @@ class ComputeObservation(Contract):
         return self
 
 
-class ResourceObservation(Contract):
+class ResourceObservation(TimedObservation):
     schema_version: Literal["aris.resource-observation/v1"] = "aris.resource-observation/v1"
-    observed_at: AwareDatetime
     gpu: GpuObservation
     system: SystemObservation
     compute: ComputeObservation
@@ -114,3 +120,33 @@ class ResourceInspection(Contract):
     schema_version: Literal["aris.resource-inspection/v1"] = "aris.resource-inspection/v1"
     hostname: str = Field(min_length=1, max_length=256)
     resources: ResourceObservation
+
+
+class ResourceTelemetryBatch(AgentEnvelope):
+    schema_version: Literal["aris.telemetry/v2"] = "aris.telemetry/v2"
+    resources: ResourceObservation
+
+    @model_validator(mode="after")
+    def consistent_time(self) -> "ResourceTelemetryBatch":
+        self.observed_at = self.observed_at.astimezone(UTC)
+        self.sent_at = self.sent_at.astimezone(UTC)
+        if self.resources.observed_at != self.observed_at:
+            raise ValueError("resource time differs from the envelope")
+        return self
+
+
+class NodeResourceStatus(Contract):
+    node: NodeStatus
+    resource_seq: int | None = None
+    system_freshness: Literal["CURRENT", "STALE", "MISSING"]
+    system_observed_at: AwareDatetime | None = None
+    system: SystemObservation | None = None
+    compute_freshness: Literal["CURRENT", "STALE", "MISSING"]
+    compute_observed_at: AwareDatetime | None = None
+    compute: ComputeObservation | None = None
+
+
+class ResourceStatus(Contract):
+    schema_version: Literal["aris.resources/v2"] = "aris.resources/v2"
+    generated_at: AwareDatetime
+    nodes: list[NodeResourceStatus]

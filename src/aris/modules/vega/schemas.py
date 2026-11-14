@@ -66,9 +66,6 @@ class Heartbeat(AgentEnvelope):
         return self
 
 
-AgentReport = TelemetryBatch | Heartbeat
-
-
 class IngestResult(Contract):
     ok: Literal[True] = True
     message_id: UUID

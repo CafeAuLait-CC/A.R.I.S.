@@ -7,7 +7,9 @@ from typing import Literal
 from uuid import uuid4
 
 from aris import __version__
-from aris.modules.vega.schemas import AgentReport, GpuSample, Heartbeat, TelemetryBatch
+from aris.modules.vega.reports import TELEMETRY_REPORT, AgentReport
+from aris.modules.vega.resource_schemas import ResourceObservation, ResourceTelemetryBatch
+from aris.modules.vega.schemas import GpuSample, Heartbeat, TelemetryBatch
 
 
 @contextmanager
@@ -58,15 +60,25 @@ class Spool:
         assert isinstance(message, Heartbeat)
         return message
 
+    def enqueue_resource(
+        self, hostname: str, resources: ResourceObservation
+    ) -> ResourceTelemetryBatch:
+        message = self._enqueue(
+            hostname, None, observed_at=resources.observed_at, resources=resources
+        )
+        assert isinstance(message, ResourceTelemetryBatch)
+        return message
+
     def _enqueue(
         self,
         hostname: str,
         samples: list[GpuSample] | None,
         status: Literal["ok", "error"] = "ok",
         observed_at: datetime | None = None,
+        resources: ResourceObservation | None = None,
     ) -> AgentReport:
         now = datetime.now(UTC)
-        kind = "heartbeat" if samples is None else "telemetry"
+        kind = "heartbeat" if samples is None and resources is None else "telemetry"
         with connection(self.path) as db:
             db.execute("BEGIN IMMEDIATE")
             count = db.execute("SELECT count(*) FROM pending WHERE kind=?", (kind,)).fetchone()[0]
@@ -87,7 +99,9 @@ class Spool:
                 sent_at=now,
             )
             batch: AgentReport
-            if samples is None:
+            if resources is not None:
+                batch = ResourceTelemetryBatch.model_validate({**envelope, "resources": resources})
+            elif samples is None:
                 batch = Heartbeat.model_validate(
                     {
                         **envelope,
@@ -107,7 +121,11 @@ class Spool:
     def pending(self) -> list[AgentReport]:
         with connection(self.path) as db:
             return [
-                (Heartbeat if row[1] == "heartbeat" else TelemetryBatch).model_validate_json(row[0])
+                (
+                    Heartbeat.model_validate_json(row[0])
+                    if row[1] == "heartbeat"
+                    else TELEMETRY_REPORT.validate_json(row[0])
+                )
                 for row in db.execute("SELECT payload, kind FROM pending ORDER BY seq")
             ]
 
@@ -124,7 +142,11 @@ class Spool:
                 (limit,),
             ).fetchall()
         return [
-            (Heartbeat if kind == "heartbeat" else TelemetryBatch).model_validate_json(payload)
+            (
+                Heartbeat.model_validate_json(payload)
+                if kind == "heartbeat"
+                else TELEMETRY_REPORT.validate_json(payload)
+            )
             for payload, kind in rows
         ]
 
@@ -149,8 +171,10 @@ class Spool:
             ).fetchone()
             if row is None:
                 return
-            stored = (Heartbeat if row[1] == "heartbeat" else TelemetryBatch).model_validate_json(
-                row[0]
+            stored = (
+                Heartbeat.model_validate_json(row[0])
+                if row[1] == "heartbeat"
+                else TELEMETRY_REPORT.validate_json(row[0])
             )
             if stored != batch:
                 return
