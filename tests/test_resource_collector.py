@@ -196,7 +196,7 @@ def test_full_inspection_needs_no_credentials_network_or_spool(tmp_path, monkeyp
     def forbidden(*args, **kwargs):
         raise AssertionError("inspection must not open credentials or transport")
 
-    monkeypatch.setattr("sys.argv", ["aris-vega-collector", "--inspect-resources"])
+    monkeypatch.setattr("sys.argv", ["aris-vega-collector", "--inspect"])
     monkeypatch.setattr(
         "aris.apps.agent.main.ResourceSampler", lambda: SimpleNamespace(sample=lambda: observation)
     )
@@ -204,7 +204,6 @@ def test_full_inspection_needs_no_credentials_network_or_spool(tmp_path, monkeyp
         monkeypatch.setattr("aris.apps.agent.main." + name, forbidden)
     main()
     result = json.loads(capsys.readouterr().out)
-    assert result["schema_version"] == "aris.resource-inspection/v1"
     assert result["resources"]["system"]["cpu"]["quality"] == "warming"
     assert result["resources"]["system"]["memory"]["quality"] == "ok"
     assert datetime.fromisoformat(result["resources"]["observed_at"]).tzinfo is UTC

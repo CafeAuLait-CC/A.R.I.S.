@@ -18,10 +18,6 @@ from aris.modules.vega.live_schemas import (
     PreviewLease,
     RelayNodeStatus,
     RelayStatus,
-    ResourceLiveFrame,
-    ResourceLiveHello,
-    ResourceLiveNode,
-    ResourceLiveSnapshot,
 )
 
 
@@ -32,9 +28,9 @@ def signal(queue: asyncio.Queue[None]) -> None:
 
 @dataclass
 class CollectorConnection:
-    hello: LiveHello | ResourceLiveHello
+    hello: LiveHello
     control: asyncio.Queue[None] = field(default_factory=lambda: asyncio.Queue(maxsize=1))
-    frame: LiveFrame | ResourceLiveFrame | None = None
+    frame: LiveFrame | None = None
     received: float = 0
     connected: bool = True
     received_frames: int = 0
@@ -73,7 +69,7 @@ class LiveHub:
             if collector.connected:
                 signal(collector.control)
 
-    def attach(self, hello: LiveHello | ResourceLiveHello) -> CollectorConnection:
+    def attach(self, hello: LiveHello) -> CollectorConnection:
         previous = self.collectors.get(hello.node_id)
         if previous and previous.connected:
             # A reconnect cannot let an old socket overwrite its replacement.
@@ -90,13 +86,12 @@ class LiveHub:
         if self.collectors.get(connection.hello.node_id) is connection:
             self.notify()
 
-    def accept(self, connection: CollectorConnection, frame: LiveFrame | ResourceLiveFrame) -> None:
+    def accept(self, connection: CollectorConnection, frame: LiveFrame) -> None:
         now = self.clock()
         if (
             not connection.connected
             or self.collectors.get(connection.hello.node_id) is not connection
             or frame.session_id != connection.hello.session_id
-            or frame.schema_version != connection.hello.schema_version
             or (connection.frame is not None and frame.seq <= connection.frame.seq)
         ):
             raise ValueError("invalid preview session or sequence")
@@ -109,11 +104,7 @@ class LiveHub:
             return
         if connection.frame is not None and now - connection.received < 0.4:
             raise ValueError("preview rate exceeded")
-        latest_time = (
-            frame.resources.observed_at
-            if isinstance(frame, ResourceLiveFrame)
-            else frame.observed_at
-        )
+        latest_time = frame.resources.observed_at
         if (latest_time - datetime.now(UTC)).total_seconds() > 60:
             raise ValueError("preview observation is in the future")
         connection.frame = frame
@@ -167,44 +158,32 @@ class LiveHub:
                     quality = "stale"
                 else:
                     quality = "live" if frame.quality == "ok" else "error"
-            nodes.append(
-                LiveNode(
-                    node_id=connection.hello.node_id,
-                    agent_id=connection.hello.agent_id,
-                    hostname=connection.hello.hostname,
-                    session_id=connection.hello.session_id,
-                    connected=connection.connected,
-                    quality=quality,
-                    seq=frame.seq if frame else None,
-                    observed_at=frame.observed_at if frame else None,
-                    gpus=frame.gpus if frame and quality == "live" else [],
-                )
+            values: dict[str, object] = dict(
+                node_id=connection.hello.node_id,
+                agent_id=connection.hello.agent_id,
+                hostname=connection.hello.hostname,
+                session_id=connection.hello.session_id,
+                connected=connection.connected,
+                quality=quality,
+                seq=frame.seq if frame else None,
+                observed_at=frame.observed_at if frame else None,
+                gpus=frame.gpus if frame and quality == "live" else [],
             )
-        return LiveSnapshot(generated_at=now, nodes=nodes)
-
-    def resource_snapshot(self) -> ResourceLiveSnapshot:
-        base = self.snapshot()
-        nodes: list[ResourceLiveNode] = []
-        for node in base.nodes:
-            connection = self.collectors[node.node_id]
-            frame = connection.frame
-            values = node.model_dump()
-            resources = frame.resources if isinstance(frame, ResourceLiveFrame) else None
             for name, max_age in (("system", 3), ("compute", 30)):
-                part = getattr(resources, name) if resources else None
+                part = getattr(frame.resources, name) if frame else None
                 current = (
                     part is not None
                     and connection.connected
                     and self.clock() - connection.received <= 3
-                    and -3 <= (base.generated_at - part.observed_at).total_seconds() <= max_age
+                    and -3 <= (now - part.observed_at).total_seconds() <= max_age
                 )
                 values[name + "_freshness"] = (
                     "MISSING" if part is None else "CURRENT" if current else "STALE"
                 )
                 values[name + "_observed_at"] = part.observed_at if part else None
                 values[name] = part if current else None
-            nodes.append(ResourceLiveNode.model_validate(values))
-        return ResourceLiveSnapshot(generated_at=base.generated_at, nodes=nodes)
+            nodes.append(LiveNode.model_validate(values))
+        return LiveSnapshot(generated_at=now, nodes=nodes)
 
     def relay_status(self) -> RelayStatus:
         wall_now, monotonic_now = datetime.now(UTC), self.clock()
@@ -235,7 +214,6 @@ class LiveHub:
             nodes.append(
                 RelayNodeStatus(
                     node_id=node_id,
-                    protocol=connection.hello.schema_version,
                     session_id=connection.hello.session_id,
                     connected=connection.connected,
                     preview_requested=bool(active_viewers and connection.connected),

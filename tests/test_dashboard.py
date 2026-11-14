@@ -89,7 +89,7 @@ def test_preview_proxy_keeps_read_credentials_server_side_and_closes_upstream(
 
     asyncio.run(consume())
     assert requests[0].headers["Authorization"] == "Bearer " + READ_TOKEN
-    assert requests[0].url.path == "/internal/v1/live"
+    assert requests[0].url.path == "/internal/live"
     for url in ["http://remote.example", "https://user:password@host"]:
         with pytest.raises(ValueError, match="preview API"):
             create_dashboard(settings, api_url=url)
@@ -135,7 +135,7 @@ def test_stream_preserves_fact_freshness_and_never_exposes_tokens(client, settin
         frame = await anext(stream)
         assert frame.startswith("event: resources\ndata: ")
         snapshot = json.loads(frame.split("data: ", 1)[1])
-        node = snapshot["nodes"][0]
+        node = snapshot["nodes"][0]["node"]
         assert node["status"] == "STALE"
         assert node["gpus"][0]["observed_state"] == "unknown"
         assert READ_TOKEN not in frame and AGENT_TOKEN not in frame
@@ -146,7 +146,7 @@ def test_stream_preserves_fact_freshness_and_never_exposes_tokens(client, settin
 
 def test_stream_reports_dependency_failure_without_leaking_exception():
     class BrokenService:
-        def status(self):
+        def resource_status(self):
             raise RuntimeError("password=private-database-password")
 
     async def connected():

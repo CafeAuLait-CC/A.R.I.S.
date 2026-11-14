@@ -11,8 +11,10 @@ from pydantic import ValidationError
 from aris.apps.agent.collector import parse_nvidia_csv
 from aris.apps.agent.config import AgentSettings
 from aris.apps.agent.main import CollectionFailed, flush, main, tick
+from aris.apps.agent.resource_sampler import ResourceSampler
 from aris.apps.agent.spool import Spool
 from aris.modules.vega.schemas import Heartbeat
+from tests.resource_fixtures import resource_observation
 
 
 def samples():
@@ -37,38 +39,34 @@ def test_collector_never_turns_missing_data_into_idle(output):
 def test_spool_restart_sequence_and_capacity(tmp_path):
     path = tmp_path / "spool.sqlite3"
     spool = Spool(path, "agent-a", "node-a", max_batches=1)
-    first = spool.enqueue("host-a", samples())
+    first = spool.enqueue_resource("host-a", resource_observation())
     restarted = Spool(path, "agent-a", "node-a", max_batches=1)
     assert restarted.pending()[0] == first
     with pytest.raises(RuntimeError, match="spool full"):
-        restarted.enqueue("host-a", samples())
+        restarted.enqueue_resource("host-a", resource_observation())
     restarted.acknowledge(first)
-    assert restarted.enqueue("host-a", samples()).seq == 2
+    assert restarted.enqueue_resource("host-a", resource_observation()).seq == 2
     with pytest.raises(ValueError, match="another agent"):
         Spool(path, "agent-b", "node-a")
 
 
-def test_existing_spool_upgrades_without_changing_unacknowledged_messages(tmp_path):
-    path = tmp_path / "old.sqlite3"
-    original = Spool(path, "agent-a", "node-a").enqueue("host-a", samples())
+def test_unsupported_pending_is_rejected_without_rewriting_or_resetting_spool(tmp_path):
+    path = tmp_path / "unsupported.sqlite3"
+    spool = Spool(path, "agent-a", "node-a")
+    spool.enqueue_resource("host-a", resource_observation())
     with sqlite3.connect(path) as db:
-        db.execute("ALTER TABLE pending DROP COLUMN kind")
-        before = json.dumps(original.model_dump(mode="json"), sort_keys=True)
-        db.execute("UPDATE pending SET payload=?", (before,))
-    spool = Spool(path, "agent-a", "node-a", max_batches=1)
-    heartbeat = spool.enqueue_heartbeat("host-a", "error")
-    assert heartbeat.seq == 2
-    with pytest.raises(RuntimeError, match="spool full"):
-        spool.enqueue_heartbeat("host-a", "ok")
-    restarted = Spool(path, "agent-a", "node-a")
-    assert restarted.pending() == [original, heartbeat]
+        db.execute("UPDATE pending SET payload=?", ('{"schema_version":"aris.agent/v1"}',))
+    before, inode = path.read_bytes(), path.stat().st_ino
+    with pytest.raises(ValidationError):
+        Spool(path, "agent-a", "node-a")
+    assert path.read_bytes() == before and path.stat().st_ino == inode
     with sqlite3.connect(path) as db:
-        assert db.execute("SELECT payload FROM pending WHERE seq=1").fetchone()[0] == before
-    restarted.acknowledge(original)
-    assert restarted.pending() == [heartbeat]
+        assert db.execute("SELECT value FROM metadata WHERE key='last_seq'").fetchone()[0] == "1"
 
 
-def test_collector_failure_sends_only_error_heartbeat_and_keeps_sequence(tmp_path, monkeypatch):
+def test_collector_failure_preserves_system_and_error_heartbeat_then_recovers(
+    tmp_path, monkeypatch
+):
     def fail():
         raise ValueError("sensitive collector detail")
 
@@ -93,23 +91,24 @@ def test_collector_failure_sends_only_error_heartbeat_and_keeps_sequence(tmp_pat
         )
 
     with httpx.Client(transport=httpx.MockTransport(acknowledge)) as client:
-        with pytest.raises(CollectionFailed, match="^ValueError$"):
+        with pytest.raises(CollectionFailed):
             tick(spool, settings, client)
-        assert requests[0][0] == "/vega/v1/heartbeat"
+        assert [path for path, _ in requests] == ["/vega/heartbeat", "/vega/telemetry/batch"]
+        assert requests[1][1]["resources"]["gpu"]["quality"] == "error"
         assert Heartbeat.model_validate(requests[0][1]).collector_status == "error"
         assert "sensitive" not in json.dumps(requests)
         assert spool.pending() == []
         monkeypatch.setattr("aris.apps.agent.main.collect", samples)
-        assert tick(spool, settings, client) == {"seq": 3, "delivered": 2}
-        assert [path for path, _ in requests[1:]] == [
-            "/vega/v1/heartbeat",
-            "/vega/v1/telemetry/batch",
+        assert tick(spool, settings, client) == {"seq": 4, "delivered": 2}
+        assert [path for path, _ in requests[2:]] == [
+            "/vega/heartbeat",
+            "/vega/telemetry/batch",
         ]
 
 
 def test_transport_retains_failed_and_mismatched_messages_then_replays_exactly(tmp_path):
     spool = Spool(tmp_path / "spool.sqlite3", "agent-a", "node-a")
-    first = spool.enqueue("host-a", samples())
+    first = spool.enqueue_resource("host-a", resource_observation())
     settings = AgentSettings(
         _env_file=None, id="agent-a", node_id="node-a", token="test-agent-credential-12345"
     )
@@ -156,7 +155,7 @@ def test_full_spool_can_drain_and_collection_recovers(tmp_path, monkeypatch):
     import json
 
     spool = Spool(tmp_path / "full.sqlite3", "agent-a", "node-a", max_batches=1)
-    spool.enqueue("host-a", samples())
+    spool.enqueue_resource("host-a", resource_observation())
     monkeypatch.setattr("aris.apps.agent.main.collect", samples)
     settings = AgentSettings(
         _env_file=None, id="agent-a", node_id="node-a", token="test-agent-credential-12345"
@@ -188,29 +187,29 @@ def test_inspection_needs_no_credentials_and_creates_no_spool_or_http_client(mon
         raise AssertionError("inspection must not initialize credentials, spool or transport")
 
     monkeypatch.setattr("sys.argv", ["aris-agent", "--inspect"])
-    monkeypatch.setattr("aris.apps.agent.main.collect", samples)
+    monkeypatch.setattr("aris.apps.agent.main.ResourceSampler", lambda: ResourceSampler(samples))
     monkeypatch.setattr("aris.apps.agent.main.AgentSettings", forbidden)
     monkeypatch.setattr("aris.apps.agent.main.Spool", forbidden)
     monkeypatch.setattr("aris.apps.agent.main.httpx.Client", forbidden)
     main()
     output = json.loads(capsys.readouterr().out)
-    assert output["schema_version"] == "aris.agent-inspection/v1"
-    assert output["gpus"][0]["gpu_uuid"] == "GPU-a"
+    assert output["resources"]["gpu"]["gpus"][0]["gpu_uuid"] == "GPU-a"
 
 
-def test_failed_inspection_returns_error_without_an_empty_or_idle_snapshot(monkeypatch, capsys):
+def test_failed_inspection_reports_unknown_gpu_without_leaking_driver_output(monkeypatch, capsys):
     def fail():
         raise ValueError("sensitive collector detail")
 
     monkeypatch.setattr("sys.argv", ["aris-agent", "--inspect"])
-    monkeypatch.setattr("aris.apps.agent.main.collect", fail)
+    monkeypatch.setattr("aris.apps.agent.main.ResourceSampler", lambda: ResourceSampler(fail))
     with pytest.raises(SystemExit) as exit:
         main()
     assert exit.value.code == 1
     captured = capsys.readouterr()
-    assert captured.out == ""
-    assert "ValueError" in captured.err
-    assert "sensitive collector detail" not in captured.err
+    data = json.loads(captured.out)
+    assert data["resources"]["gpu"]["quality"] == "error"
+    assert data["resources"]["gpu"]["gpus"] == []
+    assert "sensitive collector detail" not in captured.out + captured.err
 
 
 def test_catch_up_is_bounded_prioritizes_current_data_and_retains_exact_history(
@@ -219,7 +218,7 @@ def test_catch_up_is_bounded_prioritizes_current_data_and_retains_exact_history(
     spool = Spool(tmp_path / "backlog.sqlite3", "agent-a", "node-a")
     old_time = datetime.now(UTC) - timedelta(hours=12)
     for _ in range(10):
-        spool.enqueue("test-node", samples(), old_time)
+        spool.enqueue_resource("test-node", resource_observation(observed_at=old_time))
     heartbeat = spool.enqueue_heartbeat("test-node", "ok")
     with sqlite3.connect(spool.path) as db:
         before = dict(db.execute("SELECT seq,payload FROM pending"))
@@ -274,7 +273,9 @@ def test_post_outage_current_status_recovers_before_complete_history_drain(
 
     spool = Spool(tmp_path / "recovery.sqlite3", "agent-a", "node-a")
     for _ in range(12):
-        spool.enqueue("test-node", samples(), datetime.now(UTC) - timedelta(minutes=10))
+        spool.enqueue_resource(
+            "test-node", resource_observation(observed_at=datetime.now(UTC) - timedelta(minutes=10))
+        )
     spool.enqueue_heartbeat("test-node", "ok")
     config = AgentSettings(
         _env_file=None,
@@ -296,7 +297,7 @@ def test_post_outage_current_status_recovers_before_complete_history_drain(
         assert flush(spool, config, transport) == 3
         node = status(client)["nodes"][0]
         assert node["status"] == "ONLINE" and node["telemetry_status"] == "STALE"
-        newest = spool.enqueue("test-node", samples())
+        newest = spool.enqueue_resource("test-node", resource_observation())
         spool.enqueue_heartbeat("test-node", "ok")
         assert flush(spool, config, transport) == 3
         assert spool.statistics()["pending_batches"] > 0

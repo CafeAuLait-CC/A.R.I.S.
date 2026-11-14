@@ -102,7 +102,6 @@ class ComputeObservation(TimedObservation):
 
 
 class ResourceObservation(TimedObservation):
-    schema_version: Literal["aris.resource-observation/v1"] = "aris.resource-observation/v1"
     gpu: GpuObservation
     system: SystemObservation
     compute: ComputeObservation
@@ -117,13 +116,12 @@ class ResourceObservation(TimedObservation):
 
 
 class ResourceInspection(Contract):
-    schema_version: Literal["aris.resource-inspection/v1"] = "aris.resource-inspection/v1"
     hostname: str = Field(min_length=1, max_length=256)
     resources: ResourceObservation
 
 
 class ResourceTelemetryBatch(AgentEnvelope):
-    schema_version: Literal["aris.telemetry/v2"] = "aris.telemetry/v2"
+    type: Literal["telemetry"] = "telemetry"
     resources: ResourceObservation
 
     @model_validator(mode="after")
@@ -147,6 +145,5 @@ class NodeResourceStatus(Contract):
 
 
 class ResourceStatus(Contract):
-    schema_version: Literal["aris.resources/v2"] = "aris.resources/v2"
     generated_at: AwareDatetime
     nodes: list[NodeResourceStatus]

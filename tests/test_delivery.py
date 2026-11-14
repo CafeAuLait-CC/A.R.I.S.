@@ -16,8 +16,7 @@ from aris.apps.agent.resource_sampler import ResourceSampler
 from aris.apps.agent.spool import Spool
 from aris.apps.agent.transport import DeliveryWorker
 from tests.conftest import AGENT_TOKEN
-from tests.test_agent import samples
-from tests.test_resource_telemetry import resource_observation
+from tests.resource_fixtures import resource_observation
 
 
 def settings(**kwargs):
@@ -127,14 +126,14 @@ def test_delivery_backoff_ignores_new_sample_wakes_and_logs_actual_acks(tmp_path
 
 def test_heartbeat_capacity_is_independent_and_latest_facts_leave_room_for_history(tmp_path):
     spool = Spool(tmp_path / "spool.sqlite3", "agent-a", "node-a", max_batches=2, max_heartbeats=3)
-    spool.enqueue("node", samples())
-    spool.enqueue("node", samples())
+    spool.enqueue_resource("node", resource_observation())
+    spool.enqueue_resource("node", resource_observation())
     for _ in range(3):
         spool.enqueue_heartbeat("node", "error")
     with sqlite3.connect(spool.path) as db:
         before = dict(db.execute("SELECT seq,payload FROM pending"))
     with pytest.raises(RuntimeError, match="unacknowledged data retained"):
-        spool.enqueue("node", samples())
+        spool.enqueue_resource("node", resource_observation())
     with pytest.raises(RuntimeError, match="unacknowledged data retained"):
         spool.enqueue_heartbeat("node", "ok")
     with sqlite3.connect(spool.path) as db:
@@ -170,7 +169,6 @@ def test_actual_daemon_samples_while_server_holds_delivery_and_stops_cleanly(tmp
         "ARIS_AGENT_API_URL": f"http://127.0.0.1:{server.server_port}",
         "ARIS_AGENT_SPOOL_PATH": str(path),
         "ARIS_AGENT_INTERVAL_SECONDS": "1",
-        "ARIS_AGENT_RESOURCE_ENABLED": "true",
         "ARIS_AGENT_LIVE_ENABLED": "false",
         "ARIS_AGENT_MAX_BUFFERED_BATCHES": "20",
         "ARIS_AGENT_MAX_BUFFERED_HEARTBEATS": "20",

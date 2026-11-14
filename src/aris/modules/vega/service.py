@@ -98,19 +98,9 @@ class VegaService:
                     self._collector_health(
                         node, batch.seq, batch.observed_at, batch.collector_status
                     )
-            elif isinstance(batch, ResourceTelemetryBatch):
-                kind = "telemetry"
-                applied = self._apply_resources(session, repo, node, batch, now)
             else:
                 kind = "telemetry"
-                applied = batch.seq > node.telemetry_seq and (
-                    node.telemetry_at is None or batch.observed_at >= utc(node.telemetry_at)
-                )
-                node.telemetry_seq = max(node.telemetry_seq, batch.seq)
-                if applied:
-                    node.telemetry_at = utc(batch.observed_at)
-                    node.telemetry_received_at = now
-                    self._apply_gpus(session, repo, batch.node_id, batch.gpus)
+                applied = self._apply_resources(session, repo, node, batch, now)
             session.add(
                 AgentMessage(
                     id=str(uuid4()),

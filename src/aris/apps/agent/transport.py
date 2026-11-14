@@ -10,7 +10,6 @@ import httpx
 
 from aris.apps.agent.config import AgentSettings
 from aris.apps.agent.spool import Spool
-from aris.modules.vega.resource_schemas import ResourceTelemetryBatch
 from aris.modules.vega.schemas import Heartbeat, IngestResult
 
 _REPORT_LOCK = threading.Lock()
@@ -28,9 +27,8 @@ def flush(
     started = clock()
     for batch in spool.delivery_batch(settings.flush_max_messages):
         endpoint = "heartbeat" if isinstance(batch, Heartbeat) else "telemetry/batch"
-        version = "v2" if isinstance(batch, ResourceTelemetryBatch) else "v1"
         response = client.post(
-            f"{settings.api_url.rstrip('/')}/vega/{version}/{endpoint}",
+            f"{settings.api_url.rstrip('/')}/vega/{endpoint}",
             headers={"X-Agent-Token": settings.token.get_secret_value()},
             json=batch.model_dump(mode="json"),
         )

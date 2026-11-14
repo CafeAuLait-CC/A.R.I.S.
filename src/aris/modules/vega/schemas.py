@@ -5,7 +5,7 @@ from pydantic import AwareDatetime, Field, model_validator
 
 from aris.core.contracts import Contract
 
-Capability = Literal["gpu.telemetry/v1", "agent.heartbeat/v1", "node.resources/v2"]
+Capability = Literal["node.resources", "heartbeat"]
 
 
 class GpuSample(Contract):
@@ -41,23 +41,10 @@ class AgentEnvelope(Contract):
         return self
 
 
-class TelemetryBatch(AgentEnvelope):
-    schema_version: Literal["aris.agent/v1"] = "aris.agent/v1"
-    gpus: list[GpuSample] = Field(max_length=64)
-
-    @model_validator(mode="after")
-    def validate_snapshot(self) -> "TelemetryBatch":
-        if len({gpu.gpu_uuid for gpu in self.gpus}) != len(self.gpus):
-            raise ValueError("duplicate GPU UUID")
-        if len({gpu.index for gpu in self.gpus}) != len(self.gpus):
-            raise ValueError("duplicate GPU index")
-        return self
-
-
 class Heartbeat(AgentEnvelope):
-    schema_version: Literal["aris.heartbeat/v1"] = "aris.heartbeat/v1"
+    type: Literal["heartbeat"] = "heartbeat"
     collector_status: Literal["ok", "error"]
-    capabilities: list[Capability] = Field(min_length=1, max_length=3)
+    capabilities: list[Capability] = Field(min_length=1, max_length=2)
 
     @model_validator(mode="after")
     def unique_capabilities(self) -> "Heartbeat":
@@ -98,6 +85,5 @@ class NodeStatus(Contract):
 
 
 class ClusterStatus(Contract):
-    schema_version: Literal["aris.resources/v1"] = "aris.resources/v1"
     generated_at: AwareDatetime
     nodes: list[NodeStatus]

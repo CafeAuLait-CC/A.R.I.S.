@@ -5,7 +5,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import datetime
 from urllib.parse import urlencode, urlsplit, urlunsplit
 from uuid import UUID, uuid4
 
@@ -14,13 +14,10 @@ from websockets.sync.client import ClientConnection, connect
 
 from aris.apps.agent.config import AgentSettings
 from aris.apps.agent.resource_sampler import ResourceSampler
-from aris.apps.agent.sampler import Sampler
 from aris.modules.vega.live_schemas import (
     LiveFrame,
     LiveHello,
     PreviewLease,
-    ResourceLiveFrame,
-    ResourceLiveHello,
 )
 
 logger = logging.getLogger(__name__)
@@ -31,7 +28,7 @@ class PreviewSession:
 
     def __init__(
         self,
-        sampler: Sampler | ResourceSampler,
+        sampler: ResourceSampler,
         session_id: UUID,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -48,42 +45,18 @@ class PreviewSession:
         self.deadline = self.clock() + lease.lease_seconds if lease.lease_seconds else 0
         self.interval = lease.interval_seconds
 
-    def frame(self) -> LiveFrame | ResourceLiveFrame | None:
+    def frame(self) -> LiveFrame | None:
         now = self.clock()
         if now >= self.deadline or now < self.next_sample:
             return None
         self.next_sample = now + self.interval
         self.seq += 1
-        frame: LiveFrame | ResourceLiveFrame
-        if isinstance(self.sampler, ResourceSampler):
-            resources = self.sampler.sample(fresh_after=self.last_observed_at)
-            frame = ResourceLiveFrame(session_id=self.session_id, seq=self.seq, resources=resources)
-        else:
-            frame = self.gpu_frame()
+        resources = self.sampler.sample(fresh_after=self.last_observed_at)
+        frame = LiveFrame(session_id=self.session_id, seq=self.seq, resources=resources)
         # A slow driver call may have outlived its lease. Never renew it ourselves.
         if self.clock() >= self.deadline:
             return None
         self.last_observed_at = frame.observed_at
-        return frame
-
-    def gpu_frame(self) -> LiveFrame:
-        assert isinstance(self.sampler, Sampler)
-        try:
-            observation = self.sampler.sample(fresh_after=self.last_observed_at)
-            frame = LiveFrame(
-                session_id=self.session_id,
-                seq=self.seq,
-                observed_at=observation.observed_at,
-                quality="ok",
-                gpus=observation.gpus,
-            )
-        except Exception:
-            frame = LiveFrame(
-                session_id=self.session_id,
-                seq=self.seq,
-                observed_at=datetime.now(UTC),
-                quality="error",
-            )
         return frame
 
 
@@ -93,8 +66,7 @@ def live_url(settings: AgentSettings) -> str:
         (
             "wss" if base.scheme == "https" else "ws",
             base.netloc,
-            base.path.rstrip("/")
-            + ("/vega/v2/live" if settings.resource_enabled else "/vega/v1/live"),
+            base.path.rstrip("/") + "/vega/live",
             urlencode({"agent_id": settings.id, "node_id": settings.node_id}),
             "",
         )
@@ -128,7 +100,7 @@ def outbound_connection(settings: AgentSettings) -> Iterator[ClientConnection]:
 
 
 class LiveClient:
-    def __init__(self, settings: AgentSettings, sampler: Sampler | ResourceSampler) -> None:
+    def __init__(self, settings: AgentSettings, sampler: ResourceSampler) -> None:
         self.settings = settings
         self.sampler = sampler
         self.stopped = threading.Event()
@@ -146,12 +118,7 @@ class LiveClient:
         while not self.stopped.is_set():
             try:
                 with outbound_connection(self.settings) as websocket:
-                    hello_type = (
-                        ResourceLiveHello
-                        if isinstance(self.sampler, ResourceSampler)
-                        else LiveHello
-                    )
-                    hello = hello_type(
+                    hello = LiveHello(
                         agent_id=self.settings.id,
                         node_id=self.settings.node_id,
                         hostname=socket.gethostname(),

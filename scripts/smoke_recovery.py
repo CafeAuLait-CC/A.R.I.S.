@@ -108,7 +108,6 @@ def main() -> None:
             "ARIS_AGENT_NODE_ID": "recovery-node",
             "ARIS_AGENT_TOKEN": node_token,
             "ARIS_AGENT_SPOOL_PATH": str(spool),
-            "ARIS_AGENT_RESOURCE_ENABLED": "true",
             "ARIS_AGENT_LIVE_ENABLED": "false",
         }
         with socket.socket() as listener:
@@ -144,8 +143,8 @@ def main() -> None:
                 assert metadata["last_seq"] == "4"
                 assert sorted(buffered) == [3, 4]
                 exact = {seq: json.loads(raw) for seq, raw in buffered.items()}
-                assert exact[3]["schema_version"] == "aris.telemetry/v2"
-                assert exact[4]["schema_version"] == "aris.heartbeat/v1"
+                assert exact[3]["type"] == "telemetry"
+                assert exact[4]["type"] == "heartbeat"
                 with engine.connect() as db:
                     assert db.scalar(text("SELECT count(*) FROM agent_messages")) == 2
                 process = start_api(env, port, log, client)
@@ -167,7 +166,7 @@ def main() -> None:
                         assert payload == exact[row.seq]
                         assert row.fingerprint == fingerprint(exact[row.seq])
                 headers = {"Authorization": "Bearer " + read_token}
-                current = client.get("/public/v2/resources", headers=headers)
+                current = client.get("/public/resources", headers=headers)
                 current.raise_for_status()
                 assert current.json()["nodes"][0]["resource_seq"] == 5
                 run_agent(0)
@@ -182,7 +181,7 @@ def main() -> None:
                     assert list(
                         db.scalars(text("SELECT seq FROM agent_messages ORDER BY seq"))
                     ) == list(range(1, 9))
-                recovered = client.get("/public/v2/resources", headers=headers)
+                recovered = client.get("/public/resources", headers=headers)
                 recovered.raise_for_status()
                 node = recovered.json()["nodes"][0]
                 assert node["node"]["status"] == "ONLINE"

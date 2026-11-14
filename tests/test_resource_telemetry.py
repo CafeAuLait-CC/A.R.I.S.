@@ -17,78 +17,40 @@ from aris.apps.agent.spool import Spool
 from aris.core.audit import AuditEntry
 from aris.core.events import DomainEvent, OutboxEntry
 from aris.modules.vega.models import AgentMessage, Node, NodeResource
-from aris.modules.vega.resource_schemas import ResourceObservation
-from aris.modules.vega.schemas import TelemetryBatch
 from tests.conftest import AGENT_TOKEN, READ_TOKEN
+from tests.resource_fixtures import resource_observation
 from tests.test_agent import samples
 from tests.test_heartbeat import beat, heartbeat
 from tests.test_telemetry import batch, post, status
 
 
-def resource_observation(
-    seconds_ago=0, gpu_quality="ok", cpu_quality="ok", compute_age=0, utilization=40
-):
-    observed = datetime.now(UTC) - timedelta(seconds=seconds_ago)
-    return ResourceObservation.model_validate(
-        {
-            "observed_at": observed,
-            "gpu": {
-                "observed_at": observed,
-                "quality": gpu_quality,
-                "gpus": samples() if gpu_quality == "ok" else [],
-            },
-            "system": {
-                "observed_at": observed,
-                "cpu": {
-                    "quality": cpu_quality,
-                    "logical_count": 8,
-                    "utilization_percent": utilization if cpu_quality == "ok" else None,
-                    "window_seconds": 15 if cpu_quality == "ok" else None,
-                },
-                "memory": {"quality": "ok", "total_bytes": 16384, "available_bytes": 4096},
-            },
-            "compute": {
-                "observed_at": observed - timedelta(seconds=compute_age),
-                "quality": "ok",
-                "reported_processes": 1,
-                "gpus": [
-                    {"gpu_uuid": "GPU-a", "reported_processes": 1, "reported_memory_mib": None}
-                ],
-            },
-        }
-    )
-
-
 def resource_batch(seq=1, **changes):
     resources = resource_observation(**changes)
     envelope = batch(seq=seq)
-    del envelope["gpus"]
     return {
         **envelope,
-        "schema_version": "aris.telemetry/v2",
         "observed_at": resources.observed_at.isoformat(),
         "resources": resources.model_dump(mode="json"),
     }
 
 
 def put(client, payload, token=AGENT_TOKEN):
-    return client.post("/vega/v2/telemetry/batch", json=payload, headers={"X-Agent-Token": token})
+    return client.post("/vega/telemetry/batch", json=payload, headers={"X-Agent-Token": token})
 
 
 def resources(client):
-    response = client.get("/public/v2/resources", headers={"Authorization": "Bearer " + READ_TOKEN})
+    response = client.get("/public/resources", headers={"Authorization": "Bearer " + READ_TOKEN})
     assert response.status_code == 200
     return response.json()
 
 
-def test_v2_components_are_one_atomic_message_with_v1_gpu_view_unchanged(client):
+def test_components_are_one_atomic_message_with_gpu_and_resource_views(client):
     payload = resource_batch()
     assert put(client, payload, token="wrong").status_code == 401
-    assert client.get("/public/v2/resources").status_code == 401
+    assert client.get("/public/resources").status_code == 401
     assert put(client, payload).status_code == 200
     current = resources(client)
     node = current["nodes"][0]
-    assert current["schema_version"] == "aris.resources/v2"
     assert node["node"]["status"] == "ONLINE"
     assert node["node"]["telemetry_status"] == "CURRENT"
     assert node["system"]["cpu"]["utilization_percent"] == 40
@@ -96,7 +58,6 @@ def test_v2_components_are_one_atomic_message_with_v1_gpu_view_unchanged(client)
     assert node["compute"]["user_scope"] == "unknown"
     assert node["system_freshness"] == node["compute_freshness"] == "CURRENT"
     old = status(client)
-    assert old["schema_version"] == "aris.resources/v1"
     assert "system" not in old["nodes"][0]
     duplicate = put(client, payload)
     assert duplicate.status_code == 200 and duplicate.json()["duplicate"]
@@ -123,7 +84,7 @@ def test_new_gpu_failure_does_not_erase_system_or_get_hidden_by_older_heartbeat(
 
 
 def test_component_freshness_and_missing_metrics_never_return_fake_zero(client):
-    assert post(client, batch()).status_code == 200
+    assert beat(client, heartbeat()).status_code == 200
     missing = resources(client)["nodes"][0]
     assert missing["system_freshness"] == "MISSING" and missing["system"] is None
     assert (
@@ -198,15 +159,24 @@ def test_resource_projection_and_message_transaction_roll_back_together(client, 
             assert db.scalar(select(func.count()).select_from(model)) == 0
 
 
-def test_v1_canonical_receipt_survives_0004_without_adding_default_resource_fields(settings):
+def test_historical_message_bytes_and_fingerprint_survive_migration_without_legacy_ingress(
+    settings,
+):
     command.downgrade(Config("alembic.ini"), "0003")
+    from types import SimpleNamespace
+
     from fastapi.testclient import TestClient
 
     from aris.apps.api.main import create_app
     from aris.core.db import build_engine
 
-    legacy = TelemetryBatch.model_validate(batch())
-    payload = legacy.model_dump(mode="json")
+    payload = batch()
+    payload.pop("type")
+    payload.pop("resources")
+    payload.update(schema_version="aris.agent/v1", gpus=[gpu.model_dump() for gpu in samples()])
+    legacy = SimpleNamespace(**payload)
+    legacy.observed_at = datetime.fromisoformat(legacy.observed_at)
+    legacy.sent_at = datetime.fromisoformat(legacy.sent_at)
     fingerprint = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -244,14 +214,14 @@ def test_v1_canonical_receipt_survives_0004_without_adding_default_resource_fiel
     command.upgrade(Config("alembic.ini"), "head")
     with TestClient(create_app(settings)) as client:
         result = post(client, payload)
-        assert result.status_code == 200 and result.json()["duplicate"]
+        assert result.status_code == 422
     with engine.connect() as db:
         row = db.execute(select(AgentMessage.payload, AgentMessage.fingerprint)).one()
         assert row.payload == payload and row.fingerprint == fingerprint
     engine.dispose()
 
 
-def test_v1_non_utc_timestamp_is_stored_as_utc_without_changing_payload(client):
+def test_non_utc_timestamp_is_stored_as_utc_without_changing_payload(client):
     instant = datetime.now(UTC) - timedelta(seconds=5)
     offset = instant.astimezone(timezone(timedelta(hours=8)))
     payload = batch(observed_at=offset.isoformat(), sent_at=offset.isoformat())
@@ -300,9 +270,9 @@ def test_0004_backfills_shared_health_without_resetting_existing_heartbeat(setti
     engine.dispose()
 
 
-def test_mixed_v1_v2_spool_replays_exact_reports_to_their_versioned_endpoints(client, tmp_path):
+def test_spool_replays_exact_resources_and_heartbeats_to_their_endpoints(client, tmp_path):
     spool = Spool(tmp_path / "mixed.sqlite3", "agent-a", "node-a")
-    first = spool.enqueue("host", samples())
+    first = spool.enqueue_resource("host", resource_observation())
     second = spool.enqueue_resource("host", resource_observation())
     third = spool.enqueue_heartbeat("host", "ok")
     restarted = Spool(spool.path, "agent-a", "node-a")
@@ -320,9 +290,8 @@ def test_mixed_v1_v2_spool_replays_exact_reports_to_their_versioned_endpoints(cl
     with httpx.Client(transport=httpx.MockTransport(send)) as transport:
         assert flush(restarted, config, transport) == 3
     assert set(paths) == {
-        "/vega/v1/heartbeat",
-        "/vega/v1/telemetry/batch",
-        "/vega/v2/telemetry/batch",
+        "/vega/heartbeat",
+        "/vega/telemetry/batch",
     }
     assert restarted.pending() == []
     assert resources(client)["nodes"][0]["resource_seq"] == second.seq

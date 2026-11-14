@@ -17,18 +17,18 @@ from tests.test_telemetry import batch, post, status
 
 def heartbeat(seq=1, seconds_ago=0, **changes):
     payload = batch(seq=seq, seconds_ago=seconds_ago)
-    del payload["gpus"]
+    del payload["resources"]
     return {
         **payload,
-        "schema_version": "aris.heartbeat/v1",
+        "type": "heartbeat",
         "collector_status": "ok",
-        "capabilities": ["gpu.telemetry/v1", "agent.heartbeat/v1"],
+        "capabilities": ["node.resources", "heartbeat"],
         **changes,
     }
 
 
 def beat(client, payload, token=AGENT_TOKEN):
-    return client.post("/vega/v1/heartbeat", json=payload, headers={"X-Agent-Token": token})
+    return client.post("/vega/heartbeat", json=payload, headers={"X-Agent-Token": token})
 
 
 def test_heartbeat_registers_alive_node_without_inventing_gpu_facts(client):
@@ -139,4 +139,4 @@ def test_upgrade_preserves_existing_telemetry_and_replay(client):
     assert post(client, original).json()["duplicate"] is True
     assert beat(client, heartbeat(seq=2)).status_code == 200
     with client.app.state.engine.connect() as connection:
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0004"
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0005"

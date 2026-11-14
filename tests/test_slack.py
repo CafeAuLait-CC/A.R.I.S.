@@ -212,7 +212,7 @@ def test_home_ack_does_not_call_external_slack_api(slack_client, monkeypatch):
 
 def test_status_escapes_slack_mentions_in_resource_names(slack_client):
     payload = batch()
-    payload["gpus"][0]["model"] = "GPU <@U999> & model"
+    payload["resources"]["gpu"]["gpus"][0]["model"] = "GPU <@U999> & model"
     assert post(slack_client, payload).status_code == 200
     text = slash(slack_client).json()["text"]
     assert "<@U999>" not in text and "&lt;@U999&gt; &amp;" in text

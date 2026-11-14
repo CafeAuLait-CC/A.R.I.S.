@@ -1,7 +1,6 @@
 import asyncio
 import json
 import threading
-from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -12,12 +11,13 @@ from starlette.websockets import WebSocketDisconnect
 
 from aris.apps.agent.config import AgentSettings
 from aris.apps.agent.live import PreviewSession, live_url, outbound_connection
-from aris.apps.agent.sampler import Sampler
+from aris.apps.agent.resource_sampler import ResourceSampler
 from aris.apps.agent.spool import Spool
 from aris.apps.api.main import create_app
 from aris.modules.vega.live import LiveHub
 from aris.modules.vega.live_schemas import LiveFrame, LiveHello, PreviewLease
 from tests.conftest import AGENT_TOKEN
+from tests.resource_fixtures import resource_observation
 from tests.test_agent import samples
 
 
@@ -29,19 +29,14 @@ def hello(**kwargs):
 
 def frame(connection, seq=1, **kwargs):
     return LiveFrame(
-        session_id=connection.hello.session_id,
-        seq=seq,
-        observed_at=datetime.now(UTC),
-        quality="ok",
-        gpus=samples(),
-        **kwargs,
+        session_id=connection.hello.session_id, seq=seq, resources=resource_observation(**kwargs)
     )
 
 
 def test_preview_only_samples_during_a_bounded_read_only_lease():
     now = [100.0]
     calls = []
-    sampler = Sampler(lambda: calls.append(True) or samples(), clock=lambda: now[0])
+    sampler = ResourceSampler(lambda: calls.append(True) or samples(), clock=lambda: now[0])
     session = PreviewSession(sampler, uuid4(), clock=lambda: now[0])
     assert session.frame() is None
     assert calls == []
@@ -65,15 +60,15 @@ def test_preview_only_samples_during_a_bounded_read_only_lease():
 
 def test_live_and_archive_share_observation_time_without_changing_durable_sequence(tmp_path):
     calls = []
-    sampler = Sampler(lambda: calls.append(True) or samples())
+    sampler = ResourceSampler(lambda: calls.append(True) or samples())
     live = PreviewSession(sampler, uuid4())
     live.apply(PreviewLease(lease_seconds=30))
     preview = live.frame()
     archive = sampler.sample()
     spool = Spool(tmp_path / "spool.sqlite3", "agent-a", "node-a")
-    message = spool.enqueue("test-node", archive.gpus, archive.observed_at)
+    message = spool.enqueue_resource("test-node", archive)
     assert len(calls) == 1
-    assert message.observed_at == preview.observed_at
+    assert message.resources.gpu.observed_at == preview.observed_at
     assert message.seq == 1
     assert len(spool.pending()) == 1  # Live frames never entered this spool.
 
@@ -87,7 +82,7 @@ def test_slow_driver_never_turns_a_cached_observation_into_a_new_preview_frame()
         now[0] += 0.4
         return samples()
 
-    sampler = Sampler(slow_driver, clock=lambda: now[0])
+    sampler = ResourceSampler(slow_driver, clock=lambda: now[0])
     preview = PreviewSession(sampler, uuid4(), clock=lambda: now[0])
     preview.apply(PreviewLease(lease_seconds=30))
     first = preview.frame()
@@ -98,7 +93,7 @@ def test_slow_driver_never_turns_a_cached_observation_into_a_new_preview_frame()
     now[0] = 103.0
     archive = sampler.sample()
     third = preview.frame()
-    assert third.observed_at == archive.observed_at
+    assert third.observed_at == archive.gpu.observed_at
     assert len(calls) == 3  # A newer archival read can still be shared.
 
 
@@ -109,14 +104,14 @@ def test_failed_or_slow_collection_never_replays_current_metrics_past_lease():
         now[0] += 5
         return samples()
 
-    slow_session = PreviewSession(Sampler(slow), uuid4(), clock=lambda: now[0])
+    slow_session = PreviewSession(ResourceSampler(slow), uuid4(), clock=lambda: now[0])
     slow_session.apply(PreviewLease(lease_seconds=2))
     assert slow_session.frame() is None
 
     def broken():
         raise RuntimeError("private driver output")
 
-    failed = PreviewSession(Sampler(broken), uuid4())
+    failed = PreviewSession(ResourceSampler(broken), uuid4())
     failed.apply(PreviewLease(lease_seconds=30))
     failed_frame = failed.frame()
     assert failed_frame.quality == "error" and failed_frame.gpus == []
@@ -168,8 +163,7 @@ def test_error_frames_and_disconnect_clear_live_metrics():
                 LiveFrame(
                     session_id=connection.hello.session_id,
                     seq=1,
-                    observed_at=datetime.now(UTC),
-                    quality="error",
+                    resources=resource_observation(gpu_quality="error"),
                 ),
             )
             assert hub.snapshot().nodes[0].quality == "error"
@@ -271,14 +265,14 @@ def test_websocket_auth_identity_and_zero_database_queries(settings, monkeypatch
     monkeypatch.setattr(hub, "accept", record)
     with TestClient(app) as client:
         with pytest.raises(WebSocketDisconnect):
-            with client.websocket_connect("/vega/v1/live?agent_id=agent-a&node_id=node-a"):
+            with client.websocket_connect("/vega/live?agent_id=agent-a&node_id=node-a"):
                 pass
-        assert client.get("/internal/v1/live").status_code == 401
+        assert client.get("/internal/live").status_code == 401
         subscription = hub.subscribe()
         client.portal.call(subscription.__aenter__)
         try:
             with client.websocket_connect(
-                "/vega/v1/live?agent_id=agent-a&node_id=node-a",
+                "/vega/live?agent_id=agent-a&node_id=node-a",
                 headers={"X-Agent-Token": AGENT_TOKEN},
             ) as websocket:
                 greeting = hello()
@@ -288,9 +282,7 @@ def test_websocket_auth_identity_and_zero_database_queries(settings, monkeypatch
                     LiveFrame(
                         session_id=greeting.session_id,
                         seq=1,
-                        observed_at=datetime.now(UTC),
-                        quality="ok",
-                        gpus=samples(),
+                        resources=resource_observation(),
                     ).model_dump_json()
                 )
                 assert accepted.wait(timeout=2)
@@ -306,12 +298,12 @@ def test_websocket_rejects_claimed_identity_and_arbitrary_commands(settings):
     with TestClient(create_app(settings)) as client:
         with pytest.raises(WebSocketDisconnect):
             with client.websocket_connect(
-                "/vega/v1/live?agent_id=agent-a&node_id=node-b",
+                "/vega/live?agent_id=agent-a&node_id=node-b",
                 headers={"X-Agent-Token": AGENT_TOKEN},
             ):
                 pass
         with client.websocket_connect(
-            "/vega/v1/live?agent_id=agent-a&node_id=node-a",
+            "/vega/live?agent_id=agent-a&node_id=node-a",
             headers={"X-Agent-Token": AGENT_TOKEN},
         ) as ws:
             ws.send_text(json.dumps({"type": "shell", "command": "nvidia-smi"}))
@@ -324,9 +316,7 @@ def test_old_observations_are_not_live_and_outbound_transport_has_no_public_list
         hub = LiveHub()
         connection = hub.attach(hello())
         async with hub.subscribe():
-            old = frame(connection).model_copy(
-                update={"observed_at": datetime.now(UTC) - timedelta(seconds=30)}
-            )
+            old = frame(connection, seconds_ago=30)
             hub.accept(connection, old)
             assert hub.snapshot().nodes[0].quality == "stale"
             assert hub.snapshot().nodes[0].gpus == []
@@ -339,5 +329,5 @@ def test_old_observations_are_not_live_and_outbound_transport_has_no_public_list
         token=AGENT_TOKEN,
         api_url="https://control.example",
     )
-    assert live_url(config) == "wss://control.example/vega/v1/live?agent_id=agent-a&node_id=node-a"
+    assert live_url(config) == "wss://control.example/vega/live?agent_id=agent-a&node_id=node-a"
     assert not config.live_enabled

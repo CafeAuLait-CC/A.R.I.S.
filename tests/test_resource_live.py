@@ -20,18 +20,15 @@ from aris.apps.api.main import create_app
 from aris.apps.dashboard.main import preview_proxy, resource_events
 from aris.core.db import session_factory
 from aris.modules.vega.live import LiveHub
-from aris.modules.vega.live_schemas import PreviewLease, ResourceLiveFrame, ResourceLiveHello
+from aris.modules.vega.live_schemas import LiveFrame, LiveHello, PreviewLease
 from aris.modules.vega.models import AgentMessage
 from aris.modules.vega.service import VegaService
 from tests.conftest import AGENT_TOKEN, READ_TOKEN
-from tests.test_live import frame, hello
 from tests.test_resource_telemetry import resource_observation, resources
 
 
 def resource_hello():
-    return ResourceLiveHello(
-        agent_id="agent-a", node_id="node-a", hostname="test-node", session_id=uuid4()
-    )
+    return LiveHello(agent_id="agent-a", node_id="node-a", hostname="test-node", session_id=uuid4())
 
 
 @pytest.mark.parametrize("gpu_quality", ["ok", "error"])
@@ -41,9 +38,7 @@ def test_resource_tick_preserves_healthy_system_and_still_writes_only_two_messag
     sampler = ResourceSampler()
     observation = resource_observation(gpu_quality=gpu_quality)
     monkeypatch.setattr(sampler, "sample", lambda **_: observation)
-    settings = AgentSettings(
-        _env_file=None, id="agent-a", node_id="node-a", token=AGENT_TOKEN, resource_enabled=True
-    )
+    settings = AgentSettings(_env_file=None, id="agent-a", node_id="node-a", token=AGENT_TOKEN)
     spool = Spool(tmp_path / "spool.sqlite3", "agent-a", "node-a")
     requests = []
 
@@ -60,8 +55,8 @@ def test_resource_tick_preserves_healthy_system_and_still_writes_only_two_messag
                 tick(spool, settings, http, sampler=sampler)
         else:
             assert tick(spool, settings, http, sampler=sampler) == {"seq": 2, "delivered": 2}
-    assert [path for path, _ in requests] == ["/vega/v1/heartbeat", "/vega/v2/telemetry/batch"]
-    assert requests[0][1]["capabilities"] == ["node.resources/v2", "agent.heartbeat/v1"]
+    assert [path for path, _ in requests] == ["/vega/heartbeat", "/vega/telemetry/batch"]
+    assert requests[0][1]["capabilities"] == ["node.resources", "heartbeat"]
     assert requests[0][1]["collector_status"] == ("ok" if gpu_quality == "ok" else "error")
     assert spool.pending() == []
     node = resources(client)["nodes"][0]
@@ -85,7 +80,7 @@ def test_resource_preview_uses_read_only_lease_and_shares_archival_sample(tmp_pa
     assert preview.frame() is None and not calls
     preview.apply(PreviewLease(lease_seconds=3))
     first = preview.frame()
-    assert isinstance(first, ResourceLiveFrame)
+    assert isinstance(first, LiveFrame)
     spool = Spool(tmp_path / "spool.sqlite3", "agent-a", "node-a")
     archived = spool.enqueue_resource("test-node", calls[0])
     assert archived.resources == first.resources and archived.seq == 1
@@ -118,16 +113,15 @@ def test_resource_hub_keeps_component_quality_independent_and_clears_disconnecte
     observation = resource_observation(gpu_quality="error", compute_age=16)
     hub.accept(
         connection,
-        ResourceLiveFrame(session_id=connection.hello.session_id, seq=1, resources=observation),
+        LiveFrame(session_id=connection.hello.session_id, seq=1, resources=observation),
     )
-    node = hub.resource_snapshot().nodes[0]
+    node = hub.snapshot().nodes[0]
     assert node.quality == "error" and node.gpus == []
     assert node.system_freshness == node.compute_freshness == "CURRENT"
     assert node.system.memory.available_bytes == 4096
     assert node.compute.observed_at == observation.compute.observed_at
-    assert "system" not in hub.snapshot().model_dump()["nodes"][0]
     hub.detach(connection)
-    lost = hub.resource_snapshot().nodes[0]
+    lost = hub.snapshot().nodes[0]
     assert lost.system is None and lost.compute is None and lost.gpus == []
     assert lost.system_freshness == lost.compute_freshness == "STALE"
     hub.close_viewer(key)
@@ -142,34 +136,17 @@ def test_resource_hub_expires_components_by_their_own_clock_and_transport_age():
     observation.system.observed_at = datetime.now(UTC) - timedelta(seconds=6)
     hub.accept(
         connection,
-        ResourceLiveFrame(session_id=connection.hello.session_id, seq=1, resources=observation),
+        LiveFrame(session_id=connection.hello.session_id, seq=1, resources=observation),
     )
-    node = hub.resource_snapshot().nodes[0]
+    node = hub.snapshot().nodes[0]
     assert node.quality == "live" and node.gpus
     assert node.system is None and node.compute is None
     assert node.system_observed_at == observation.system.observed_at
     now[0] += 4
-    assert hub.resource_snapshot().nodes[0].gpus == []
+    assert hub.snapshot().nodes[0].gpus == []
 
 
-def test_old_collector_has_missing_resources_and_mixed_frame_versions_are_rejected():
-    hub = LiveHub()
-    connection = hub.attach(hello())
-    hub.open_viewer()
-    hub.accept(connection, frame(connection))
-    node = hub.resource_snapshot().nodes[0]
-    assert node.system_freshness == node.compute_freshness == "MISSING"
-    assert node.system is None and node.compute is None
-    with pytest.raises(ValueError, match="session"):
-        hub.accept(
-            connection,
-            ResourceLiveFrame(
-                session_id=connection.hello.session_id, seq=2, resources=resource_observation()
-            ),
-        )
-
-
-def test_v2_websocket_is_authenticated_identity_bound_and_does_no_sql(settings, monkeypatch):
+def test_websocket_is_authenticated_identity_bound_and_does_no_sql(settings, monkeypatch):
     app = create_app(settings)
     queries = []
     received = threading.Event()
@@ -183,27 +160,27 @@ def test_v2_websocket_is_authenticated_identity_bound_and_does_no_sql(settings, 
 
     monkeypatch.setattr(hub, "accept", accept)
     with TestClient(app) as client:
-        assert client.get("/internal/v2/live").status_code == 401
+        assert client.get("/internal/live").status_code == 401
         with pytest.raises(WebSocketDisconnect):
-            with client.websocket_connect("/vega/v2/live?agent_id=agent-a&node_id=node-a"):
+            with client.websocket_connect("/vega/live?agent_id=agent-a&node_id=node-a"):
                 pass
         subscription = hub.subscribe()
         client.portal.call(subscription.__aenter__)
         try:
             with client.websocket_connect(
-                "/vega/v2/live?agent_id=agent-a&node_id=node-a",
+                "/vega/live?agent_id=agent-a&node_id=node-a",
                 headers={"X-Agent-Token": AGENT_TOKEN},
             ) as ws:
                 greeting = resource_hello()
                 ws.send_text(greeting.model_dump_json())
                 assert ws.receive_json()["lease_seconds"] == 30
                 ws.send_text(
-                    ResourceLiveFrame(
+                    LiveFrame(
                         session_id=greeting.session_id, seq=1, resources=resource_observation()
                     ).model_dump_json()
                 )
                 assert received.wait(timeout=2)
-                snapshot = client.portal.call(hub.resource_snapshot)
+                snapshot = client.portal.call(hub.snapshot)
                 assert snapshot.nodes[0].system.cpu.utilization_percent == 40
                 assert AGENT_TOKEN not in snapshot.model_dump_json()
         finally:
@@ -215,9 +192,8 @@ def test_v2_websocket_is_authenticated_identity_bound_and_does_no_sql(settings, 
         node_id="node-a",
         token=AGENT_TOKEN,
         api_url="https://control.example",
-        resource_enabled=True,
     )
-    assert "/vega/v2/live?" in live_url(config)
+    assert "/vega/live?" in live_url(config)
 
 
 def test_resource_dashboard_archive_stream_retains_component_freshness(client, settings):
@@ -230,12 +206,11 @@ def test_resource_dashboard_archive_stream_retains_component_freshness(client, s
         return False
 
     async def consume():
-        stream = resource_events(service, connected, resource_mode=True)
+        stream = resource_events(service, connected)
         await anext(stream)
         message = await anext(stream)
         snapshot = json.loads(message.split("data: ")[1])
         node = snapshot["nodes"][0]
-        assert snapshot["schema_version"] == "aris.resources/v2"
         assert node["system"]["cpu"]["utilization_percent"] == 40
         assert node["compute"] is None and node["compute_freshness"] == "STALE"
         assert READ_TOKEN not in message and AGENT_TOKEN not in message
@@ -244,7 +219,9 @@ def test_resource_dashboard_archive_stream_retains_component_freshness(client, s
     asyncio.run(consume())
 
 
-def test_resource_preview_proxy_uses_v2_and_keeps_credentials_off_browser(settings, monkeypatch):
+def test_resource_preview_proxy_uses_one_protocol_and_keeps_credentials_off_browser(
+    settings, monkeypatch
+):
     requests = []
     real_client = httpx.AsyncClient
 
@@ -252,10 +229,7 @@ def test_resource_preview_proxy_uses_v2_and_keeps_credentials_off_browser(settin
         requests.append(request)
         return httpx.Response(
             200,
-            text=(
-                'event: preview\ndata: {"schema_version":"aris.live-preview/v2",'
-                '"generated_at":"2026-01-01T00:00:00Z","nodes":[]}\n\n'
-            ),
+            text=('event: preview\ndata: {"generated_at":"2026-01-01T00:00:00Z","nodes":[]}\n\n'),
         )
 
     monkeypatch.setattr(
@@ -268,12 +242,12 @@ def test_resource_preview_proxy_uses_v2_and_keeps_credentials_off_browser(settin
         return False
 
     async def consume():
-        stream = preview_proxy(settings, "http://127.0.0.1:8000", connected, resource_mode=True)
+        stream = preview_proxy(settings, "http://127.0.0.1:8000", connected)
         await anext(stream)
         message = await anext(stream)
-        assert "aris.live-preview/v2" in message and READ_TOKEN not in message
+        assert "generated_at" in message and READ_TOKEN not in message
         await stream.aclose()
 
     asyncio.run(consume())
-    assert requests[0].url.path == "/internal/v2/live"
+    assert requests[0].url.path == "/internal/live"
     assert requests[0].headers["Authorization"] == "Bearer " + READ_TOKEN

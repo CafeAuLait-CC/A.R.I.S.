@@ -8,7 +8,6 @@ import sys
 import threading
 import time
 from contextlib import ExitStack
-from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -18,8 +17,6 @@ from aris.apps.agent.collector import collect
 from aris.apps.agent.config import AgentSettings
 from aris.apps.agent.live import LiveClient
 from aris.apps.agent.resource_sampler import ResourceSampler
-from aris.apps.agent.sampler import Sampler
-from aris.apps.agent.schemas import AgentInspection
 from aris.apps.agent.spool import Spool
 from aris.apps.agent.transport import DeliveryWorker, flush, report
 from aris.modules.vega.resource_schemas import ResourceInspection
@@ -33,38 +30,27 @@ class CollectionFailed(RuntimeError):
 def collect_tick(
     spool: Spool,
     fixture: Path | None = None,
-    sampler: Sampler | ResourceSampler | None = None,
+    sampler: ResourceSampler | None = None,
 ) -> dict[str, int]:
     error: Exception | None = None
     collected = False
     try:
-        if isinstance(sampler, ResourceSampler):
-            resources = sampler.sample()
-            collected = resources.gpu.quality == "ok"
-            spool.enqueue_resource(socket.gethostname(), resources)
-            if not collected:
-                error = CollectionFailed("GPU collection unavailable")
-        else:
-            observation = sampler.sample() if sampler else None
-            samples = (
-                observation.gpus
-                if observation
-                else (
-                    TypeAdapter(list[GpuSample]).validate_json(fixture.read_text())
-                    if fixture
-                    else collect()
-                )
+        if sampler is None:
+            sampler = ResourceSampler(
+                (lambda: TypeAdapter(list[GpuSample]).validate_json(fixture.read_text()))
+                if fixture
+                else collect
             )
-            collected = True
-            spool.enqueue(
-                socket.gethostname(), samples, observation.observed_at if observation else None
-            )
+        resources = sampler.sample()
+        collected = resources.gpu.quality == "ok"
+        spool.enqueue_resource(socket.gethostname(), resources)
+        if not collected:
+            error = CollectionFailed("GPU collection unavailable")
     except Exception as exc:
         error = exc
     heartbeat = spool.enqueue_heartbeat(
         socket.gethostname(),
         "ok" if collected else "error",
-        resource_enabled=isinstance(sampler, ResourceSampler),
     )
     if error:
         if not collected:
@@ -78,7 +64,7 @@ def tick(
     settings: AgentSettings,
     client: httpx.Client,
     fixture: Path | None = None,
-    sampler: Sampler | ResourceSampler | None = None,
+    sampler: ResourceSampler | None = None,
 ) -> dict[str, int]:
     try:
         result = collect_tick(spool, fixture, sampler)
@@ -96,36 +82,20 @@ def main() -> None:
         "--fixture", type=Path, help="Use explicit fixture GPU samples; no GPU needed"
     )
     source.add_argument(
-        "--inspect-resources",
+        "--inspect",
         action="store_true",
         help="Print read-only GPU, CPU/RAM and compute counts without credentials or network",
     )
-    source.add_argument(
-        "--inspect",
-        action="store_true",
-        help="Print one real local GPU snapshot without credentials, network or spool",
-    )
     args = parser.parse_args()
-    if args.inspect_resources:
-        inspection_resources = ResourceSampler().sample()
+    if args.inspect:
+        observation = ResourceSampler().sample()
         print(
             ResourceInspection(
-                hostname=socket.gethostname(), resources=inspection_resources
+                hostname=socket.gethostname(), resources=observation
             ).model_dump_json()
         )
-        if inspection_resources.gpu.quality != "ok":
+        if observation.gpu.quality != "ok":
             raise SystemExit(1)
-        return
-    if args.inspect:
-        try:
-            samples = collect()
-            inspection = AgentInspection(
-                hostname=socket.gethostname(), observed_at=datetime.now(UTC), gpus=samples
-            )
-            print(inspection.model_dump_json())
-        except Exception as exc:
-            print(json.dumps({"error_type": type(exc).__name__}), file=sys.stderr)
-            raise SystemExit(1) from None
         return
     os.umask(0o077)
     settings = AgentSettings()
@@ -136,8 +106,7 @@ def main() -> None:
         settings.max_buffered_batches,
         settings.max_buffered_heartbeats,
     )
-    sampler_type = ResourceSampler if settings.resource_enabled else Sampler
-    sampler = sampler_type(
+    sampler = ResourceSampler(
         (lambda: TypeAdapter(list[GpuSample]).validate_json(args.fixture.read_text()))
         if args.fixture
         else collect

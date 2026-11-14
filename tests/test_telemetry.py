@@ -16,12 +16,13 @@ from aris.core.config import Settings
 from aris.core.events import DomainEvent, OutboxEntry
 from aris.modules.vega.models import AgentMessage, Node
 from tests.conftest import AGENT_TOKEN, READ_TOKEN
+from tests.resource_fixtures import resource_observation
 
 
 def batch(seq=1, seconds_ago=0, **changes):
     now = datetime.now(UTC) - timedelta(seconds=seconds_ago)
-    return {
-        "schema_version": "aris.agent/v1",
+    payload = {
+        "type": "telemetry",
         "message_id": str(uuid4()),
         "agent_id": "agent-a",
         "node_id": "node-a",
@@ -43,20 +44,29 @@ def batch(seq=1, seconds_ago=0, **changes):
         ],
         **changes,
     }
+    gpus = payload.pop("gpus")
+    payload["resources"] = resource_observation(
+        observed_at=datetime.fromisoformat(payload["observed_at"]).replace(tzinfo=UTC)
+        if datetime.fromisoformat(payload["observed_at"]).tzinfo is None
+        else datetime.fromisoformat(payload["observed_at"]),
+        gpus=gpus,
+    ).model_dump(mode="json")
+    return payload
 
 
 def post(client, payload, token=AGENT_TOKEN):
     return client.post(
-        "/vega/v1/telemetry/batch",
+        "/vega/telemetry/batch",
         json=payload,
         headers={"X-Agent-Token": token, "X-Request-ID": "contract-test"},
     )
 
 
 def status(client):
-    response = client.get("/public/v1/resources", headers={"Authorization": f"Bearer {READ_TOKEN}"})
+    response = client.get("/public/resources", headers={"Authorization": f"Bearer {READ_TOKEN}"})
     assert response.status_code == 200, response.text
-    return response.json()
+    data = response.json()
+    return {**data, "nodes": [item["node"] for item in data["nodes"]]}
 
 
 def test_idle_snapshot_is_persistent_and_audited(client):
@@ -78,30 +88,27 @@ def test_idle_snapshot_is_persistent_and_audited(client):
 
 def test_external_paths_use_vega_collector_without_redundant_api_prefix(client):
     assert set(client.get("/openapi.json").json()["paths"]) == {
-        "/vega/v1/telemetry/batch",
-        "/vega/v1/heartbeat",
-        "/public/v1/resources",
+        "/vega/telemetry/batch",
+        "/vega/heartbeat",
+        "/public/resources",
         "/health/live",
         "/health/ready",
         "/slack/commands",
         "/slack/events",
-        "/internal/v1/live",
-        "/internal/v1/live/status",
-        "/internal/v2/live",
-        "/vega/v2/telemetry/batch",
-        "/public/v2/resources",
+        "/internal/live",
+        "/internal/live/status",
     }
-    for old in ("/api/agent/v1/heartbeat", "/api/public/v1/resources"):
+    for old in ("/api/agent/v1/heartbeat", "/api/public/resources"):
         assert client.get(old).status_code == 404
 
 
 def test_authentication_and_node_scope(client):
     assert post(client, batch(), "wrong").status_code == 401
     assert post(client, batch(node_id="node-b")).status_code == 403
-    assert client.get("/public/v1/resources").status_code == 401
+    assert client.get("/public/resources").status_code == 401
     assert (
         client.get(
-            "/public/v1/resources", headers={"Authorization": f"Bearer {AGENT_TOKEN}"}
+            "/public/resources", headers={"Authorization": f"Bearer {AGENT_TOKEN}"}
         ).status_code
         == 401
     )
@@ -181,7 +188,7 @@ def test_configuration_cannot_rebind_a_persisted_agent_to_another_node(client, s
 @pytest.mark.parametrize(
     "changes",
     [
-        {"schema_version": "unknown/v1"},
+        {"type": "unknown"},
         {"seq": 0},
         {"observed_at": "2026-01-01T00:00:00"},
         {"unexpected": "secret-input"},
@@ -210,7 +217,7 @@ def test_fail_closed_without_credentials(tmp_path):
         assert client.get("/health/live").status_code == 200
         assert client.get("/health/ready").status_code == 503
         assert post(client, batch()).status_code == 401
-        assert client.get("/public/v1/resources").status_code == 401
+        assert client.get("/public/resources").status_code == 401
 
 
 def test_migration_roundtrip(client):

@@ -1,16 +1,15 @@
-from datetime import UTC, datetime
-
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import event
 
 from aris.apps.api.main import create_app
 from aris.modules.vega.live import LiveHub
-from aris.modules.vega.live_schemas import LiveFrame, ResourceLiveHello
+from aris.modules.vega.live_schemas import LiveFrame
 from tests.conftest import AGENT_TOKEN, READ_TOKEN
+from tests.resource_fixtures import resource_observation
 from tests.test_live import frame, hello
 
-STATUS = "/internal/v1/live/status"
+STATUS = "/internal/live/status"
 
 
 def test_relay_diagnostics_observe_lifecycle_without_granting_or_renewing_a_lease():
@@ -39,8 +38,7 @@ def test_relay_diagnostics_observe_lifecycle_without_granting_or_renewing_a_leas
         LiveFrame(
             session_id=connection.hello.session_id,
             seq=2,
-            observed_at=datetime.now(UTC),
-            quality="error",
+            resources=resource_observation(gpu_quality="error"),
         ),
     )
     assert hub.relay_status().nodes[0].state == "error"
@@ -106,8 +104,7 @@ def test_relay_status_requires_platform_read_credentials(client, headers):
     assert client.app.state.live_hub.viewers == {}
 
 
-@pytest.mark.parametrize("version", ["v1", "v2"])
-def test_authenticated_relay_status_uses_no_sql_and_creates_no_viewer(settings, version):
+def test_authenticated_relay_status_uses_no_sql_and_creates_no_viewer(settings):
     app = create_app(settings)
     statements = []
 
@@ -117,11 +114,9 @@ def test_authenticated_relay_status_uses_no_sql_and_creates_no_viewer(settings, 
         raise AssertionError("relay diagnostics must not query PostgreSQL")
 
     identity = hello()
-    if version == "v2":
-        identity = ResourceLiveHello.model_validate(identity.model_dump(exclude={"schema_version"}))
     with TestClient(app) as client:
         with client.websocket_connect(
-            f"/vega/{version}/live?agent_id=agent-a&node_id=node-a",
+            "/vega/live?agent_id=agent-a&node_id=node-a",
             headers={"X-Agent-Token": AGENT_TOKEN},
         ) as socket:
             socket.send_json(identity.model_dump(mode="json"))
@@ -130,11 +125,10 @@ def test_authenticated_relay_status_uses_no_sql_and_creates_no_viewer(settings, 
                 response = client.get(STATUS, headers={"Authorization": "Bearer " + READ_TOKEN})
                 assert response.status_code == 200
                 data = response.json()
-                assert data["schema_version"] == "aris.live-relay-status/v1"
                 assert data["scope"] == "api_process"
                 assert data["active_viewers"] == 0 and data["connected_collectors"] == 1
                 node = data["nodes"][0]
-                assert node["state"] == "idle" and node["protocol"] == f"aris.live/{version}"
+                assert node["state"] == "idle"
                 assert node["last_frame_seq"] is None and node["last_frame_age_seconds"] is None
                 assert node["received_frames"] == node["accepted_frames"] == 0
                 assert app.state.live_hub.viewers == {}
