@@ -11,7 +11,7 @@ from sqlalchemy import event
 from starlette.websockets import WebSocketDisconnect
 
 from aris.apps.agent.config import AgentSettings
-from aris.apps.agent.live import PreviewSession, live_url
+from aris.apps.agent.live import PreviewSession, live_url, outbound_connection
 from aris.apps.agent.sampler import Sampler
 from aris.apps.agent.spool import Spool
 from aris.apps.api.main import create_app
@@ -165,6 +165,71 @@ def test_expired_viewer_cannot_reenter_and_exceed_capacity():
     assert not hub.renew(key, old)
     assert list(hub.viewers) == [new_key]
     assert hub.renew(new_key, new)
+
+
+def test_preview_keeps_running_for_other_viewers_then_stops_for_the_last_one():
+    hub = LiveHub()
+    connection = hub.attach(hello())
+    first, _ = hub.open_viewer()
+    second, _ = hub.open_viewer()
+    hub.close_viewer(first)
+    assert hub.lease(connection).lease_seconds == 30
+    hub.close_viewer(second)
+    assert hub.lease(connection).lease_seconds == 0
+
+
+def test_websocket_never_forwards_node_credentials_through_redirects():
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    received = []
+
+    class Destination(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):
+            received.append(("destination", self.headers.get("X-Agent-Token")))
+            self.send_response(400)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    destination = ThreadingHTTPServer(("127.0.0.1", 0), Destination)
+
+    class Redirect(Destination):
+        def do_GET(self):
+            received.append(("configured", self.headers.get("X-Agent-Token")))
+            self.send_response(302)
+            self.send_header("Location", f"ws://127.0.0.1:{destination.server_port}/untrusted")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    origin = ThreadingHTTPServer(("127.0.0.1", 0), Redirect)
+    workers = [
+        threading.Thread(target=server.serve_forever, daemon=True)
+        for server in (origin, destination)
+    ]
+    for worker in workers:
+        worker.start()
+    config = AgentSettings(
+        _env_file=None,
+        id="agent-a",
+        node_id="node-a",
+        token=AGENT_TOKEN,
+        api_url=f"http://127.0.0.1:{origin.server_port}",
+    )
+    try:
+        with pytest.raises(Exception, match="redirect|302"):
+            with outbound_connection(config):
+                pytest.fail("redirect handshake must fail")
+        assert received == [("configured", AGENT_TOKEN)]
+    finally:
+        for server in (origin, destination):
+            server.shutdown()
+            server.server_close()
+        for worker in workers:
+            worker.join(timeout=2)
 
 
 def test_websocket_auth_identity_and_zero_database_queries(settings, monkeypatch):

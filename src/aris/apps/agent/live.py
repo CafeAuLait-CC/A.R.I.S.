@@ -3,12 +3,14 @@ import random
 import socket
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from urllib.parse import urlencode, urlsplit, urlunsplit
 from uuid import UUID, uuid4
 
-from websockets.sync.client import connect
+from websockets.exceptions import InvalidStatus
+from websockets.sync.client import ClientConnection, connect
 
 from aris.apps.agent.config import AgentSettings
 from aris.apps.agent.sampler import Sampler
@@ -77,6 +79,32 @@ def live_url(settings: AgentSettings) -> str:
     )
 
 
+@contextmanager
+def outbound_connection(settings: AgentSettings) -> Iterator[ClientConnection]:
+    url = live_url(settings)
+    target = urlsplit(url)
+    assert target.hostname is not None
+    # A preconnected socket forbids redirects in websockets. Custom node headers
+    # must never be forwarded to a redirect destination, even on the same host.
+    with socket.create_connection(
+        (target.hostname, target.port or (443 if target.scheme == "wss" else 80)), timeout=10
+    ) as transport:
+        with connect(
+            url,
+            sock=transport,
+            additional_headers={"X-Agent-Token": settings.token.get_secret_value()},
+            proxy=None,
+            open_timeout=10,
+            close_timeout=2,
+            ping_interval=20,
+            ping_timeout=20,
+            max_size=2048,
+            max_queue=2,
+            compression=None,
+        ) as websocket:
+            yield websocket
+
+
 class LiveClient:
     def __init__(self, settings: AgentSettings, sampler: Sampler) -> None:
         self.settings = settings
@@ -95,18 +123,7 @@ class LiveClient:
         failures = 0
         while not self.stopped.is_set():
             try:
-                with connect(
-                    live_url(self.settings),
-                    additional_headers={"X-Agent-Token": self.settings.token.get_secret_value()},
-                    proxy=None,
-                    open_timeout=10,
-                    close_timeout=2,
-                    ping_interval=20,
-                    ping_timeout=20,
-                    max_size=2048,
-                    max_queue=2,
-                    compression=None,
-                ) as websocket:
+                with outbound_connection(self.settings) as websocket:
                     hello = LiveHello(
                         agent_id=self.settings.id,
                         node_id=self.settings.node_id,
@@ -127,6 +144,10 @@ class LiveClient:
                             websocket.send(frame.model_dump_json())
             except Exception as exc:
                 # Neither connection URL, credentials nor external response is logged.
-                logger.warning("preview_transport failure_type=%s", type(exc).__name__)
+                logger.warning(
+                    "preview_transport failure_type=%s http_status=%s",
+                    type(exc).__name__,
+                    exc.response.status_code if isinstance(exc, InvalidStatus) else None,
+                )
                 failures = min(failures + 1, 5)
                 self.stopped.wait(min(30, 2**failures) + random.uniform(0, 1))
