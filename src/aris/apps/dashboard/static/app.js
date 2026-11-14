@@ -99,6 +99,7 @@ function startPreview(){
 }
 function connect(){
   if(source)source.close();connection("连接中","connecting");
+  if(!liveMode){healthy=false;if(lastSnapshot)render(lastSnapshot,false);}
   source=new EventSource("/events");
   source.addEventListener("resources",event=>{
     try{const snapshot=JSON.parse(event.data);lastSnapshot=snapshot;if(!liveMode){lastReceived=Date.now();healthy=true;connection("归档观测","connected");notice("");render(snapshot,true);}}catch{if(!liveMode)unavailable("无法解析状态数据，正在等待下一次更新。");}
