@@ -15,6 +15,9 @@ from aris import __version__
 from aris.core.config import Settings
 from aris.core.contracts import DomainError, ErrorDetail, ErrorResponse
 from aris.core.db import SCHEMA_REVISION, build_engine, check_database, session_factory
+from aris.interfaces.slack.api import build_router as build_slack_router
+from aris.interfaces.slack.config import SlackSettings
+from aris.interfaces.slack.service import SlackService
 from aris.modules.vega.api import build_router
 from aris.modules.vega.service import VegaService
 
@@ -34,7 +37,9 @@ def error_response(request: Request, code: str, message: str, status: int) -> JS
     )
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None, slack_settings: SlackSettings | None = None
+) -> FastAPI:
     config = settings or Settings()
     engine = build_engine(config.database_url)
 
@@ -45,7 +50,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="A.R.I.S.", version=__version__, lifespan=lifespan)
     app.state.engine = engine
-    app.include_router(build_router(VegaService(session_factory(engine), config), config))
+    sessions = session_factory(engine)
+    vega = VegaService(sessions, config)
+    app.include_router(build_router(vega, config))
+    app.include_router(
+        build_slack_router(SlackService(sessions, slack_settings or SlackSettings(), vega))
+    )
 
     @app.middleware("http")
     async def request_context(

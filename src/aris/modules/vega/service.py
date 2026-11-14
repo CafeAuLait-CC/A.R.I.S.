@@ -10,6 +10,7 @@ from aris.core.audit import AuditEntry
 from aris.core.config import Settings
 from aris.core.contracts import DomainError
 from aris.core.events import DomainEvent, OutboxEntry
+from aris.core.time import utc
 from aris.modules.vega.models import AgentMessage, GpuDevice
 from aris.modules.vega.repo import VegaRepository
 from aris.modules.vega.schemas import (
@@ -21,11 +22,6 @@ from aris.modules.vega.schemas import (
     NodeStatus,
     TelemetryBatch,
 )
-
-
-def utc(value: datetime) -> datetime:
-    # SQLite drops timezone metadata; PostgreSQL preserves it.
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 class VegaService:

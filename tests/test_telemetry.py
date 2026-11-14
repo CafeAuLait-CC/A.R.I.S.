@@ -7,7 +7,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from aris.apps.api.main import create_app
@@ -62,7 +62,9 @@ def status(client):
 def test_idle_snapshot_is_persistent_and_audited(client):
     assert client.get("/health/live").status_code == 200
     assert client.get("/health/ready").status_code == 200
-    assert client.get("/health/ready").json()["schema_revision"] == "0002"
+    with client.app.state.engine.connect() as connection:
+        expected_revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
+    assert client.get("/health/ready").json()["schema_revision"] == expected_revision
     assert post(client, batch()).status_code == 200
     node = status(client)["nodes"][0]
     assert node["status"] == "ONLINE"
@@ -81,6 +83,8 @@ def test_external_paths_use_vega_collector_without_redundant_api_prefix(client):
         "/public/v1/resources",
         "/health/live",
         "/health/ready",
+        "/slack/commands",
+        "/slack/events",
     }
     for old in ("/api/agent/v1/heartbeat", "/api/public/v1/resources"):
         assert client.get(old).status_code == 404

@@ -21,6 +21,7 @@ def test_routes_and_agents_do_not_access_private_models_or_repositories():
         *Path("src/aris/apps/api").rglob("*.py"),
         *Path("src/aris/apps/agent").rglob("*.py"),
         *Path("src/aris/modules").rglob("api.py"),
+        *Path("src/aris/interfaces").rglob("api.py"),
     ]
     for path in paths:
         for module in imports(path):

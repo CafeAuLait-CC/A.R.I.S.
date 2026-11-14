@@ -3,6 +3,7 @@ from alembic import context
 from aris.core import audit, events  # noqa: F401
 from aris.core.config import Settings
 from aris.core.db import Base, build_engine
+from aris.interfaces.slack import models as slack_models  # noqa: F401
 from aris.modules.vega import models  # noqa: F401
 
 target_metadata = Base.metadata
