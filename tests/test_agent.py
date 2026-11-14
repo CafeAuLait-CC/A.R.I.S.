@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -101,8 +102,8 @@ def test_collector_failure_sends_only_error_heartbeat_and_keeps_sequence(tmp_pat
         monkeypatch.setattr("aris.apps.agent.main.collect", samples)
         assert tick(spool, settings, client) == {"seq": 3, "delivered": 2}
         assert [path for path, _ in requests[1:]] == [
-            "/vega/v1/telemetry/batch",
             "/vega/v1/heartbeat",
+            "/vega/v1/telemetry/batch",
         ]
 
 
@@ -210,3 +211,100 @@ def test_failed_inspection_returns_error_without_an_empty_or_idle_snapshot(monke
     assert captured.out == ""
     assert "ValueError" in captured.err
     assert "sensitive collector detail" not in captured.err
+
+
+def test_catch_up_is_bounded_prioritizes_current_data_and_retains_exact_history(
+    tmp_path, monkeypatch
+):
+    spool = Spool(tmp_path / "backlog.sqlite3", "agent-a", "node-a")
+    old_time = datetime.now(UTC) - timedelta(hours=12)
+    for _ in range(10):
+        spool.enqueue("test-node", samples(), old_time)
+    heartbeat = spool.enqueue_heartbeat("test-node", "ok")
+    with sqlite3.connect(spool.path) as db:
+        before = dict(db.execute("SELECT seq,payload FROM pending"))
+    monkeypatch.setattr(spool, "pending", lambda: pytest.fail("must not load an unbounded backlog"))
+    settings = AgentSettings(
+        _env_file=None,
+        id="agent-a",
+        node_id="node-a",
+        token="test-agent-credential-12345",
+        flush_max_messages=100,
+        flush_budget_seconds=5,
+    )
+    clock = [10.0]
+    sent = []
+
+    def acknowledge(request):
+        payload = json.loads(request.content)
+        sent.append(payload)
+        clock[0] += 3  # Slow transport: heartbeat/current/history reserve, then yield.
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "message_id": payload["message_id"],
+                "duplicate": False,
+                "applied_to_current": True,
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(acknowledge)) as client:
+        assert flush(spool, settings, client, clock=lambda: clock[0]) == 3
+    assert [item["seq"] for item in sent] == [heartbeat.seq, 10, 1]
+    assert sent[1]["observed_at"] == old_time.isoformat().replace("+00:00", "Z")
+    with sqlite3.connect(spool.path) as db:
+        after = dict(db.execute("SELECT seq,payload FROM pending"))
+    assert set(after) == set(range(2, 10))
+    assert all(payload == before[seq] for seq, payload in after.items())
+    stats = spool.statistics()
+    assert stats["pending_batches"] == 8 and stats["pending_heartbeats"] == 0
+    assert stats["last_seq"] == heartbeat.seq
+    assert len(spool.delivery_batch(3)) == 3
+
+
+def test_post_outage_current_status_recovers_before_complete_history_drain(
+    client, settings, tmp_path
+):
+    from sqlalchemy import func, select
+    from sqlalchemy.orm import Session
+
+    from aris.modules.vega.models import AgentMessage
+    from tests.test_telemetry import status
+
+    spool = Spool(tmp_path / "recovery.sqlite3", "agent-a", "node-a")
+    for _ in range(12):
+        spool.enqueue("test-node", samples(), datetime.now(UTC) - timedelta(minutes=10))
+    spool.enqueue_heartbeat("test-node", "ok")
+    config = AgentSettings(
+        _env_file=None,
+        id="agent-a",
+        node_id="node-a",
+        token="test-agent-credential-12345",
+        flush_max_messages=3,
+    )
+
+    def send(request):
+        response = client.post(
+            request.url.path,
+            content=request.content,
+            headers={"X-Agent-Token": "test-agent-credential-12345"},
+        )
+        return httpx.Response(response.status_code, json=response.json())
+
+    with httpx.Client(transport=httpx.MockTransport(send)) as transport:
+        assert flush(spool, config, transport) == 3
+        node = status(client)["nodes"][0]
+        assert node["status"] == "ONLINE" and node["telemetry_status"] == "STALE"
+        newest = spool.enqueue("test-node", samples())
+        spool.enqueue_heartbeat("test-node", "ok")
+        assert flush(spool, config, transport) == 3
+        assert spool.statistics()["pending_batches"] > 0
+        assert status(client)["nodes"][0]["telemetry_status"] == "CURRENT"
+        while flush(spool, config, transport):
+            assert status(client)["nodes"][0][
+                "observed_at"
+            ] == newest.observed_at.isoformat().replace("+00:00", "Z")
+    with Session(client.app.state.engine) as db:
+        assert db.scalar(select(func.count()).select_from(AgentMessage)) == 15
+    assert spool.statistics()["pending_batches"] == 0

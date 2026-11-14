@@ -111,6 +111,37 @@ class Spool:
                 for row in db.execute("SELECT payload, kind FROM pending ORDER BY seq")
             ]
 
+    def delivery_batch(self, limit: int) -> list[AgentReport]:
+        if not 3 <= limit <= 1000:
+            raise ValueError("delivery batch must contain between 3 and 1000 messages")
+        with connection(self.path) as db:
+            # Refresh liveness/current facts before history, while always advancing history.
+            rows = db.execute(
+                "SELECT payload, kind FROM pending ORDER BY CASE "
+                "WHEN kind='heartbeat' THEN 0 "
+                "WHEN seq=(SELECT max(seq) FROM pending WHERE kind='telemetry') THEN 1 "
+                "ELSE 2 END, seq LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [
+            (Heartbeat if kind == "heartbeat" else TelemetryBatch).model_validate_json(payload)
+            for payload, kind in rows
+        ]
+
+    def statistics(self) -> dict[str, int]:
+        with connection(self.path) as db:
+            counts = dict(db.execute("SELECT kind, count(*) FROM pending GROUP BY kind"))
+            last_seq = int(
+                db.execute("SELECT value FROM metadata WHERE key='last_seq'").fetchone()[0]
+            )
+        return {
+            "pending_batches": counts.get("telemetry", 0),
+            "pending_heartbeats": counts.get("heartbeat", 0),
+            "capacity_batches": self.max_batches,
+            "last_seq": last_seq,
+            "spool_bytes": self.path.stat().st_size,
+        }
+
     def acknowledge(self, batch: AgentReport) -> None:
         with connection(self.path) as db:
             row = db.execute(

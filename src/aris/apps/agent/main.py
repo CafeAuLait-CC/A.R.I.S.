@@ -5,6 +5,7 @@ import random
 import socket
 import sys
 import time
+from collections.abc import Callable
 from contextlib import ExitStack
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,9 +26,17 @@ class CollectionFailed(RuntimeError):
     """Heartbeat delivered, but GPU collection failed; keep the heartbeat cadence."""
 
 
-def flush(spool: Spool, settings: AgentSettings, client: httpx.Client) -> int:
+def flush(
+    spool: Spool,
+    settings: AgentSettings,
+    client: httpx.Client,
+    *,
+    clock: Callable[[], float] = time.monotonic,
+) -> int:
     delivered = 0
-    for batch in spool.pending():
+    started = clock()
+    batches = spool.delivery_batch(settings.flush_max_messages)
+    for batch in batches:
         endpoint = "heartbeat" if isinstance(batch, Heartbeat) else "telemetry/batch"
         response = client.post(
             f"{settings.api_url.rstrip('/')}/vega/v1/{endpoint}",
@@ -40,6 +49,9 @@ def flush(spool: Spool, settings: AgentSettings, client: httpx.Client) -> int:
             raise ValueError("mismatched agent acknowledgement")
         spool.acknowledge(batch)
         delivered += 1
+        # Soft budget: reserve heartbeat + current snapshot + one historical message.
+        if delivered >= 3 and clock() - started >= settings.flush_budget_seconds:
+            break
     return delivered
 
 
@@ -123,7 +135,7 @@ def main() -> None:
         while True:
             try:
                 result = tick(spool, settings, client, args.fixture, sampler)
-                print(json.dumps(result), flush=True)
+                print(json.dumps({**result, "buffer": spool.statistics()}), flush=True)
                 failures = 0
             except Exception as exc:
                 # No response body, credentials, URLs or process command output in logs.
