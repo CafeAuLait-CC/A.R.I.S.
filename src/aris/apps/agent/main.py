@@ -16,9 +16,11 @@ from pydantic import TypeAdapter
 from aris.apps.agent.collector import collect
 from aris.apps.agent.config import AgentSettings
 from aris.apps.agent.live import LiveClient
+from aris.apps.agent.resource_sampler import ResourceSampler
 from aris.apps.agent.sampler import Sampler
 from aris.apps.agent.schemas import AgentInspection
 from aris.apps.agent.spool import Spool
+from aris.modules.vega.resource_schemas import ResourceInspection
 from aris.modules.vega.schemas import GpuSample, Heartbeat, IngestResult
 
 
@@ -101,11 +103,26 @@ def main() -> None:
         "--fixture", type=Path, help="Use explicit fixture GPU samples; no GPU needed"
     )
     source.add_argument(
+        "--inspect-resources",
+        action="store_true",
+        help="Print read-only GPU, CPU/RAM and compute counts without credentials or network",
+    )
+    source.add_argument(
         "--inspect",
         action="store_true",
         help="Print one real local GPU snapshot without credentials, network or spool",
     )
     args = parser.parse_args()
+    if args.inspect_resources:
+        inspection_resources = ResourceSampler().sample()
+        print(
+            ResourceInspection(
+                hostname=socket.gethostname(), resources=inspection_resources
+            ).model_dump_json()
+        )
+        if inspection_resources.gpu.quality != "ok":
+            raise SystemExit(1)
+        return
     if args.inspect:
         try:
             samples = collect()
