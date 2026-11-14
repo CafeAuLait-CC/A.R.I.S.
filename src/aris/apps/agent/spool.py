@@ -25,12 +25,22 @@ def connection(path: Path) -> Iterator[sqlite3.Connection]:
 class Spool:
     """Persist sequence and exact message bytes before any network request."""
 
-    def __init__(self, path: Path, agent_id: str, node_id: str, max_batches: int = 10000) -> None:
+    def __init__(
+        self,
+        path: Path,
+        agent_id: str,
+        node_id: str,
+        max_batches: int = 10000,
+        max_heartbeats: int | None = None,
+    ) -> None:
+        if max_batches < 1 or (max_heartbeats is not None and max_heartbeats < 1):
+            raise ValueError("spool capacity must be positive")
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.path = path
         self.agent_id = agent_id
         self.node_id = node_id
         self.max_batches = max_batches
+        self.max_heartbeats = max_batches if max_heartbeats is None else max_heartbeats
         with connection(path) as db:
             db.execute(
                 "CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
@@ -85,8 +95,8 @@ class Spool:
         with connection(self.path) as db:
             db.execute("BEGIN IMMEDIATE")
             count = db.execute("SELECT count(*) FROM pending WHERE kind=?", (kind,)).fetchone()[0]
-            # One reserved heartbeat slot keeps collection failures observable at capacity.
-            if count >= (1 if kind == "heartbeat" else self.max_batches):
+            # Separate budgets keep health facts observable when telemetry is full.
+            if count >= (self.max_heartbeats if kind == "heartbeat" else self.max_batches):
                 raise RuntimeError("agent spool full; unacknowledged data retained")
             seq = (
                 int(db.execute("SELECT value FROM metadata WHERE key='last_seq'").fetchone()[0]) + 1
@@ -142,7 +152,7 @@ class Spool:
             # Refresh liveness/current facts before history, while always advancing history.
             rows = db.execute(
                 "SELECT payload, kind FROM pending ORDER BY CASE "
-                "WHEN kind='heartbeat' THEN 0 "
+                "WHEN seq=(SELECT max(seq) FROM pending WHERE kind='heartbeat') THEN 0 "
                 "WHEN seq=(SELECT max(seq) FROM pending WHERE kind='telemetry') THEN 1 "
                 "ELSE 2 END, seq LIMIT ?",
                 (limit,),
@@ -166,6 +176,7 @@ class Spool:
             "pending_batches": counts.get("telemetry", 0),
             "pending_heartbeats": counts.get("heartbeat", 0),
             "capacity_batches": self.max_batches,
+            "capacity_heartbeats": self.max_heartbeats,
             "last_seq": last_seq,
             "spool_bytes": self.path.stat().st_size,
         }

@@ -149,10 +149,9 @@ def main() -> None:
                 with engine.connect() as db:
                     assert db.scalar(text("SELECT count(*) FROM agent_messages")) == 2
                 process = start_api(env, port, log, client)
-                # The reserved HB slot still holds an unacknowledged message.
-                # This attempt reports that condition, but its finally block drains
-                # current resources and all original messages without dropping them.
-                run_agent(1)
+                # New health facts can be persisted alongside the old, unacknowledged
+                # heartbeat. Latest facts go first; both original messages survive.
+                run_agent(0)
                 assert pending(spool)[1] == {}
                 with engine.connect() as db:
                     rows = db.execute(
@@ -173,22 +172,22 @@ def main() -> None:
                 assert current.json()["nodes"][0]["resource_seq"] == 5
                 run_agent(0)
                 metadata_after, remaining = pending(spool)
-                assert remaining == {} and metadata_after["last_seq"] == "7"
+                assert remaining == {} and metadata_after["last_seq"] == "8"
                 assert spool.stat().st_ino == inode
                 assert metadata_after["agent_id"] == metadata["agent_id"] == "recovery-agent"
                 assert metadata_after["node_id"] == metadata["node_id"] == "recovery-node"
                 with engine.connect() as db:
                     for table in ("agent_messages", "domain_events", "event_outbox", "audit_logs"):
-                        assert db.scalar(text("SELECT count(*) FROM " + table)) == 7
+                        assert db.scalar(text("SELECT count(*) FROM " + table)) == 8
                     assert list(
                         db.scalars(text("SELECT seq FROM agent_messages ORDER BY seq"))
-                    ) == list(range(1, 8))
+                    ) == list(range(1, 9))
                 recovered = client.get("/public/v2/resources", headers=headers)
                 recovered.raise_for_status()
                 node = recovered.json()["nodes"][0]
                 assert node["node"]["status"] == "ONLINE"
                 assert node["node"]["telemetry_status"] == "CURRENT"
-                assert node["resource_seq"] == 6
+                assert node["resource_seq"] == 7
                 assert node["system_freshness"] == "CURRENT"
                 print(
                     json.dumps(
@@ -196,7 +195,7 @@ def main() -> None:
                             "result": "PASS",
                             "backend": "PostgreSQL" if args.postgres else "SQLite",
                             "mode": "real-gpu" if args.real_gpu else "fixture",
-                            "durable_messages": 7,
+                            "durable_messages": 8,
                             "observed_offline_messages": 2,
                             "exact_replayed_payloads": 2,
                             "original_spool_inode_and_identity_preserved": True,

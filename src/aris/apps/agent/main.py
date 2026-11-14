@@ -2,10 +2,11 @@ import argparse
 import json
 import os
 import random
+import signal
 import socket
 import sys
+import threading
 import time
-from collections.abc import Callable
 from contextlib import ExitStack
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,48 +21,17 @@ from aris.apps.agent.resource_sampler import ResourceSampler
 from aris.apps.agent.sampler import Sampler
 from aris.apps.agent.schemas import AgentInspection
 from aris.apps.agent.spool import Spool
-from aris.modules.vega.resource_schemas import ResourceInspection, ResourceTelemetryBatch
-from aris.modules.vega.schemas import GpuSample, Heartbeat, IngestResult
+from aris.apps.agent.transport import DeliveryWorker, flush, report
+from aris.modules.vega.resource_schemas import ResourceInspection
+from aris.modules.vega.schemas import GpuSample
 
 
 class CollectionFailed(RuntimeError):
-    """Heartbeat delivered, but GPU collection failed; keep the heartbeat cadence."""
+    """GPU collection failed; persist its health independently from delivery."""
 
 
-def flush(
+def collect_tick(
     spool: Spool,
-    settings: AgentSettings,
-    client: httpx.Client,
-    *,
-    clock: Callable[[], float] = time.monotonic,
-) -> int:
-    delivered = 0
-    started = clock()
-    batches = spool.delivery_batch(settings.flush_max_messages)
-    for batch in batches:
-        endpoint = "heartbeat" if isinstance(batch, Heartbeat) else "telemetry/batch"
-        version = "v2" if isinstance(batch, ResourceTelemetryBatch) else "v1"
-        response = client.post(
-            f"{settings.api_url.rstrip('/')}/vega/{version}/{endpoint}",
-            headers={"X-Agent-Token": settings.token.get_secret_value()},
-            json=batch.model_dump(mode="json"),
-        )
-        response.raise_for_status()
-        receipt = IngestResult.model_validate(response.json())
-        if receipt.message_id != batch.message_id:
-            raise ValueError("mismatched agent acknowledgement")
-        spool.acknowledge(batch)
-        delivered += 1
-        # Soft budget: reserve heartbeat + current snapshot + one historical message.
-        if delivered >= 3 and clock() - started >= settings.flush_budget_seconds:
-            break
-    return delivered
-
-
-def tick(
-    spool: Spool,
-    settings: AgentSettings,
-    client: httpx.Client,
     fixture: Path | None = None,
     sampler: Sampler | ResourceSampler | None = None,
 ) -> dict[str, int]:
@@ -91,20 +61,31 @@ def tick(
             )
     except Exception as exc:
         error = exc
-    try:
-        heartbeat = spool.enqueue_heartbeat(
-            socket.gethostname(),
-            "ok" if collected else "error",
-            resource_enabled=isinstance(sampler, ResourceSampler),
-        )
-    finally:
-        # Even a full spool or a broken collector must allow the backlog to drain.
-        delivered = flush(spool, settings, client)
+    heartbeat = spool.enqueue_heartbeat(
+        socket.gethostname(),
+        "ok" if collected else "error",
+        resource_enabled=isinstance(sampler, ResourceSampler),
+    )
     if error:
         if not collected:
             raise CollectionFailed(type(error).__name__) from None
         raise error
-    return {"seq": heartbeat.seq, "delivered": delivered}
+    return {"seq": heartbeat.seq}
+
+
+def tick(
+    spool: Spool,
+    settings: AgentSettings,
+    client: httpx.Client,
+    fixture: Path | None = None,
+    sampler: Sampler | ResourceSampler | None = None,
+) -> dict[str, int]:
+    try:
+        result = collect_tick(spool, fixture, sampler)
+    finally:
+        # Capacity and collection failures must still allow pending data to drain.
+        delivered = flush(spool, settings, client)
+    return {**result, "delivered": delivered}
 
 
 def main() -> None:
@@ -148,7 +129,13 @@ def main() -> None:
         return
     os.umask(0o077)
     settings = AgentSettings()
-    spool = Spool(settings.spool_path, settings.id, settings.node_id, settings.max_buffered_batches)
+    spool = Spool(
+        settings.spool_path,
+        settings.id,
+        settings.node_id,
+        settings.max_buffered_batches,
+        settings.max_buffered_heartbeats,
+    )
     sampler_type = ResourceSampler if settings.resource_enabled else Sampler
     sampler = sampler_type(
         (lambda: TypeAdapter(list[GpuSample]).validate_json(args.fixture.read_text()))
@@ -156,31 +143,49 @@ def main() -> None:
         else collect
     )
     live = LiveClient(settings, sampler) if settings.live_enabled and not args.once else None
-    failures = 0
     with ExitStack() as resources:
         if live:
             live.start()
             resources.callback(live.close)
-        client = resources.enter_context(httpx.Client(timeout=15, trust_env=False))
-        while True:
+        if args.once:
             try:
-                result = tick(spool, settings, client, args.fixture, sampler)
+                with httpx.Client(timeout=15, trust_env=False) as client:
+                    result = tick(spool, settings, client, args.fixture, sampler)
                 print(json.dumps({**result, "buffer": spool.statistics()}), flush=True)
-                failures = 0
             except Exception as exc:
-                # No response body, credentials, URLs or process command output in logs.
                 print(
                     json.dumps({"error_type": type(exc).__name__, "buffer_retained": True}),
                     file=sys.stderr,
                     flush=True,
                 )
-                if args.once:
-                    raise SystemExit(1) from None
-                failures = 0 if isinstance(exc, CollectionFailed) else failures + 1
-            if args.once:
-                return
-            delay = min(settings.interval_seconds * (2 ** min(failures, 4)), 60)
-            time.sleep(delay + random.uniform(0, 1))
+                raise SystemExit(1) from None
+            return
+        stopped = threading.Event()
+        signal.signal(signal.SIGTERM, lambda *_: stopped.set())
+        signal.signal(signal.SIGINT, lambda *_: stopped.set())
+        sender = DeliveryWorker(spool, settings)
+        sender.start()
+        resources.callback(sender.close)
+        while not stopped.is_set():
+            if not sender.thread.is_alive():
+                raise RuntimeError("delivery worker stopped")
+            started = time.monotonic()
+            try:
+                result = collect_tick(spool, args.fixture, sampler)
+                report({"phase": "sample", **result, "buffer": spool.statistics()})
+            except Exception as exc:
+                report(
+                    {
+                        "phase": "sample",
+                        "error_type": type(exc).__name__,
+                        "buffer_retained": True,
+                        "buffer": spool.statistics(),
+                    }
+                )
+            finally:
+                sender.wake()
+            delay = max(0, settings.interval_seconds - (time.monotonic() - started))
+            stopped.wait(delay + random.uniform(0, 1))
 
 
 if __name__ == "__main__":
