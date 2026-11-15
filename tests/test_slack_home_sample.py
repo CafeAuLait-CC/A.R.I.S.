@@ -4,12 +4,14 @@ import struct
 import threading
 import time
 import zlib
+from io import BytesIO
 from pathlib import Path
 from urllib.parse import urlencode
 
 import httpx
 import pytest
 import uvicorn
+from PIL import Image
 from pydantic import ValidationError
 from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session
@@ -30,6 +32,7 @@ from aris.interfaces.slack.home import (
 from aris.interfaces.slack.models import SlackHomeJob, SlackReceipt
 from aris.interfaces.slack.schemas import ModalHandle
 from aris.interfaces.slack.vram_assets import VRAM_ASSET_ROUTE, VRAM_ASSET_SET
+from aris.interfaces.slack.vram_charts import VRAM_CHART_ROUTE, VRAM_CHART_SET
 from aris.modules.vega.disk_schemas import DiskObservation
 from aris.modules.vega.resource_schemas import ComputeOwnership
 from aris.modules.vega.service import VegaService
@@ -205,8 +208,8 @@ def test_summary_uses_observations_without_writing_placeholder_reservations(slac
         assert "0 GPUs available" not in node_summary(unknown)
 
 
-@pytest.mark.parametrize(("used", "display"), [(1, "1.0 MB"), (9, "9.4 MB")])
-def test_home_converts_small_mib_readings_to_decimal_mb(slack_client, settings, used, display):
+@pytest.mark.parametrize(("used", "display"), [(1, "1 MB"), (9, "9 MB")])
+def test_home_keeps_small_binary_values_with_mb_labels(slack_client, settings, used, display):
     data = snapshot(slack_client, settings, used=used, gpu_count=1)
     view = home_view(data, asset_base_url="https://assets.example.test/vram")
     memory = view["blocks"][-2]["rows"][0]["items"][0]["block"]["child_blocks"][3]["elements"][0][
@@ -215,7 +218,7 @@ def test_home_converts_small_mib_readings_to_decimal_mb(slack_client, settings, 
     assert memory.startswith(f"{display} / ")
 
 
-def test_slack_capacity_values_convert_bytes_to_si_without_mutating_source(slack_client, settings):
+def test_slack_keeps_binary_capacity_values_with_preferred_labels(slack_client, settings):
     data = snapshot(slack_client, settings, gpu_count=1)
     entry = data.nodes[0]
     gpu = entry.node.gpus[0].model_copy(update={"memory_total_mib": 49140, "memory_used_mib": 4096})
@@ -256,16 +259,16 @@ def test_slack_capacity_values_convert_bytes_to_si_without_mutating_source(slack
         }
     )
     before = entry.model_dump(mode="json")
-    assert disk_text(entry) == "Disk 30.7 TB used / 68.8 TB"
-    assert "RAM 92.3 / 137.4 GB" in system_text(entry)
+    assert disk_text(entry) == "Disk 27.9 TB used / 62.6 TB"
+    assert "RAM 86.0 / 128.0 GB" in system_text(entry)
     view = home_view(
         data.model_copy(update={"nodes": [entry]}),
         asset_base_url="https://assets.example.test/vram",
     )
     serialized = json.dumps(view, ensure_ascii=False)
-    assert "4.3 / 51.5 GB · 47.2 GB free" in serialized
+    assert "4.0 / 48.0 GB · 44.0 GB free" in serialized
     modal = details_view(entry, gpu)
-    assert modal["blocks"][1]["fields"][0]["text"] == "*VRAM*\n4.3 / 51.5 GB"
+    assert modal["blocks"][1]["fields"][0]["text"] == "*VRAM*\n4.0 / 48.0 GB"
     assert modal["blocks"][1]["fields"][1]["text"] == "*Memory occupancy*\n8%"
     assert all(unit not in serialized + json.dumps(modal) for unit in ("MiB", "GiB", "TiB"))
     assert entry.model_dump(mode="json") == before
@@ -279,9 +282,9 @@ def test_slack_capacity_values_convert_bytes_to_si_without_mutating_source(slack
                     "volumes": [
                         disks.volumes[0].model_copy(
                             update={
-                                "total_bytes": 900 * 10**9,
-                                "used_bytes": 400 * 10**9,
-                                "available_bytes": 400 * 10**9,
+                                "total_bytes": 900 * 2**30,
+                                "used_bytes": 400 * 2**30,
+                                "available_bytes": 400 * 2**30,
                             }
                         )
                     ]
@@ -422,6 +425,53 @@ def test_native_sized_pngs_preserve_visible_percentage_and_content_version():
         assert abs(opaque_pixels - 256 * (percent or 0) / 100) <= 1
         if percent == 62:
             assert middle[255 * 4 + 3] == 56  # The gray tail remains inside the actual image.
+
+
+def test_chart_ink_and_bar_share_right_edge_with_explicit_configuration(slack_client, settings):
+    directory = Path(__file__).resolve().parents[1] / "src/aris/interfaces/slack/assets/vram_chart"
+    assets = {path.name: path.read_bytes() for path in directory.glob("*.png")}
+    assert len(assets) == 102 and asset_set_digest(assets) == VRAM_CHART_SET
+    for data in assets.values():
+        image = Image.open(BytesIO(data)).convert("RGBA")
+        assert image.size == (256, 32)
+        assert image.crop((128, 0, 256, 22)).getbbox()[2] == 128
+        assert image.crop((0, 22, 256, 32)).getbbox()[2] == 256
+    response = slack_client.get(VRAM_CHART_ROUTE + "/vram-062.png")
+    assert response.status_code == 200 and response.headers["content-type"] == "image/png"
+    assert "immutable" in response.headers["cache-control"]
+    assert slack_client.get(VRAM_ASSET_ROUTE + "/vram-062.png").status_code == 200
+    assert slack_client.get(VRAM_CHART_ROUTE + "/..%2Fapi.env").status_code == 404
+    assert slack_client.get(VRAM_CHART_ROUTE + "/vram-101.png").status_code == 404
+    data = snapshot(slack_client, settings)
+    view = home_view(
+        data,
+        asset_base_url="https://old.example.test/bars",
+        chart_base_url="https://new.example.test/charts",
+    )
+    layout = view["blocks"][-2]
+    panel = layout["rows"][0]["items"][0]["block"]["child_blocks"]
+    assert [block["type"] for block in panel] == ["context", "image", "context", "section"]
+    assert panel[1]["image_url"] == "https://new.example.test/charts/vram-070.png"
+    assert "70%" in panel[1]["alt_text"]
+    assert "*70%*" in json.dumps(layout["fallback"])
+    assert "https://old.example.test/bars/vram-070.png" in json.dumps(layout["fallback"])
+    assert sum(block_cost(block) for block in view["blocks"]) <= 100
+    invalid = data.nodes[0].model_copy(
+        update={"node": data.nodes[0].node.model_copy(update={"status": "OFFLINE"})}
+    )
+    unknown = home_view(
+        data.model_copy(update={"nodes": [invalid]}),
+        chart_base_url="https://new.example.test/charts",
+    )
+    assert "vram-unknown.png" in json.dumps(unknown) and "vram-000.png" not in json.dumps(unknown)
+    assert (
+        SlackSettings(
+            _env_file=None, home_chart_base_url="https://new.example.test/charts/"
+        ).home_chart_base_url
+        == "https://new.example.test/charts"
+    )
+    with pytest.raises(ValidationError):
+        SlackSettings(_env_file=None, home_chart_base_url="https://user:secret@host/charts")
 
 
 def test_asset_configuration_rejects_credential_or_non_http_urls():

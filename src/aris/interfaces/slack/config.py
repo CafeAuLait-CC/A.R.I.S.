@@ -17,9 +17,10 @@ class SlackSettings(BaseSettings):
     job_lease_seconds: int = Field(default=60, ge=30, le=600)
     job_max_attempts: int = Field(default=5, ge=1, le=20)
     home_asset_base_url: str | None = Field(default=None, max_length=2048, repr=False)
+    home_chart_base_url: str | None = Field(default=None, max_length=2048, repr=False)
     home_layout: Literal["two-column", "single-column"] = "two-column"
 
-    @field_validator("home_asset_base_url")
+    @field_validator("home_asset_base_url", "home_chart_base_url")
     @classmethod
     def valid_assets(cls, value: str | None) -> str | None:
         if not value:

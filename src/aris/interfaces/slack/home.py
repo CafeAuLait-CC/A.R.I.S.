@@ -79,12 +79,14 @@ def memory_used(gpu: GpuStatus) -> str:
 
 
 def memory_amount(byte_count: int) -> str:
-    unit, divisor = ("MB", 10**6) if byte_count < 10**9 else ("GB", 10**9)
-    return f"{byte_count / divisor:.1f} {unit}"
+    """Keep binary capacity values with the user's preferred MB/GB labels."""
+    if byte_count < 2**30:
+        return f"{byte_count / 2**20:.0f} MB"
+    return f"{byte_count / 2**30:.1f} GB"
 
 
 def memory_range(gpu: GpuStatus) -> str:
-    total_gb = gpu.memory_total_mib * 1024**2 / 10**9
+    total_gb = gpu.memory_total_mib / 1024
     return f"{memory_used(gpu).removesuffix(' GB')} / {total_gb:.1f} GB"
 
 
@@ -145,7 +147,7 @@ def disk_text(entry: NodeResourceStatus) -> str:
         return "Disk unknown"
     total = sum(v.total_bytes for v in volumes)
     used = sum(v.used_bytes for v in volumes)
-    unit, divisor = ("TB", 10**12) if total >= 10**12 else ("GB", 10**9)
+    unit, divisor = ("TB", 2**40) if total >= 2**40 else ("GB", 2**30)
     return f"Disk {used / divisor:.1f} {unit} used / {total / divisor:.1f} {unit}"
 
 
@@ -165,8 +167,8 @@ def system_text(entry: NodeResourceStatus) -> str:
         ram = system.memory
         if ram.quality == "ok" and ram.total_bytes is not None and ram.available_bytes is not None:
             memory = (
-                f"RAM {(ram.total_bytes - ram.available_bytes) / 10**9:.1f} / "
-                f"{ram.total_bytes / 10**9:.1f} GB"
+                f"RAM {(ram.total_bytes - ram.available_bytes) / 2**30:.1f} / "
+                f"{ram.total_bytes / 2**30:.1f} GB"
             )
     return f"{cpu} · {memory} · {disk_text(entry)}"
 
@@ -177,6 +179,7 @@ def device_blocks(
     asset_base_url: str | None,
     *,
     show_title: bool = True,
+    chart_base_url: str | None = None,
 ) -> list[dict[str, Any]]:
     percent = memory_percent(entry, gpu)
     blocks = [section(f"*GPU {gpu.index} · {escape(gpu.model)}*")] if show_title else []
@@ -192,11 +195,14 @@ def device_blocks(
             },
         ]
     )
-    if asset_base_url:
+    if chart_base_url:
+        blocks.pop()  # The chart contains this same real VRAM label/percentage.
+    image_base = chart_base_url or asset_base_url
+    if image_base:
         blocks.append(
             {
                 "type": "image",
-                "image_url": f"{asset_base_url.rstrip('/')}/{asset_name(percent)}",
+                "image_url": f"{image_base.rstrip('/')}/{asset_name(percent)}",
                 "alt_text": f"{entry.node.node_id} GPU {gpu.index}: VRAM "
                 + ("Unknown" if percent is None else f"{percent}%"),
             }
@@ -222,7 +228,10 @@ def device_blocks(
 
 
 def device_layout(
-    entry: NodeResourceStatus, pair: list[GpuStatus], asset_base_url: str | None
+    entry: NodeResourceStatus,
+    pair: list[GpuStatus],
+    asset_base_url: str | None,
+    chart_base_url: str | None = None,
 ) -> dict[str, Any]:
     devices = [device_blocks(entry, gpu, asset_base_url) for gpu in pair]
     return {
@@ -244,7 +253,11 @@ def device_layout(
                             "title": plain(f"GPU {gpu.index} · {gpu.model}"[:150]),
                             "width": "narrow",
                             "child_blocks": device_blocks(
-                                entry, gpu, asset_base_url, show_title=False
+                                entry,
+                                gpu,
+                                asset_base_url,
+                                show_title=False,
+                                chart_base_url=chart_base_url,
                             ),
                         },
                     }
@@ -270,6 +283,7 @@ def home_view(
     snapshot: ResourceStatus,
     *,
     asset_base_url: str | None = None,
+    chart_base_url: str | None = None,
     layout: HomeLayout = "two-column",
 ) -> dict[str, Any]:
     if layout not in {"two-column", "single-column"}:
@@ -336,7 +350,7 @@ def home_view(
         for index in range(0, len(node.gpus), stride):
             pair = node.gpus[index : index + stride]
             unit = (
-                [device_layout(entry, pair, asset_base_url)]
+                [device_layout(entry, pair, asset_base_url, chart_base_url)]
                 if layout == "two-column"
                 else device_blocks(entry, pair[0], asset_base_url)
             )
