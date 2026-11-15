@@ -204,7 +204,19 @@ def main() -> None:
                     if args.real_gpu:
                         assert components["system"]["memory"]["quality"] == "ok"
                         assert components["compute"]["quality"] == "ok"
-                    assert components["compute"]["user_scope"] == "unknown"
+                        compute = components["compute"]
+                        assert compute["user_scope"] == "reported_linux_users"
+                        owner = compute["ownership"]
+                        assert owner["quality"] in {"ok", "partial"}
+                        assert (
+                            sum(user["reported_processes"] for user in owner["users"])
+                            + owner["unresolved_processes"]
+                            == compute["reported_processes"]
+                        )
+                        assert '"pid"' not in json.dumps(compute)
+                    elif components["compute"]["quality"] != "ok":
+                        assert components["compute"]["user_scope"] == "unknown"
+                        assert "ownership" not in components["compute"]
                 engine = create_engine(database_url)
                 try:
                     with engine.connect() as db:

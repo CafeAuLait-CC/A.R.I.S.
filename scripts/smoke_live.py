@@ -113,6 +113,16 @@ def smoke(real_gpu: bool) -> dict[str, object]:
                 assert last.system.cpu.quality == "ok"
                 assert last.system.memory.quality == "ok"
                 assert last.compute.quality == "ok"
+                assert last.compute.user_scope == "reported_linux_users"
+                assert last.compute.ownership is not None
+                owner = last.compute.ownership
+                assert owner.quality in {"ok", "partial"}
+                assert (
+                    sum(user.reported_processes for user in owner.users)
+                    + (owner.unresolved_processes)
+                    == last.compute.reported_processes
+                )
+                assert '"pid"' not in last.compute.model_dump_json()
             resource_result = {
                 "system_freshness": last.system_freshness,
                 "cpu_quality": last.system.cpu.quality,
