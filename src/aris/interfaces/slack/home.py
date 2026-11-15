@@ -66,6 +66,8 @@ def owner_text(entry: NodeResourceStatus, gpu: GpuStatus) -> str:
     owner = compute.ownership if compute is not None and compute.quality == "ok" else None
     if owner is None or owner.quality == "unsupported":
         return "User attribution not provided"
+    if compute is not None and compute.reported_processes == 0 and owner.quality == "ok":
+        return "No compute processes reported"
     users = [
         user
         for user in owner.users
@@ -79,7 +81,8 @@ def owner_text(entry: NodeResourceStatus, gpu: GpuStatus) -> str:
     ]
     if len(users) > 2:
         names.append(f"{len(users) - 2} more UIDs")
-    return "Linux " + ", ".join(names)
+    suffix = " · partial attribution" if owner.quality == "partial" else ""
+    return "Linux " + ", ".join(names) + suffix
 
 
 def disk_text(entry: NodeResourceStatus) -> str:
@@ -322,7 +325,7 @@ def details_view(entry: NodeResourceStatus, gpu: GpuStatus) -> dict[str, Any]:
     result["blocks"] = [
         {"type": "section", "fields": [markdown(f"*{label}*\n{value}") for label, value in fields]},
         context(system_text(entry)),
-        context("GPU UUID：" + escape(gpu.gpu_uuid)),
+        context("GPU UUID: " + escape(gpu.gpu_uuid)),
         context("Resource observations only. Reservation availability not evaluated."),
     ]
     disk_stamp = getattr(entry, "disks_observed_at", None)
