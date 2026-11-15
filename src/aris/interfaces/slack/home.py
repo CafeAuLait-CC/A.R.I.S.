@@ -158,9 +158,9 @@ def device_blocks(
     else:
         free = (gpu.memory_total_mib - gpu.memory_used_mib) / 1024
         temperature = (
-            "Temperature unknown" if gpu.temperature_c is None else f"{gpu.temperature_c} °C"
+            "Temperature unknown" if gpu.temperature_c is None else f"{gpu.temperature_c}\u00a0°C"
         )
-        footer = f"{free:.1f} GiB free · GPU {gpu.utilization_percent}% · {temperature}"
+        footer = f"{free:.1f} GiB free\nGPU {gpu.utilization_percent}% · {temperature}"
     selection = json.dumps(
         {"node_id": entry.node.node_id, "gpu_uuid": gpu.gpu_uuid},
         ensure_ascii=False,
@@ -171,7 +171,7 @@ def device_blocks(
     return blocks
 
 
-def paired_layout(
+def device_layout(
     entry: NodeResourceStatus, pair: list[GpuStatus], asset_base_url: str | None
 ) -> dict[str, Any]:
     devices = [device_blocks(entry, gpu, asset_base_url) for gpu in pair]
@@ -283,8 +283,8 @@ def home_view(
         for index in range(0, len(node.gpus), stride):
             pair = node.gpus[index : index + stride]
             unit = (
-                [paired_layout(entry, pair, asset_base_url)]
-                if len(pair) == 2
+                [device_layout(entry, pair, asset_base_url)]
+                if layout == "two-column"
                 else device_blocks(entry, pair[0], asset_base_url)
             )
             unit_cost = sum(block_cost(block) for block in unit)

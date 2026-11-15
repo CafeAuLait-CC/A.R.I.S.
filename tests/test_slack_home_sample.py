@@ -30,11 +30,14 @@ from tests.test_slack import slack_settings as slack_settings
 from tests.test_telemetry import batch, post
 
 
-def snapshot(client, settings, *, used=3482):
+def snapshot(client, settings, *, used=3482, gpu_count=2):
     first = batch()["resources"]["gpu"]["gpus"][0]
     first.update(memory_total_mib=5000, memory_used_mib=used, model="actual test model")
-    second = {**first, "gpu_uuid": "GPU-b", "index": 1}
-    assert post(client, batch(gpus=[first, second])).status_code == 200
+    gpus = [
+        {**first, "gpu_uuid": f"GPU-{chr(97 + index)}", "index": index}
+        for index in range(gpu_count)
+    ]
+    assert post(client, batch(gpus=gpus)).status_code == 200
     return VegaService(session_factory(client.app.state.engine), settings).resource_status()
 
 
@@ -57,9 +60,11 @@ def details_body(**changes):
 
 
 def test_native_pairs_use_matching_quantized_vram_and_complete_fallback(slack_client, settings):
-    data = snapshot(slack_client, settings)
+    data = snapshot(slack_client, settings, gpu_count=3)
     view = home_view(data, asset_base_url="https://assets.example.test/vram")
-    layout = next(block for block in view["blocks"] if block["type"] == "layout")
+    layouts = [block for block in view["blocks"] if block["type"] == "layout"]
+    assert [len(block["rows"][0]["items"]) for block in layouts] == [2, 1]
+    layout, odd_layout = layouts
     assert [len(row["items"]) for row in layout["rows"]] == [2]
     panels = [item["block"] for item in layout["rows"][0]["items"]]
     assert all(panel["type"] == "container" and panel["width"] == "narrow" for panel in panels)
@@ -69,6 +74,19 @@ def test_native_pairs_use_matching_quantized_vram_and_complete_fallback(slack_cl
     assert panels[0]["child_blocks"][1]["image_url"].endswith("vram-070.png")
     assert panels[1]["child_blocks"][1]["image_url"].endswith("vram-070.png")
     assert block_cost(layout) == 9  # Layout + 2 containers + all 6 device blocks.
+    odd_item = odd_layout["rows"][0]["items"][0]
+    assert odd_item["horizontal_alignment"] == "start"
+    assert odd_item["block"]["width"] == "narrow"
+    assert odd_item["block"]["title"]["text"] == "GPU 2 · actual test model"
+    assert block_cost(odd_layout) == 5
+    assert [block["type"] for block in odd_layout["fallback"]] == ["section", "image", "section"]
+    assert json.loads(odd_layout["fallback"][2]["accessory"]["value"]) == {
+        "node_id": "node-a",
+        "gpu_uuid": "GPU-c",
+    }
+    footer = panels[0]["child_blocks"][2]["text"]["text"]
+    assert " GiB free\nGPU " in footer and "\u00a0°C" in footer
+    assert sum(block_cost(block) for block in view["blocks"]) <= 100
     assert [block["type"] for block in layout["fallback"]] == [
         "section",
         "image",
