@@ -57,10 +57,15 @@ def test_native_pairs_use_matching_quantized_vram_and_complete_fallback(slack_cl
     data = snapshot(slack_client, settings)
     view = home_view(data, asset_base_url="https://assets.example.test/vram")
     layout = next(block for block in view["blocks"] if block["type"] == "layout")
-    assert [len(row["items"]) for row in layout["rows"]] == [2, 2, 2]
-    title = layout["rows"][0]["items"][0]["block"]["text"]["text"]
-    assert "VRAM 70%" in title and "actual test model" in title
-    assert layout["rows"][1]["items"][0]["block"]["image_url"].endswith("vram-070.png")
+    assert [len(row["items"]) for row in layout["rows"]] == [2]
+    panels = [item["block"] for item in layout["rows"][0]["items"]]
+    assert all(panel["type"] == "container" and panel["width"] == "narrow" for panel in panels)
+    assert panels[0]["title"]["text"] == "GPU 0 · actual test model"
+    assert panels[1]["title"]["text"] == "GPU 1 · actual test model"
+    assert "VRAM 70%" in panels[0]["child_blocks"][0]["text"]["text"]
+    assert panels[0]["child_blocks"][1]["image_url"].endswith("vram-070.png")
+    assert panels[1]["child_blocks"][1]["image_url"].endswith("vram-070.png")
+    assert block_cost(layout) == 9  # Layout + 2 containers + all 6 device blocks.
     assert [block["type"] for block in layout["fallback"]] == [
         "section",
         "image",
@@ -73,6 +78,12 @@ def test_native_pairs_use_matching_quantized_vram_and_complete_fallback(slack_cl
     second = json.loads(layout["fallback"][5]["accessory"]["value"])
     assert first == {"node_id": "node-a", "gpu_uuid": "GPU-a"}
     assert second == {"node_id": "node-a", "gpu_uuid": "GPU-b"}
+    for panel, fallback in zip(
+        panels, (layout["fallback"][:3], layout["fallback"][3:]), strict=True
+    ):
+        assert "actual test model" in fallback[0]["text"]["text"]
+        assert panel["child_blocks"][1:] == fallback[1:]
+        assert panel["child_blocks"][0]["text"]["text"] in fallback[0]["text"]["text"]
     assert (
         layout["fallback"][2]["accessory"]["action_id"]
         != layout["fallback"][5]["accessory"]["action_id"]
@@ -84,6 +95,7 @@ def test_native_pairs_use_matching_quantized_vram_and_complete_fallback(slack_cl
         data, asset_base_url="https://assets.example.test/vram", layout="single-column"
     )
     assert not any(block["type"] == "layout" for block in single["blocks"])
+    assert not any(block["type"] == "container" for block in single["blocks"])
     assert sum(block_cost(block) for block in single["blocks"]) <= 100
 
 

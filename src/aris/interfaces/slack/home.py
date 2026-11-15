@@ -126,7 +126,11 @@ def system_text(entry: NodeResourceStatus) -> str:
 
 
 def device_blocks(
-    entry: NodeResourceStatus, gpu: GpuStatus, asset_base_url: str | None
+    entry: NodeResourceStatus,
+    gpu: GpuStatus,
+    asset_base_url: str | None,
+    *,
+    show_title: bool = True,
 ) -> list[dict[str, Any]]:
     percent = memory_percent(entry, gpu)
     metric = (
@@ -137,7 +141,8 @@ def device_blocks(
     state = state_text(entry, gpu)
     if gpu_current(entry, gpu) and gpu.observed_state == "busy":
         state += " · " + owner_text(entry, gpu)
-    heading = section(f"*GPU {gpu.index} · {escape(gpu.model)}*\n{state}\n\n{metric}")
+    title = f"*GPU {gpu.index} · {escape(gpu.model)}*\n" if show_title else ""
+    heading = section(f"{title}{state}\n\n{metric}")
     blocks = [heading]
     if asset_base_url:
         blocks.append(
@@ -175,15 +180,35 @@ def paired_layout(
         "label": (entry.node.node_id + " GPU observations")[:150],
         "is_label_visible": False,
         "grid_lines": "none",
+        # Image blocks have their own minimum width. Keep each complete device
+        # in one constrained container so a wrapping image cannot separate from
+        # its heading or spill into the other device's column.
         "rows": [
-            {"items": [{"width": "standard", "block": device[row]} for device in devices]}
-            for row in range(len(devices[0]))
+            {
+                "items": [
+                    {
+                        "width": "standard",
+                        "horizontal_alignment": "start",
+                        "block": {
+                            "type": "container",
+                            "title": plain(f"GPU {gpu.index} · {gpu.model}"[:150]),
+                            "width": "narrow",
+                            "child_blocks": device_blocks(
+                                entry, gpu, asset_base_url, show_title=False
+                            ),
+                        },
+                    }
+                    for gpu in pair
+                ]
+            }
         ],
         "fallback": [block for device in devices for block in device],
     }
 
 
 def block_cost(block: dict[str, Any]) -> int:
+    if block["type"] == "container":
+        return 1 + sum(block_cost(child) for child in block["child_blocks"])
     if block["type"] != "layout":
         return 1
     nested = sum(block_cost(item["block"]) for row in block["rows"] for item in row["items"])
