@@ -18,10 +18,11 @@ from aris.core.audit import AuditEntry
 from aris.core.db import session_factory
 from aris.interfaces.slack.client import SlackClient, SlackDeliveryError
 from aris.interfaces.slack.config import SlackSettings
-from aris.interfaces.slack.home import block_cost, home_view
+from aris.interfaces.slack.home import block_cost, details_view, home_view, node_summary
 from aris.interfaces.slack.models import SlackHomeJob, SlackReceipt
 from aris.interfaces.slack.schemas import ModalHandle
 from aris.interfaces.slack.vram_assets import VRAM_ASSET_ROUTE, VRAM_ASSET_SET
+from aris.modules.vega.resource_schemas import ComputeOwnership
 from aris.modules.vega.service import VegaService
 from scripts.generate_slack_vram_assets import asset_set_digest, png_bytes
 from tests.test_slack import signed
@@ -70,47 +71,65 @@ def test_native_pairs_use_matching_quantized_vram_and_complete_fallback(slack_cl
     assert all(panel["type"] == "container" and panel["width"] == "narrow" for panel in panels)
     assert panels[0]["title"]["text"] == "GPU 0 · actual test model"
     assert panels[1]["title"]["text"] == "GPU 1 · actual test model"
-    assert "VRAM 70%" in panels[0]["child_blocks"][0]["text"]["text"]
-    assert panels[0]["child_blocks"][1]["image_url"].endswith("vram-070.png")
-    assert panels[1]["child_blocks"][1]["image_url"].endswith("vram-070.png")
-    assert block_cost(layout) == 9  # Layout + 2 containers + all 6 device blocks.
+    assert panels[0]["child_blocks"][0]["type"] == "context"
+    assert panels[0]["child_blocks"][0]["elements"][0]["text"] == "In use · Unknown"
+    assert panels[0]["child_blocks"][1]["fields"] == [
+        {"type": "mrkdwn", "text": "VRAM", "verbatim": True},
+        {"type": "mrkdwn", "text": "*70%*", "verbatim": True},
+    ]
+    assert panels[0]["child_blocks"][2]["image_url"].endswith("vram-070.png")
+    assert panels[1]["child_blocks"][2]["image_url"].endswith("vram-070.png")
+    assert "GiB free" in panels[0]["child_blocks"][3]["elements"][0]["text"]
+    assert block_cost(layout) == 13  # Layout + 2 containers + all 10 device blocks.
     odd_item = odd_layout["rows"][0]["items"][0]
     assert odd_item["horizontal_alignment"] == "start"
     assert odd_item["block"]["width"] == "narrow"
     assert odd_item["block"]["title"]["text"] == "GPU 2 · actual test model"
-    assert block_cost(odd_layout) == 5
-    assert [block["type"] for block in odd_layout["fallback"]] == ["section", "image", "section"]
-    assert json.loads(odd_layout["fallback"][2]["accessory"]["value"]) == {
+    assert block_cost(odd_layout) == 7
+    assert [block["type"] for block in odd_layout["fallback"]] == [
+        "section",
+        "context",
+        "section",
+        "image",
+        "context",
+        "section",
+    ]
+    assert json.loads(odd_layout["fallback"][-1]["accessory"]["value"]) == {
         "node_id": "node-a",
         "gpu_uuid": "GPU-c",
     }
-    footer = panels[0]["child_blocks"][2]["text"]["text"]
-    assert " GiB free\nGPU " in footer and "\u00a0°C" in footer
+    footer = panels[0]["child_blocks"][-1]["text"]["text"]
+    assert footer.startswith("GPU ") and "\u00a0°C" in footer and "GiB" not in footer
     assert sum(block_cost(block) for block in view["blocks"]) <= 100
     assert [block["type"] for block in layout["fallback"]] == [
         "section",
+        "context",
+        "section",
         "image",
+        "context",
         "section",
         "section",
+        "context",
+        "section",
         "image",
+        "context",
         "section",
     ]
-    first = json.loads(layout["fallback"][2]["accessory"]["value"])
-    second = json.loads(layout["fallback"][5]["accessory"]["value"])
+    first = json.loads(layout["fallback"][5]["accessory"]["value"])
+    second = json.loads(layout["fallback"][11]["accessory"]["value"])
     assert first == {"node_id": "node-a", "gpu_uuid": "GPU-a"}
     assert second == {"node_id": "node-a", "gpu_uuid": "GPU-b"}
     for panel, fallback in zip(
-        panels, (layout["fallback"][:3], layout["fallback"][3:]), strict=True
+        panels, (layout["fallback"][:6], layout["fallback"][6:]), strict=True
     ):
         assert "actual test model" in fallback[0]["text"]["text"]
-        assert panel["child_blocks"][1:] == fallback[1:]
-        assert panel["child_blocks"][0]["text"]["text"] in fallback[0]["text"]["text"]
+        assert panel["child_blocks"] == fallback[1:]
     assert (
-        layout["fallback"][2]["accessory"]["action_id"]
-        != layout["fallback"][5]["accessory"]["action_id"]
+        layout["fallback"][5]["accessory"]["action_id"]
+        != layout["fallback"][11]["accessory"]["action_id"]
     )
     serialized = json.dumps(view, ensure_ascii=False)
-    assert "available" not in serialized and "Reserved" not in serialized
+    assert "*0 GPUs available* · 3 in use · 0 reserved" in serialized
     assert "▰" not in serialized and "Disk unknown" in serialized
     single = home_view(
         data, asset_base_url="https://assets.example.test/vram", layout="single-column"
@@ -118,6 +137,45 @@ def test_native_pairs_use_matching_quantized_vram_and_complete_fallback(slack_cl
     assert not any(block["type"] == "layout" for block in single["blocks"])
     assert not any(block["type"] == "container" for block in single["blocks"])
     assert sum(block_cost(block) for block in single["blocks"]) <= 100
+
+
+def test_summary_uses_observations_without_writing_placeholder_reservations(slack_client, settings):
+    data = snapshot(slack_client, settings, gpu_count=3)
+    entry = data.nodes[0]
+    mixed = entry.model_copy(
+        update={
+            "node": entry.node.model_copy(
+                update={
+                    "gpus": [
+                        gpu.model_copy(update={"observed_state": state})
+                        for gpu, state in zip(
+                            entry.node.gpus, ("idle", "busy", "unknown"), strict=True
+                        )
+                    ]
+                }
+            )
+        }
+    )
+    assert node_summary(mixed) == "*1 GPU available* · 1 in use · 0 reserved · 1 unknown"
+    before = data.model_dump(mode="json")
+    queries = []
+
+    def queried(*args):
+        queries.append(True)
+
+    event.listen(slack_client.app.state.engine, "before_cursor_execute", queried)
+    try:
+        view = home_view(data)
+    finally:
+        event.remove(slack_client.app.state.engine, "before_cursor_execute", queried)
+    assert queries == [] and data.model_dump(mode="json") == before
+    headers = [block for block in view["blocks"] if block["type"] == "header"]
+    assert headers[0]["level"] == 1 and headers[0]["text"]["text"] == "Hardware resources"
+    assert headers[1]["level"] == 2 and headers[1]["text"]["text"] == "node-a · Online"
+    for changes in ({"status": "OFFLINE"}, {"telemetry_status": "STALE"}, {"gpus": []}):
+        unknown = entry.model_copy(update={"node": entry.node.model_copy(update=changes)})
+        assert "GPU availability unknown" in node_summary(unknown)
+        assert "0 GPUs available" not in node_summary(unknown)
 
 
 def test_stale_pair_uses_unknown_asset_and_does_not_show_old_numbers(slack_client, settings):
@@ -133,6 +191,57 @@ def test_stale_pair_uses_unknown_asset_and_does_not_show_old_numbers(slack_clien
     assert "vram-unknown.png" in serialized
     assert "vram-000.png" not in serialized and "GiB" not in serialized
     assert "VRAM 70%" not in serialized and "Current metrics unknown" in serialized
+    assert "GPU availability unknown" in serialized and "0 GPUs available" not in serialized
+
+
+def test_details_matches_six_field_reference_and_keeps_observed_owners(slack_client, settings):
+    data = snapshot(slack_client, settings)
+    entry, gpu = data.nodes[0], data.nodes[0].node.gpus[0]
+    ownership = ComputeOwnership.model_validate(
+        {
+            "quality": "ok",
+            "unresolved_processes": 0,
+            "users": [
+                {
+                    "uid": 1001,
+                    "username": "observed-linux-user",
+                    "reported_processes": 1,
+                    "gpus": [{"gpu_uuid": gpu.gpu_uuid, "reported_processes": 1}],
+                }
+            ],
+        }
+    )
+    entry = entry.model_copy(
+        update={"compute": entry.compute.model_copy(update={"ownership": ownership})}
+    )
+    gpu = gpu.model_copy(update={"model": "NVIDIA RTX A6000"})
+    view = details_view(entry, gpu)
+    assert view["title"]["text"] == "RTX A6000 · GPU 0"
+    assert view["close"]["text"] == "Close"
+    assert [
+        [field["text"].split("\n")[0] for field in block["fields"]] for block in view["blocks"]
+    ] == [
+        ["*Node*", "*Status*"],
+        ["*VRAM*", "*Memory occupancy*"],
+        ["*GPU utilization*", "*Temperature*"],
+    ]
+    assert "In use · Linux observed-linux-user" in view["blocks"][0]["fields"][1]["text"]
+    assert view["blocks"][1]["fields"][1]["text"] == "*Memory occupancy*\n70%"
+    serialized = json.dumps(view, ensure_ascii=False)
+    assert all(
+        text not in serialized
+        for text in ("Heartbeat", "GPU sampled", "UUID", "*CPU*", "*RAM*", "Disk", "Reservation")
+    )
+    long_gpu = gpu.model_copy(
+        update={"model": "NVIDIA " + "Very long actual GPU model name " * 3, "index": 12}
+    )
+    title = details_view(entry, long_gpu)["title"]["text"]
+    assert len(title) <= 24 and title.endswith(" · GPU 12") and "…" in title
+    offline = entry.model_copy(update={"node": entry.node.model_copy(update={"status": "OFFLINE"})})
+    unknown = details_view(offline, gpu)
+    assert unknown["blocks"][0]["fields"][1]["text"] == "*Status*\nUnknown"
+    assert unknown["blocks"][1]["fields"][1]["text"] == "*Memory occupancy*\nUnknown"
+    assert "GiB" not in json.dumps(unknown)
 
 
 def test_data_free_assets_are_public_bounded_and_do_not_query_database(client):
@@ -230,7 +339,8 @@ def test_details_ack_is_sent_before_modal_network_or_snapshot_query_and_is_dedup
     def updated(self, handle, view):
         calls.append("update")
         assert handle.view_id == "V-test"
-        assert "GPU UUID" in json.dumps(view, ensure_ascii=False)
+        assert "Memory occupancy" in json.dumps(view, ensure_ascii=False)
+        assert "GPU UUID" not in json.dumps(view, ensure_ascii=False)
         completed.set()
 
     monkeypatch.setattr(SlackClient, "open_modal", opened)
