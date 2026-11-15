@@ -1,0 +1,140 @@
+{
+  "source_commit": "db488904835bef68b884f86f99d13af2a5e3b035",
+  "telemetry": {
+    "message_id": "00000000-0000-4000-8000-000000000001",
+    "agent_id": "agent-a",
+    "node_id": "node-a",
+    "hostname": "stable-fixture-node",
+    "agent_version": "2.0.0.dev0",
+    "seq": 1,
+    "sent_at": "2026-11-14T12:00:00Z",
+    "observed_at": "2026-11-14T12:00:00Z",
+    "type": "telemetry",
+    "resources": {
+      "observed_at": "2026-11-14T12:00:00Z",
+      "gpu": {
+        "observed_at": "2026-11-14T12:00:00Z",
+        "quality": "ok",
+        "gpus": [
+          {
+            "gpu_uuid": "GPU-a",
+            "index": 0,
+            "model": "stable fixture GPU",
+            "memory_total_mib": 4096,
+            "memory_used_mib": 0,
+            "utilization_percent": 0,
+            "temperature_c": null
+          }
+        ]
+      },
+      "system": {
+        "observed_at": "2026-11-14T12:00:00Z",
+        "source": "linux_procfs",
+        "cpu": {
+          "quality": "warming",
+          "logical_count": 8,
+          "utilization_percent": null,
+          "window_seconds": null
+        },
+        "memory": {
+          "quality": "ok",
+          "total_bytes": 16384,
+          "available_bytes": 8192
+        }
+      },
+      "compute": {
+        "observed_at": "2026-11-14T12:00:00Z",
+        "quality": "ok",
+        "scope": "driver_reported_compute_apps",
+        "user_scope": "unknown",
+        "reported_processes": 0,
+        "gpus": [
+          {
+            "gpu_uuid": "GPU-a",
+            "reported_processes": 0,
+            "reported_memory_mib": 0
+          }
+        ]
+      }
+    }
+  },
+  "telemetry_sha256": "009289df810755bb4bb10d3e204a1a34b94d5f652f605f040e3da4868e9a9a92",
+  "heartbeat": {
+    "message_id": "00000000-0000-4000-8000-000000000002",
+    "agent_id": "agent-a",
+    "node_id": "node-a",
+    "hostname": "stable-fixture-node",
+    "agent_version": "2.0.0.dev0",
+    "seq": 2,
+    "sent_at": "2026-11-14T12:00:00Z",
+    "observed_at": "2026-11-14T12:00:00Z",
+    "type": "heartbeat",
+    "collector_status": "ok",
+    "capabilities": [
+      "node.resources",
+      "heartbeat"
+    ]
+  },
+  "heartbeat_sha256": "02cf754bde13a083259d114f7e91456c8d9589bd90550e111d265b5a39071d11",
+  "hello": {
+    "type": "hello",
+    "agent_id": "agent-a",
+    "node_id": "node-a",
+    "hostname": "stable-fixture-node",
+    "session_id": "00000000-0000-4000-8000-000000000003"
+  },
+  "hello_sha256": "9051f53ab74ebb07519d7744170a24577bf67b1adbb616ae5f4cd6c58f871d00",
+  "frame": {
+    "type": "sample",
+    "session_id": "00000000-0000-4000-8000-000000000003",
+    "seq": 1,
+    "resources": {
+      "observed_at": "2026-11-14T12:00:00Z",
+      "gpu": {
+        "observed_at": "2026-11-14T12:00:00Z",
+        "quality": "ok",
+        "gpus": [
+          {
+            "gpu_uuid": "GPU-a",
+            "index": 0,
+            "model": "stable fixture GPU",
+            "memory_total_mib": 4096,
+            "memory_used_mib": 0,
+            "utilization_percent": 0,
+            "temperature_c": null
+          }
+        ]
+      },
+      "system": {
+        "observed_at": "2026-11-14T12:00:00Z",
+        "source": "linux_procfs",
+        "cpu": {
+          "quality": "warming",
+          "logical_count": 8,
+          "utilization_percent": null,
+          "window_seconds": null
+        },
+        "memory": {
+          "quality": "ok",
+          "total_bytes": 16384,
+          "available_bytes": 8192
+        }
+      },
+      "compute": {
+        "observed_at": "2026-11-14T12:00:00Z",
+        "quality": "ok",
+        "scope": "driver_reported_compute_apps",
+        "user_scope": "unknown",
+        "reported_processes": 0,
+        "gpus": [
+          {
+            "gpu_uuid": "GPU-a",
+            "reported_processes": 0,
+            "reported_memory_mib": 0
+          }
+        ]
+      }
+    }
+  },
+  "frame_sha256": "dc9d8e1512e176f6c6fc2c5d909e478b864478bd6615bc7dbc8b18aa5779f71b"
+}

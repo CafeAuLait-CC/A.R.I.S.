@@ -34,27 +34,55 @@ function gpuCard(gpu,node,connected){
   top.append(title,make("span","gpu-state "+state,state==="busy"?"观测占用":state==="idle"?"观测空闲":gpu.present?"状态未知":"未检测到"));card.append(top);
   const data=make("div","gpu-data"), usage=make("div"), memory=make("div"), u=make("div","value-row"), m=make("div","value-row memory-value");
   u.append(make("strong","",known?gpu.utilization_percent:"—"),make("small","",known?"%":""));usage.append(u,make("div","data-label","GPU 利用率"));
-  m.append(make("strong","",known?(gpu.memory_used_mib/1024).toFixed(1):"—"),make("small","",known?"/ "+(gpu.memory_total_mib/1024).toFixed(1)+" GiB":""));memory.append(m,make("div","data-label","显存使用"));
+  const smallMemory=known && gpu.memory_used_mib<1024;
+  m.append(make("strong","",known?(smallMemory?String(gpu.memory_used_mib):(gpu.memory_used_mib/1024).toFixed(1)):"—"),make("small","",known?(smallMemory?"MiB ":"")+"/ "+(gpu.memory_total_mib/1024).toFixed(1)+" GiB":""));memory.append(m,make("div","data-label","显存使用"));
   for(const [parent,value,cls] of [[usage,known?gpu.utilization_percent:0,"bar"],[memory,known?gpu.memory_used_mib/gpu.memory_total_mib*100:0,"bar memory"]]){const bar=make("progress",cls);bar.max=100;if(known){bar.value=value;}else{bar.removeAttribute("value");bar.setAttribute("aria-valuetext","未知");}bar.setAttribute("aria-label",parent===usage?"GPU 利用率":"显存使用比例");parent.append(bar);}
   data.append(usage,memory);card.append(data);
   const trend=chart(gpu,node.observed_at,known);card.append(trend.box);const note=make("div","chart-note");note.append(make("span","","利用率 · 最近 "+trend.count+" 次真实采样"),make("span","",known?"0 — 100%":"等待新鲜数据"));card.append(note);
   const bottom=make("div","gpu-bottom"), temp=make("span","","温度");temp.append(make("strong","",known && gpu.temperature_c!==null?gpu.temperature_c+" °C":"—"));bottom.append(temp,make("span","","采样 "+clock(node.observed_at)));card.append(bottom);return card;
 }
 const qualityLabel = (quality) => ({warming:"建立采样基线",error:"采集异常",unsupported:"不支持",unknown:"未知"})[quality]||"等待新鲜采样";
+function ownershipPanel(ownership,node){
+  if(!ownership || ownership.quality==="unsupported") return null;
+  const section=make("section","ownership"), table=make("table","ownership-table");
+  section.append(make("h3","ownership-title","Linux 用户观测"));
+  const head=make("thead"), header=make("tr");
+  for(const title of ["节点用户 / UID","计算进程","GPU / 报告显存"]){const cell=make("th","",title);cell.scope="col";header.append(cell);}head.append(header);table.append(head);
+  const body=make("tbody");
+  for(const user of ownership.users){
+    const row=make("tr"), identity=make("td"), processes=make("td","",String(user.reported_processes)), memory=make("td");
+    identity.append(make("strong","",user.username||"用户名未识别"),make("small","","UID "+user.uid));
+    for(const gpu of user.gpus){const index=node.gpus?.find(item=>item.gpu_uuid===gpu.gpu_uuid)?.index;
+      memory.append(make("div","",(index===undefined?gpu.gpu_uuid:"GPU "+index)+" · "+(gpu.reported_memory_mib===null?"显存未知":gpu.reported_memory_mib+" MiB")));
+    }
+    row.append(identity,processes,memory);body.append(row);
+  }
+  table.append(body);
+  if(ownership.users.length) section.append(table);
+  if(ownership.unresolved_processes) section.append(make("p","metric-note","另有 "+ownership.unresolved_processes+" 个进程未提供用户归属。"));
+  if(ownership.quality==="partial") section.append(make("p","metric-note","部分用户名或归属未解析；未知项未计入任何已识别用户。"));
+  if(!ownership.users.length && !ownership.unresolved_processes) section.append(make("p","metric-note","驱动未报告计算进程。"));
+  section.append(make("p","metric-note","仅驱动报告的计算进程 · Linux UID 为节点内身份，尚未绑定 ARIS / Slack 用户。"));
+  return section;
+}
 function systemPanel(node,connected){
   const system=connected && node.system_freshness==="CURRENT"?node.system:null;
   const compute=connected && node.compute_freshness==="CURRENT"?node.compute:null;
   const cpu=system?.cpu, memory=system?.memory;
   const cpuKnown=cpu?.quality==="ok", memoryKnown=memory?.quality==="ok", computeKnown=compute?.quality==="ok";
+  const ownership=compute?.ownership;
+  const ownerNote=!ownership?"驱动报告 · 此 Vega 未提供用户明细":ownership.quality==="unsupported"?"驱动报告 · 用户识别不支持":ownership.users.length+" 个 Linux UID · "+ownership.unresolved_processes+" 个进程归属未知";
   const panel=make("div","system-panel"), metrics=make("div","system-metrics");
   const entries=[
     ["CPU 使用率",cpuKnown?cpu.utilization_percent.toFixed(1)+"%":"—",cpuKnown?cpu.logical_count+" 逻辑核心 · "+cpu.window_seconds.toFixed(1)+" 秒窗口":qualityLabel(cpu?.quality)],
     ["系统内存",memoryKnown?((memory.total_bytes-memory.available_bytes)/2**30).toFixed(1)+" / "+(memory.total_bytes/2**30).toFixed(1)+" GiB":"—",memoryKnown?"可用 "+(memory.available_bytes/2**30).toFixed(1)+" GiB（内核估计）":qualityLabel(memory?.quality)],
-    ["报告的计算进程",computeKnown?String(compute.reported_processes):"—",computeKnown?"驱动报告 · 用户归属未知":qualityLabel(compute?.quality)],
+    ["报告的计算进程",computeKnown?String(compute.reported_processes):"—",computeKnown?ownerNote:qualityLabel(compute?.quality)],
   ];
   for(const [label,value,note] of entries){const cell=make("div","system-cell");cell.append(make("span","data-label",label),make("strong","system-value",value),make("span","metric-note",note));metrics.append(cell);}
   const stamps=make("div","system-stamps");stamps.append(make("span","","CPU / 内存采样 "+clock(node.system_observed_at)),make("span","","计算进程采样 "+clock(node.compute_observed_at)+" · 约每15秒查询"));
-  panel.append(metrics,stamps);return panel;
+  panel.append(metrics,stamps);
+  const owners=computeKnown?ownershipPanel(ownership,node):null;if(owners) panel.append(owners);
+  return panel;
 }
 function normalizedSnapshot(snapshot){
   return {...snapshot,nodes:(snapshot.nodes||[]).map(item=>item.node?({...item,...item.node}):item)};

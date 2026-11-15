@@ -68,6 +68,12 @@ def gpu_block(gpu: GpuStatus) -> dict[str, Any]:
     state = "🟠 观测占用" if gpu.observed_state == "busy" else "⚪ 观测空闲"
     temperature = "温度未知" if gpu.temperature_c is None else f"{gpu.temperature_c} °C"
     memory_percent = 100 * gpu.memory_used_mib / gpu.memory_total_mib
+    memory_label = "不足 1%" if 0 < memory_percent < 1 else f"{memory_percent:.0f}%"
+    used = (
+        f"{gpu.memory_used_mib} MiB"
+        if gpu.memory_used_mib < 1024
+        else f"{gpu.memory_used_mib / 1024:.1f} GiB"
+    )
     return {
         "type": "section",
         "text": plain(title + "\n" + state + " · " + temperature),
@@ -76,8 +82,8 @@ def gpu_block(gpu: GpuStatus) -> dict[str, Any]:
                 f"*GPU 利用率 · {gpu.utilization_percent}%*\n{meter(gpu.utilization_percent)}"
             ),
             markdown(
-                f"*显存 · {memory_percent:.0f}%*\n{meter(memory_percent)}\n"
-                f"{gpu.memory_used_mib / 1024:.1f} / {gpu.memory_total_mib / 1024:.1f} GiB"
+                f"*显存 · {memory_label}*\n{meter(memory_percent)}\n"
+                f"{used} / {gpu.memory_total_mib / 1024:.1f} GiB"
             ),
         ],
     }
@@ -175,9 +181,7 @@ def home_view(snapshot: ClusterStatus) -> dict[str, Any]:
     blocks.append(
         {
             "type": "context",
-            "elements": [
-                plain("打开 Home 或点击刷新后获取快照。以上为观测事实；预约可用性尚未评估。")
-            ],
+            "elements": [plain("状态以快照生成时为准，点击刷新获取最新观测；预约可用性尚未评估。")],
         }
     )
     return {"type": "home", "blocks": blocks}

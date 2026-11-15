@@ -1,9 +1,16 @@
 """Component observations with independent quality and timestamps."""
 
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import AwareDatetime, Field, field_validator, model_validator
+from pydantic import (
+    AwareDatetime,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from aris.core.contracts import Contract
 from aris.modules.vega.schemas import AgentEnvelope, GpuSample, NodeStatus
@@ -80,12 +87,60 @@ class GpuComputeSummary(Contract):
     reported_memory_mib: int | None = Field(default=None, ge=0)
 
 
+class ComputeUserSummary(Contract):
+    uid: int = Field(ge=0, le=4294967295)
+    username: str | None = Field(
+        default=None, min_length=1, max_length=128, pattern=r"^[^\x00-\x1f\x7f]+$"
+    )
+    reported_processes: int = Field(ge=1)
+    gpus: list[GpuComputeSummary] = Field(min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def valid_counts(self) -> "ComputeUserSummary":
+        if len({gpu.gpu_uuid for gpu in self.gpus}) != len(self.gpus):
+            raise ValueError("duplicate user GPU summary")
+        if any(gpu.reported_processes > self.reported_processes for gpu in self.gpus):
+            raise ValueError("GPU user process count exceeds the unique total")
+        if any(gpu.reported_processes == 0 for gpu in self.gpus) or (
+            self.reported_processes > sum(gpu.reported_processes for gpu in self.gpus)
+        ):
+            raise ValueError("user process total is inconsistent with GPU observations")
+        return self
+
+
+class ComputeOwnership(Contract):
+    source: Literal["linux_procfs_owner"] = "linux_procfs_owner"
+    quality: Literal["ok", "partial", "unsupported"]
+    users: list[ComputeUserSummary] = Field(default_factory=list, max_length=256)
+    unresolved_processes: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def valid_owners(self) -> "ComputeOwnership":
+        if len({user.uid for user in self.users}) != len(self.users):
+            raise ValueError("duplicate Linux UID")
+        if self.quality == "ok" and (
+            self.unresolved_processes or any(user.username is None for user in self.users)
+        ):
+            raise ValueError("complete ownership requires resolved UIDs and usernames")
+        if self.quality == "unsupported" and self.users:
+            raise ValueError("unsupported ownership cannot contain users")
+        return self
+
+
 class ComputeObservation(TimedObservation):
     quality: Literal["ok", "error", "unsupported", "unknown"]
     scope: Literal["driver_reported_compute_apps"] = "driver_reported_compute_apps"
-    user_scope: Literal["unknown"] = "unknown"
+    user_scope: Literal["unknown", "reported_linux_users"] = "unknown"
     reported_processes: int | None = Field(default=None, ge=0)
     gpus: list[GpuComputeSummary] = Field(default_factory=list, max_length=64)
+    ownership: ComputeOwnership | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_absent_ownership(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data: dict[str, Any] = handler(self)
+        if self.ownership is None:
+            data.pop("ownership", None)
+        return data
 
     @model_validator(mode="after")
     def valid_values(self) -> "ComputeObservation":
@@ -98,6 +153,32 @@ class ComputeObservation(TimedObservation):
             raise ValueError("unknown process observation cannot contain current counts")
         if len({gpu.gpu_uuid for gpu in self.gpus}) != len(self.gpus):
             raise ValueError("duplicate compute GPU UUID")
+        if self.ownership is not None:
+            owner = self.ownership
+            if self.quality != "ok" or self.reported_processes != (
+                sum(user.reported_processes for user in owner.users) + owner.unresolved_processes
+            ):
+                raise ValueError("ownership counts differ from driver process total")
+            expected = "unknown" if owner.quality == "unsupported" else "reported_linux_users"
+            if self.user_scope != expected:
+                raise ValueError("user scope differs from ownership observation")
+            by_gpu = {gpu.gpu_uuid: gpu for gpu in self.gpus}
+            for user in owner.users:
+                if any(gpu.gpu_uuid not in by_gpu for gpu in user.gpus):
+                    raise ValueError("user GPU is outside the compute inventory")
+            for gpu_uuid, gpu in by_gpu.items():
+                if (
+                    sum(
+                        part.reported_processes
+                        for user in owner.users
+                        for part in user.gpus
+                        if part.gpu_uuid == gpu_uuid
+                    )
+                    > gpu.reported_processes
+                ):
+                    raise ValueError("user process count exceeds driver GPU count")
+        elif self.user_scope != "unknown":
+            raise ValueError("Linux user scope requires an ownership observation")
         return self
 
 
