@@ -16,6 +16,7 @@ from pydantic import TypeAdapter
 from aris.apps.agent.collector import collect
 from aris.apps.agent.config import AgentSettings
 from aris.apps.agent.live import LiveClient
+from aris.apps.agent.lock import CollectorAlreadyRunning, collector_lock
 from aris.apps.agent.resource_sampler import ResourceSampler
 from aris.apps.agent.spool import Spool
 from aris.apps.agent.transport import DeliveryWorker, flush, report
@@ -99,6 +100,15 @@ def main() -> None:
         return
     os.umask(0o077)
     settings = AgentSettings()
+    try:
+        with collector_lock(settings.spool_path):
+            run_collector(settings, args.fixture, args.once)
+    except CollectorAlreadyRunning:
+        print(json.dumps({"error_type": "CollectorAlreadyRunning"}), file=sys.stderr, flush=True)
+        raise SystemExit(1) from None
+
+
+def run_collector(settings: AgentSettings, fixture: Path | None, once: bool) -> None:
     spool = Spool(
         settings.spool_path,
         settings.id,
@@ -107,19 +117,19 @@ def main() -> None:
         settings.max_buffered_heartbeats,
     )
     sampler = ResourceSampler(
-        (lambda: TypeAdapter(list[GpuSample]).validate_json(args.fixture.read_text()))
-        if args.fixture
+        (lambda: TypeAdapter(list[GpuSample]).validate_json(fixture.read_text()))
+        if fixture
         else collect
     )
-    live = LiveClient(settings, sampler) if settings.live_enabled and not args.once else None
+    live = LiveClient(settings, sampler) if settings.live_enabled and not once else None
     with ExitStack() as resources:
         if live:
             live.start()
             resources.callback(live.close)
-        if args.once:
+        if once:
             try:
                 with httpx.Client(timeout=15, trust_env=False) as client:
-                    result = tick(spool, settings, client, args.fixture, sampler)
+                    result = tick(spool, settings, client, fixture, sampler)
                 print(json.dumps({**result, "buffer": spool.statistics()}), flush=True)
             except Exception as exc:
                 print(
@@ -140,7 +150,7 @@ def main() -> None:
                 raise RuntimeError("delivery worker stopped")
             started = time.monotonic()
             try:
-                result = collect_tick(spool, args.fixture, sampler)
+                result = collect_tick(spool, fixture, sampler)
                 report({"phase": "sample", **result, "buffer": spool.statistics()})
             except Exception as exc:
                 report(

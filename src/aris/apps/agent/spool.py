@@ -3,13 +3,26 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypedDict
 from uuid import uuid4
 
 from aris import __version__
 from aris.modules.vega.reports import AgentReport
 from aris.modules.vega.resource_schemas import ResourceObservation, ResourceTelemetryBatch
 from aris.modules.vega.schemas import Heartbeat
+
+
+class SpoolStatistics(TypedDict):
+    pending_batches: int
+    pending_heartbeats: int
+    capacity_batches: int
+    capacity_heartbeats: int
+    last_seq: int
+    spool_bytes: int
+    reusable_bytes: int
+    oldest_pending_age_seconds: float | None
+    telemetry_fill_percent: float
+    heartbeat_fill_percent: float
 
 
 @contextmanager
@@ -57,6 +70,7 @@ class Spool:
             # Validate before collecting; never convert or discard an unsupported backlog.
             for payload, kind in db.execute("SELECT payload, kind FROM pending"):
                 self._decode(payload, kind)
+            db.execute("CREATE INDEX IF NOT EXISTS ix_pending_kind_seq ON pending(kind, seq)")
 
     @staticmethod
     def _decode(payload: str, kind: str) -> AgentReport:
@@ -145,12 +159,19 @@ class Spool:
             ).fetchall()
         return [self._decode(payload, kind) for payload, kind in rows]
 
-    def statistics(self) -> dict[str, int]:
+    def statistics(self) -> SpoolStatistics:
         with connection(self.path) as db:
             counts = dict(db.execute("SELECT kind, count(*) FROM pending GROUP BY kind"))
             last_seq = int(
                 db.execute("SELECT value FROM metadata WHERE key='last_seq'").fetchone()[0]
             )
+            oldest = db.execute("SELECT payload,kind FROM pending ORDER BY seq LIMIT 1").fetchone()
+            free_pages = db.execute("PRAGMA freelist_count").fetchone()[0]
+            page_size = db.execute("PRAGMA page_size").fetchone()[0]
+        age = None
+        if oldest:
+            observed_at = self._decode(*oldest).observed_at
+            age = max(0.0, (datetime.now(UTC) - observed_at).total_seconds())
         return {
             "pending_batches": counts.get("telemetry", 0),
             "pending_heartbeats": counts.get("heartbeat", 0),
@@ -158,6 +179,10 @@ class Spool:
             "capacity_heartbeats": self.max_heartbeats,
             "last_seq": last_seq,
             "spool_bytes": self.path.stat().st_size,
+            "reusable_bytes": free_pages * page_size,
+            "oldest_pending_age_seconds": age,
+            "telemetry_fill_percent": 100 * counts.get("telemetry", 0) / self.max_batches,
+            "heartbeat_fill_percent": 100 * counts.get("heartbeat", 0) / self.max_heartbeats,
         }
 
     def acknowledge(self, batch: AgentReport) -> None:

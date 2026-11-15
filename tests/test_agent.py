@@ -55,6 +55,7 @@ def test_unsupported_pending_is_rejected_without_rewriting_or_resetting_spool(tm
     spool = Spool(path, "agent-a", "node-a")
     spool.enqueue_resource("host-a", resource_observation())
     with sqlite3.connect(path) as db:
+        db.execute("DROP INDEX ix_pending_kind_seq")
         db.execute("UPDATE pending SET payload=?", ('{"schema_version":"aris.agent/v1"}',))
     before, inode = path.read_bytes(), path.stat().st_ino
     with pytest.raises(ValidationError):
