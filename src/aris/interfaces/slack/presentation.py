@@ -49,7 +49,7 @@ def markdown(value: str) -> dict[str, Any]:
 
 def slack_time(value: datetime | None) -> str:
     if value is None:
-        return "无数据"
+        return "Not reported"
     # Slack renders the same instant in each viewer's device timezone.
     fallback = value.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
     return f"<!date^{int(value.timestamp())}^{{date_short_pretty}} {{time_secs}}|{fallback}>"

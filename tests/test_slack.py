@@ -226,7 +226,7 @@ def test_home_does_not_draw_current_meters_for_stale_or_missing_gpu_data(slack_c
     service = VegaService(session_factory(slack_client.app.state.engine), settings)
     view = home_view(service.resource_status())
     serialized = json.dumps(view, ensure_ascii=False)
-    assert "观测未知" in serialized
+    assert "Observed unknown" in serialized
     assert "▰" not in serialized and "▱" not in serialized and "GiB" not in serialized
     for block in view["blocks"]:
         if "<@U999>" in block.get("text", {}).get("text", ""):
@@ -263,8 +263,8 @@ def test_home_respects_slack_block_budget_and_discloses_hidden_devices(slack_cli
         asset_base_url="https://assets.example.test/vram",
     )
     assert sum(block_cost(block) for block in view["blocks"]) <= 100
-    assert "部分节点或 GPU 未显示" in json.dumps(view, ensure_ascii=False)
-    assert "预约可用性尚未评估" in json.dumps(view, ensure_ascii=False)
+    assert "Some nodes or GPUs are omitted" in json.dumps(view, ensure_ascii=False)
+    assert "Reservation availability not evaluated" in json.dumps(view, ensure_ascii=False)
     for block in view["blocks"]:
         if block["type"] == "header":
             assert len(block["text"]["text"]) <= 150
@@ -296,7 +296,7 @@ def test_home_job_only_completes_after_publish_receipt(slack_client, settings, s
     assert worker.run_once().outcome == "delivered"
     assert worker.run_once().outcome == "idle"
     assert len(publisher.calls) == 1 and publisher.calls[0][0] == "U111"
-    assert "观测空闲" in json.dumps(publisher.calls[0][1], ensure_ascii=False)
+    assert "Observed idle" in json.dumps(publisher.calls[0][1], ensure_ascii=False)
     with Session(slack_client.app.state.engine) as session:
         job = session.scalars(select(SlackHomeJob)).one()
         assert job.state == "completed" and job.attempts == 1

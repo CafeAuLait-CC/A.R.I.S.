@@ -43,8 +43,8 @@ def gpu_current(entry: NodeResourceStatus, gpu: GpuStatus) -> bool:
 
 def state_text(entry: NodeResourceStatus, gpu: GpuStatus) -> str:
     if not gpu_current(entry, gpu):
-        return "未检测到设备" if not gpu.present else "观测未知"
-    return "观测占用" if gpu.observed_state == "busy" else "观测空闲"
+        return "Not detected" if not gpu.present else "Observed unknown"
+    return "Observed busy" if gpu.observed_state == "busy" else "Observed idle"
 
 
 def memory_percent(entry: NodeResourceStatus, gpu: GpuStatus) -> int | None:
@@ -65,21 +65,21 @@ def owner_text(entry: NodeResourceStatus, gpu: GpuStatus) -> str:
     compute = entry.compute if entry.compute_freshness == "CURRENT" else None
     owner = compute.ownership if compute is not None and compute.quality == "ok" else None
     if owner is None or owner.quality == "unsupported":
-        return "用户归属未提供"
+        return "User attribution not provided"
     users = [
         user
         for user in owner.users
         if any(part.gpu_uuid == gpu.gpu_uuid and part.reported_processes for part in user.gpus)
     ]
     if not users:
-        return "用户归属未知"
+        return "User attribution unknown"
     names = [
-        f"{escape(user.username[:32])}（UID {user.uid}）" if user.username else f"UID {user.uid}"
+        f"{escape(user.username[:32])} (UID {user.uid})" if user.username else f"UID {user.uid}"
         for user in users[:2]
     ]
     if len(users) > 2:
-        names.append(f"另 {len(users) - 2} 个 UID")
-    return "Linux " + "、".join(names)
+        names.append(f"{len(users) - 2} more UIDs")
+    return "Linux " + ", ".join(names)
 
 
 def disk_text(entry: NodeResourceStatus) -> str:
@@ -88,16 +88,16 @@ def disk_text(entry: NodeResourceStatus) -> str:
     freshness = getattr(entry, "disks_freshness", "MISSING")
     observation = getattr(entry, "disks", None)
     if entry.node.status != "ONLINE" or freshness != "CURRENT" or observation is None:
-        return "磁盘 —"
+        return "Disk unknown"
     if observation.quality != "ok" or observation.truncated:
-        return "磁盘 部分未知" if observation.quality == "partial" else "磁盘 —"
+        return "Disk partially unknown" if observation.quality == "partial" else "Disk unknown"
     volumes = observation.volumes
     if not volumes or any(v.quality != "ok" for v in volumes):
-        return "磁盘 —"
+        return "Disk unknown"
     total = sum(v.total_bytes for v in volumes)
     used = sum(v.used_bytes for v in volumes)
     unit, divisor = ("TiB", 2**40) if total >= 2**40 else ("GiB", 2**30)
-    return f"磁盘 {used / divisor:.1f} / {total / divisor:.1f} {unit}（{len(volumes)}卷）"
+    return f"Disk {used / divisor:.1f} / {total / divisor:.1f} {unit} ({len(volumes)} volumes)"
 
 
 def system_text(entry: NodeResourceStatus) -> str:
@@ -112,7 +112,7 @@ def system_text(entry: NodeResourceStatus) -> str:
         if system.cpu.quality == "ok" and system.cpu.utilization_percent is not None:
             cpu = f"CPU {system.cpu.utilization_percent:.0f}%"
         elif system.cpu.quality == "warming":
-            cpu = "CPU 建立基线"
+            cpu = "CPU warming up"
         ram = system.memory
         if ram.quality == "ok" and ram.total_bytes is not None and ram.available_bytes is not None:
             memory = (
@@ -127,7 +127,7 @@ def device_blocks(
 ) -> list[dict[str, Any]]:
     percent = memory_percent(entry, gpu)
     metric = (
-        "*显存未知*"
+        "*VRAM unknown*"
         if percent is None
         else (f"*VRAM {percent}%* · {memory_used(gpu)} / {gpu.memory_total_mib / 1024:.1f} GiB")
     )
@@ -142,22 +142,24 @@ def device_blocks(
                 "type": "image",
                 "image_url": f"{asset_base_url.rstrip('/')}/{asset_name(percent)}",
                 "alt_text": f"{entry.node.node_id} GPU {gpu.index}: VRAM "
-                + ("未知" if percent is None else f"{percent}%"),
+                + ("Unknown" if percent is None else f"{percent}%"),
             }
         )
     if percent is None:
-        footer = "当前指标不可用"
+        footer = "Current metrics unknown"
     else:
         free = (gpu.memory_total_mib - gpu.memory_used_mib) / 1024
-        temperature = "温度未知" if gpu.temperature_c is None else f"{gpu.temperature_c} °C"
-        footer = f"剩余 {free:.1f} GiB · GPU {gpu.utilization_percent}% · {temperature}"
+        temperature = (
+            "Temperature unknown" if gpu.temperature_c is None else f"{gpu.temperature_c} °C"
+        )
+        footer = f"{free:.1f} GiB free · GPU {gpu.utilization_percent}% · {temperature}"
     selection = json.dumps(
         {"node_id": entry.node.node_id, "gpu_uuid": gpu.gpu_uuid},
         ensure_ascii=False,
         separators=(",", ":"),
     )
     action_id = DETAILS_ACTION + hashlib.sha256(selection.encode()).hexdigest()[:16]
-    blocks.append(section(footer, button("详情", action_id, selection)))
+    blocks.append(section(footer, button("Details", action_id, selection)))
     return blocks
 
 
@@ -167,7 +169,7 @@ def paired_layout(
     devices = [device_blocks(entry, gpu, asset_base_url) for gpu in pair]
     return {
         "type": "layout",
-        "label": (entry.node.node_id + " GPU 观测")[:150],
+        "label": (entry.node.node_id + " GPU observations")[:150],
         "is_label_visible": False,
         "grid_lines": "none",
         "rows": [
@@ -195,17 +197,20 @@ def home_view(
     if layout not in {"two-column", "single-column"}:
         raise ValueError("unsupported Home layout")
     blocks: list[dict[str, Any]] = [
-        {"type": "header", "text": plain("硬件资源")},
-        section("快照更新于 " + slack_time(snapshot.generated_at), button("刷新", "refresh_home")),
+        {"type": "header", "text": plain("Hardware resources")},
+        section(
+            "Snapshot updated " + slack_time(snapshot.generated_at),
+            button("Refresh", "refresh_home"),
+        ),
     ]
     cost = len(blocks)
     truncated = False
-    health = {"ONLINE": "在线", "STALE": "活动陈旧", "OFFLINE": "离线"}
+    health = {"ONLINE": "Online", "STALE": "Activity stale", "OFFLINE": "Offline"}
     quality = {
-        "CURRENT": "采样新鲜",
-        "STALE": "采样陈旧",
-        "ERROR": "采样异常",
-        "MISSING": "尚无采样",
+        "CURRENT": "Current sample",
+        "STALE": "Stale sample",
+        "ERROR": "Collection error",
+        "MISSING": "No samples",
     }
     for entry in snapshot.nodes:
         node = entry.node
@@ -218,16 +223,17 @@ def home_view(
             {"type": "divider"},
             {"type": "header", "text": plain(node.node_id[:150])},
             section(
-                f"*{counts['idle']} GPU 观测空闲* · {counts['busy']} 占用 · {unknown} 未知"
+                f"*Observed idle: {counts['idle']}* · Observed busy: {counts['busy']}"
+                f" · Unknown: {unknown}"
                 f"\n{health[node.status]} · {quality[node.telemetry_status]}"
             ),
             context(system_text(entry)),
             context(
                 "GPU "
                 + slack_time(node.observed_at)
-                + " · 系统 "
+                + " · System "
                 + slack_time(entry.system_observed_at)
-                + " · 心跳 "
+                + " · Heartbeat "
                 + slack_time(node.heartbeat_at)
             ),
         ]
@@ -238,10 +244,12 @@ def home_view(
         blocks.extend(node_blocks)
         cost += len(node_blocks)
         if disk_stamp is not None:
-            blocks.append(context("磁盘采样 " + slack_time(disk_stamp) + " · 约每小时查询"))
+            blocks.append(
+                context("Disk sampled " + slack_time(disk_stamp) + " · sampled at most hourly")
+            )
             cost += 1
         if not node.gpus:
-            blocks.append(context("尚无 GPU 清单。"))
+            blocks.append(context("GPU inventory not reported."))
             cost += 1
         stride = 2 if layout == "two-column" else 1
         for index in range(0, len(node.gpus), stride):
@@ -260,13 +268,19 @@ def home_view(
         if truncated:
             break
     if not snapshot.nodes:
-        blocks.append(context("尚无节点观测数据。"))
+        blocks.append(context("No node observations yet."))
     if truncated:
-        blocks.append(context("已达页面展示上限，部分节点或 GPU 未显示；完整清单请查看 WebUI。"))
+        blocks.append(
+            context(
+                "Display limit reached. Some nodes or GPUs are omitted; "
+                "open the WebUI for the full inventory."
+            )
+        )
     blocks.append(
         context(
-            "状态以快照生成时为准，点击刷新获取最新观测。"
-            "Linux 用户未关联 Slack 身份；预约可用性尚未评估。"
+            "Status is a snapshot. Refresh for the latest observations. "
+            "Linux users are not linked to Slack identities. "
+            "Reservation availability not evaluated."
         )
     )
     return {"type": "home", "blocks": blocks}
@@ -275,9 +289,9 @@ def home_view(
 def loading_details_view() -> dict[str, Any]:
     return {
         "type": "modal",
-        "title": plain("GPU 详情"),
-        "close": plain("关闭"),
-        "blocks": [section("正在读取最新资源观测…")],
+        "title": plain("GPU details"),
+        "close": plain("Close"),
+        "blocks": [section("Loading latest resource observations…")],
     }
 
 
@@ -290,25 +304,30 @@ def unavailable_details_view(message: str) -> dict[str, Any]:
 def details_view(entry: NodeResourceStatus, gpu: GpuStatus) -> dict[str, Any]:
     percent = memory_percent(entry, gpu)
     known = percent is not None
-    metric = f"{memory_used(gpu)} / {gpu.memory_total_mib / 1024:.1f} GiB" if known else "未知"
+    metric = f"{memory_used(gpu)} / {gpu.memory_total_mib / 1024:.1f} GiB" if known else "Unknown"
     fields = [
-        ("节点", escape(entry.node.node_id)),
-        ("设备", f"GPU {gpu.index} · {escape(gpu.model)}"),
-        ("观测状态", state_text(entry, gpu)),
-        ("显存", metric),
-        ("GPU 利用率", f"{gpu.utilization_percent}%" if known else "未知"),
-        ("温度", f"{gpu.temperature_c} °C" if known and gpu.temperature_c is not None else "未知"),
-        ("GPU 采样", slack_time(entry.node.observed_at)),
-        ("心跳", slack_time(entry.node.heartbeat_at)),
+        ("Node", escape(entry.node.node_id)),
+        ("Device", f"GPU {gpu.index} · {escape(gpu.model)}"),
+        ("Observed state", state_text(entry, gpu)),
+        ("VRAM", metric),
+        ("GPU utilization", f"{gpu.utilization_percent}%" if known else "Unknown"),
+        (
+            "Temperature",
+            f"{gpu.temperature_c} °C" if known and gpu.temperature_c is not None else "Unknown",
+        ),
+        ("GPU sampled", slack_time(entry.node.observed_at)),
+        ("Heartbeat", slack_time(entry.node.heartbeat_at)),
     ]
     result = loading_details_view()
     result["blocks"] = [
         {"type": "section", "fields": [markdown(f"*{label}*\n{value}") for label, value in fields]},
         context(system_text(entry)),
         context("GPU UUID：" + escape(gpu.gpu_uuid)),
-        context("以上为资源观测；预约可用性尚未评估。"),
+        context("Resource observations only. Reservation availability not evaluated."),
     ]
     disk_stamp = getattr(entry, "disks_observed_at", None)
     if disk_stamp is not None:
-        result["blocks"].append(context("磁盘采样 " + slack_time(disk_stamp) + " · 约每小时查询"))
+        result["blocks"].append(
+            context("Disk sampled " + slack_time(disk_stamp) + " · sampled at most hourly")
+        )
     return result

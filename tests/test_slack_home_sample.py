@@ -79,7 +79,7 @@ def test_native_pairs_use_matching_quantized_vram_and_complete_fallback(slack_cl
     )
     serialized = json.dumps(view, ensure_ascii=False)
     assert "available" not in serialized and "Reserved" not in serialized
-    assert "▰" not in serialized and "磁盘 —" in serialized
+    assert "▰" not in serialized and "Disk unknown" in serialized
     single = home_view(
         data, asset_base_url="https://assets.example.test/vram", layout="single-column"
     )
@@ -99,7 +99,7 @@ def test_stale_pair_uses_unknown_asset_and_does_not_show_old_numbers(slack_clien
     serialized = json.dumps(view, ensure_ascii=False)
     assert "vram-unknown.png" in serialized
     assert "vram-000.png" not in serialized and "GiB" not in serialized
-    assert "VRAM 70%" not in serialized and "当前指标不可用" in serialized
+    assert "VRAM 70%" not in serialized and "Current metrics unknown" in serialized
 
 
 def test_data_free_assets_are_public_bounded_and_do_not_query_database(client):

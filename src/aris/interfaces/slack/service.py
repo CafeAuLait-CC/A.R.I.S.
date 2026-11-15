@@ -243,12 +243,17 @@ class SlackService:
                 )
                 if entry is None or gpu is None:
                     error_code = "resource_not_found"
-                    view = unavailable_details_view("该节点或 GPU 当前没有观测记录，请刷新 Home。")
+                    view = unavailable_details_view(
+                        "No observation exists for this node or GPU. Refresh Home."
+                    )
                 else:
                     view = details_view(entry, gpu)
             except Exception:
                 error_code = "dependency_unavailable"
-                view = unavailable_details_view("暂时无法读取资源观测，当前指标未知，请稍后重试。")
+                view = unavailable_details_view(
+                    "Resource observations could not be loaded. "
+                    "Current metrics are unknown; please try again."
+                )
             self.modal.update_modal(handle, view)
         except SlackDeliveryError as exc:
             error_code = exc.code
