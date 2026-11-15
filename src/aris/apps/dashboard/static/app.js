@@ -65,6 +65,28 @@ function ownershipPanel(ownership,node){
   section.append(make("p","metric-note","仅驱动报告的计算进程 · Linux UID 为节点内身份，尚未绑定 ARIS / Slack 用户。"));
   return section;
 }
+const diskBytes=(bytes)=>bytes>=2**40?(bytes/2**40).toFixed(2)+" TiB":bytes>=2**30?(bytes/2**30).toFixed(1)+" GiB":bytes>=2**20?(bytes/2**20).toFixed(1)+" MiB":bytes+" B";
+function diskPanel(node,connected){
+  const section=make("section","disks"), disk=connected && node.disks_freshness==="CURRENT"?node.disks:null;
+  const heading=make("div","disk-heading");heading.append(make("h3","ownership-title","磁盘用量"),make("span","metric-note","最多每小时查询一次"));section.append(heading);
+  const stamp=node.disks_observed_at?new Date(node.disks_observed_at).toLocaleString("zh-CN",{hour12:false,timeZone:displayZone}):"—";
+  section.append(make("p","metric-note","挂载文件系统 · 原采样时间 "+stamp));
+  if(!disk){section.append(make("p","metric-note",node.disks_freshness==="STALE"?"磁盘采样陈旧或节点离线，当前用量未知。":"等待 Vega 提供磁盘采样。"));return section;}
+  if(!disk.volumes.length) section.append(make("p","metric-note",disk.quality==="unsupported"?"本机不支持该文件系统采样。":"本次磁盘查询异常，用量未知。"));
+  for(const volume of disk.volumes){
+    const row=make("div","disk-volume"), label=make("div","disk-label");
+    label.append(make("strong","",volume.mount_points.join(" · ")),make("small","disk-source",volume.source+" · "+volume.fs_type));
+    const values=make("div","disk-values");
+    if(volume.quality==="ok"){
+      values.append(make("span","","已用 "+diskBytes(volume.used_bytes)+" / "+diskBytes(volume.total_bytes)),make("span","","当前账户可用 "+diskBytes(volume.available_bytes)));
+      const bar=make("progress","bar");bar.max=100;bar.value=100*volume.used_bytes/volume.total_bytes;bar.setAttribute("aria-label",volume.mount_points.join("、")+" 文件系统使用比例");
+      row.append(label,values,bar);
+    }else{values.append(make("span","","— 用量未知 · "+(volume.error==="mount_changed"?"挂载已变化":qualityLabel(volume.quality))));row.append(label,values);}
+    section.append(row);
+  }
+  if(disk.truncated) section.append(make("p","metric-note","达到采样展示上限，部分挂载点未展示。"));
+  return section;
+}
 function systemPanel(node,connected){
   const system=connected && node.system_freshness==="CURRENT"?node.system:null;
   const compute=connected && node.compute_freshness==="CURRENT"?node.compute:null;
@@ -82,6 +104,7 @@ function systemPanel(node,connected){
   const stamps=make("div","system-stamps");stamps.append(make("span","","CPU / 内存采样 "+clock(node.system_observed_at)),make("span","","计算进程采样 "+clock(node.compute_observed_at)+" · 约每15秒查询"));
   panel.append(metrics,stamps);
   const owners=computeKnown?ownershipPanel(ownership,node):null;if(owners) panel.append(owners);
+  panel.append(diskPanel(node,connected));
   return panel;
 }
 function normalizedSnapshot(snapshot){
@@ -122,6 +145,7 @@ function previewSnapshot(){
     return {...base,node_id:id,hostname:preview?.hostname||base.hostname||"",gpus,
       system:preview?.system||null,system_freshness:preview?.system_freshness||"MISSING",system_observed_at:preview?.system_observed_at,
       compute:preview?.compute||null,compute_freshness:preview?.compute_freshness||"MISSING",compute_observed_at:preview?.compute_observed_at,
+      disks:preview?.disks||null,disks_freshness:preview?.disks_freshness||"MISSING",disks_observed_at:preview?.disks_observed_at,
       status:fresh?"ONLINE":preview?.connected?"STALE":"OFFLINE",observed_at:preview?.observed_at,
       telemetry_status:fresh?"CURRENT":"MISSING",
       preview_label:({live:"实时预览 · 未归档",waiting:"等待首帧",stale:"预览已超时",error:"实时采集异常",offline:"实时通道未连接"})[preview?.quality]||"等待 Vega 实时通道"};

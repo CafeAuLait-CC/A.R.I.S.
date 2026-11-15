@@ -10,6 +10,7 @@ from typing import Literal
 from uuid import UUID, uuid4
 
 from aris.core.contracts import DomainError
+from aris.modules.vega.disk_schemas import DISK_STALE_AFTER_SECONDS
 from aris.modules.vega.live_schemas import (
     LiveFrame,
     LiveHello,
@@ -169,7 +170,11 @@ class LiveHub:
                 observed_at=frame.observed_at if frame else None,
                 gpus=frame.gpus if frame and quality == "live" else [],
             )
-            for name, max_age in (("system", 3), ("compute", 30)):
+            for name, max_age in (
+                ("system", 3),
+                ("compute", 30),
+                ("disks", DISK_STALE_AFTER_SECONDS),
+            ):
                 part = getattr(frame.resources, name) if frame else None
                 current = (
                     part is not None

@@ -15,6 +15,7 @@ from pydantic import TypeAdapter
 
 from aris.apps.agent.collector import collect
 from aris.apps.agent.config import AgentSettings
+from aris.apps.agent.disk_collector import DiskCollector
 from aris.apps.agent.live import LiveClient
 from aris.apps.agent.lock import CollectorAlreadyRunning, collector_lock
 from aris.apps.agent.resource_sampler import ResourceSampler
@@ -116,13 +117,28 @@ def run_collector(settings: AgentSettings, fixture: Path | None, once: bool) -> 
         settings.max_buffered_batches,
         settings.max_buffered_heartbeats,
     )
+    resolved_spool = settings.spool_path.resolve()
+    disks = (
+        None
+        if fixture
+        else DiskCollector(
+            resolved_spool.with_name(resolved_spool.name + ".disks.json"),
+            enabled=not once,
+            emit=report,
+        )
+    )
+    if disks is not None and disks.cache_error:
+        report({"phase": "disk_cache", "cache_error": True, "disk_queries_enabled": False})
     sampler = ResourceSampler(
         (lambda: TypeAdapter(list[GpuSample]).validate_json(fixture.read_text()))
         if fixture
-        else collect
+        else collect,
+        disks=disks,
     )
     live = LiveClient(settings, sampler) if settings.live_enabled and not once else None
     with ExitStack() as resources:
+        if disks is not None:
+            resources.callback(disks.close)
         if live:
             live.start()
             resources.callback(live.close)

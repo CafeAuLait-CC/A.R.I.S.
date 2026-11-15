@@ -13,6 +13,7 @@ from pydantic import (
 )
 
 from aris.core.contracts import Contract
+from aris.modules.vega.disk_schemas import DiskObservation
 from aris.modules.vega.schemas import AgentEnvelope, GpuSample, NodeStatus
 
 Quality = Literal["ok", "error", "unsupported"]
@@ -186,12 +187,21 @@ class ResourceObservation(TimedObservation):
     gpu: GpuObservation
     system: SystemObservation
     compute: ComputeObservation
+    disks: DiskObservation | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_absent_disks(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data: dict[str, Any] = handler(self)
+        if self.disks is None:
+            data.pop("disks", None)
+        return data
 
     @model_validator(mode="after")
     def valid_times(self) -> "ResourceObservation":
-        if any(
-            part.observed_at > self.observed_at for part in (self.gpu, self.system, self.compute)
-        ):
+        times = [part.observed_at for part in (self.gpu, self.system, self.compute)]
+        if self.disks is not None:
+            times.append(self.disks.observed_at)
+        if any(stamp > self.observed_at for stamp in times):
             raise ValueError("component observation follows the combined observation")
         return self
 
@@ -223,6 +233,9 @@ class NodeResourceStatus(Contract):
     compute_freshness: Literal["CURRENT", "STALE", "MISSING"]
     compute_observed_at: AwareDatetime | None = None
     compute: ComputeObservation | None = None
+    disks_freshness: Literal["CURRENT", "STALE", "MISSING"] = "MISSING"
+    disks_observed_at: AwareDatetime | None = None
+    disks: DiskObservation | None = None
 
 
 class ResourceStatus(Contract):

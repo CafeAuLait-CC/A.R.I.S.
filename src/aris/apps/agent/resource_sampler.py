@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 from aris.apps.agent.collector import collect
 from aris.apps.agent.compute_collector import ComputeCollector
+from aris.apps.agent.disk_collector import DiskCollector
 from aris.apps.agent.system_collector import SystemCollector, failed_quality
 from aris.modules.vega.resource_schemas import (
     ComputeObservation,
@@ -23,10 +24,12 @@ class ResourceSampler:
         system: SystemCollector | None = None,
         compute: ComputeCollector | None = None,
         clock: Callable[[], float] = time.monotonic,
+        disks: DiskCollector | None = None,
     ) -> None:
         self.gpu = gpu
         self.system = system or SystemCollector(clock=clock)
         self.compute = compute or ComputeCollector()
+        self.disks = disks
         self.clock = clock
         self.lock = threading.Lock()
         self.latest: ResourceObservation | None = None
@@ -64,13 +67,16 @@ class ResourceSampler:
                 self.compute_observation = self.compute.collect(inventory)
                 self.last_compute = self.clock()
             self.inventory = inventory
+            disks = self.disks.sample() if self.disks is not None else None
+            times = [gpu.observed_at, system.observed_at, self.compute_observation.observed_at]
+            if disks is not None:
+                times.append(disks.observed_at)
             self.latest = ResourceObservation(
-                observed_at=max(
-                    gpu.observed_at, system.observed_at, self.compute_observation.observed_at
-                ),
+                observed_at=max(times),
                 gpu=gpu,
                 system=system,
                 compute=self.compute_observation,
+                disks=disks,
             )
             self.last_sample = self.clock()
             return self.latest

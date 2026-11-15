@@ -11,6 +11,7 @@ from aris.core.config import Settings
 from aris.core.contracts import DomainError
 from aris.core.events import DomainEvent, OutboxEntry
 from aris.core.time import utc
+from aris.modules.vega.disk_schemas import DISK_STALE_AFTER_SECONDS
 from aris.modules.vega.models import AgentMessage, GpuDevice, Node, NodeResource
 from aris.modules.vega.repo import VegaRepository
 from aris.modules.vega.reports import AgentReport
@@ -214,6 +215,11 @@ class VegaService:
                         < getattr(previous, name).observed_at
                     }
                 )
+                if previous.disks is not None and (
+                    observation.disks is None
+                    or observation.disks.observed_at < previous.disks.observed_at
+                ):
+                    observation = observation.model_copy(update={"disks": previous.disks})
             stored.seq = batch.seq
             stored.observed_at = observation.observed_at
             stored.received_at = now
@@ -328,6 +334,14 @@ class VegaService:
                     and (now - observation.compute.observed_at).total_seconds()
                     < self.settings.stale_after_seconds
                 )
+                disks = observation.disks
+                disk_current = (
+                    disks is not None
+                    and node.status == "ONLINE"
+                    and -self.settings.max_clock_skew_seconds
+                    <= (now - disks.observed_at).total_seconds()
+                    < DISK_STALE_AFTER_SECONDS
+                )
                 nodes.append(
                     NodeResourceStatus(
                         node=node,
@@ -338,6 +352,11 @@ class VegaService:
                         compute_freshness="CURRENT" if compute_current else "STALE",
                         compute_observed_at=observation.compute.observed_at,
                         compute=observation.compute if compute_current else None,
+                        disks_freshness=(
+                            "MISSING" if disks is None else "CURRENT" if disk_current else "STALE"
+                        ),
+                        disks_observed_at=disks.observed_at if disks else None,
+                        disks=disks if disk_current else None,
                     )
                 )
         return ResourceStatus(generated_at=now, nodes=nodes)

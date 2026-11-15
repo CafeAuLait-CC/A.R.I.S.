@@ -6,6 +6,7 @@ from uuid import UUID
 from pydantic import AwareDatetime, Field
 
 from aris.core.contracts import Contract
+from aris.modules.vega.disk_schemas import DiskObservation
 from aris.modules.vega.resource_schemas import (
     ComputeObservation,
     ResourceObservation,
@@ -63,6 +64,9 @@ class LiveNode(Contract):
     compute_freshness: Literal["CURRENT", "STALE", "MISSING"]
     compute_observed_at: AwareDatetime | None = None
     compute: ComputeObservation | None = None
+    disks_freshness: Literal["CURRENT", "STALE", "MISSING"] = "MISSING"
+    disks_observed_at: AwareDatetime | None = None
+    disks: DiskObservation | None = None
 
 
 class LiveSnapshot(Contract):
