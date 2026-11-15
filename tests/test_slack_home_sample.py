@@ -4,14 +4,12 @@ import struct
 import threading
 import time
 import zlib
-from io import BytesIO
 from pathlib import Path
 from urllib.parse import urlencode
 
 import httpx
 import pytest
 import uvicorn
-from PIL import Image
 from pydantic import ValidationError
 from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session
@@ -32,7 +30,6 @@ from aris.interfaces.slack.home import (
 from aris.interfaces.slack.models import SlackHomeJob, SlackReceipt
 from aris.interfaces.slack.schemas import ModalHandle
 from aris.interfaces.slack.vram_assets import VRAM_ASSET_ROUTE, VRAM_ASSET_SET
-from aris.interfaces.slack.vram_charts import VRAM_CHART_ROUTE, VRAM_CHART_SET
 from aris.modules.vega.disk_schemas import DiskObservation
 from aris.modules.vega.resource_schemas import ComputeOwnership
 from aris.modules.vega.service import VegaService
@@ -425,57 +422,6 @@ def test_native_sized_pngs_preserve_visible_percentage_and_content_version():
         assert abs(opaque_pixels - 256 * (percent or 0) / 100) <= 1
         if percent == 62:
             assert middle[255 * 4 + 3] == 56  # The gray tail remains inside the actual image.
-
-
-def test_chart_ink_and_bar_share_right_edge_with_explicit_configuration(slack_client, settings):
-    directory = Path(__file__).resolve().parents[1] / "src/aris/interfaces/slack/assets/vram_chart"
-    assets = {path.name: path.read_bytes() for path in directory.glob("*.png")}
-    assert len(assets) == 102 and asset_set_digest(assets) == VRAM_CHART_SET
-    for data in assets.values():
-        image = Image.open(BytesIO(data)).convert("RGBA")
-        assert image.size == (256, 46)
-        assert image.crop((128, 0, 256, 30)).getbbox()[2] == 120
-        assert image.crop((0, 30, 256, 40)).getbbox() == (8, 0, 248, 10)
-        assert image.crop((0, 0, 8, 46)).getbbox() is None
-        assert image.crop((248, 0, 256, 46)).getbbox() is None
-        assert image.crop((0, 0, 256, 6)).getbbox() is None
-        assert image.crop((0, 40, 256, 46)).getbbox() is None
-    response = slack_client.get(VRAM_CHART_ROUTE + "/vram-062.png")
-    assert response.status_code == 200 and response.headers["content-type"] == "image/png"
-    assert "immutable" in response.headers["cache-control"]
-    assert slack_client.get(VRAM_ASSET_ROUTE + "/vram-062.png").status_code == 200
-    assert slack_client.get(VRAM_CHART_ROUTE + "/..%2Fapi.env").status_code == 404
-    assert slack_client.get(VRAM_CHART_ROUTE + "/vram-101.png").status_code == 404
-    data = snapshot(slack_client, settings)
-    view = home_view(
-        data,
-        asset_base_url="https://old.example.test/bars",
-        chart_base_url="https://new.example.test/charts",
-    )
-    layout = view["blocks"][-2]
-    panel = layout["rows"][0]["items"][0]["block"]["child_blocks"]
-    assert [block["type"] for block in panel] == ["context", "image", "context", "section"]
-    assert panel[1]["image_url"] == "https://new.example.test/charts/vram-070.png"
-    assert "70%" in panel[1]["alt_text"]
-    assert "*70%*" in json.dumps(layout["fallback"])
-    assert "https://old.example.test/bars/vram-070.png" in json.dumps(layout["fallback"])
-    assert sum(block_cost(block) for block in view["blocks"]) <= 100
-    invalid = data.nodes[0].model_copy(
-        update={"node": data.nodes[0].node.model_copy(update={"status": "OFFLINE"})}
-    )
-    unknown = home_view(
-        data.model_copy(update={"nodes": [invalid]}),
-        chart_base_url="https://new.example.test/charts",
-    )
-    assert "vram-unknown.png" in json.dumps(unknown) and "vram-000.png" not in json.dumps(unknown)
-    assert (
-        SlackSettings(
-            _env_file=None, home_chart_base_url="https://new.example.test/charts/"
-        ).home_chart_base_url
-        == "https://new.example.test/charts"
-    )
-    with pytest.raises(ValidationError):
-        SlackSettings(_env_file=None, home_chart_base_url="https://user:secret@host/charts")
 
 
 def test_asset_configuration_rejects_credential_or_non_http_urls():

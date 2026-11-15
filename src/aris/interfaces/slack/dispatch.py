@@ -124,7 +124,6 @@ class SlackDispatcher:
                 home_view(
                     self.vega.resource_status(),
                     asset_base_url=self.config.home_asset_base_url,
-                    chart_base_url=self.config.home_chart_base_url,
                     layout=self.config.home_layout,
                 ),
             )
