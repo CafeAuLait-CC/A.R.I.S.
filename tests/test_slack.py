@@ -124,7 +124,7 @@ def test_workspace_is_scoped_on_commands_and_events(slack_client):
 
 
 def test_status_is_ephemeral_and_uses_fresh_observations(slack_client):
-    assert post(slack_client, batch()).status_code == 200
+    assert post(slack_client, batch(compute_processes=0)).status_code == 200
     response = slash(slack_client)
     assert response.status_code == 200
     assert response.json()["response_type"] == "ephemeral"
@@ -289,7 +289,7 @@ def dispatcher(client, settings, slack_settings, publisher):
 
 
 def test_home_job_only_completes_after_publish_receipt(slack_client, settings, slack_settings):
-    assert post(slack_client, batch()).status_code == 200
+    assert post(slack_client, batch(compute_processes=0)).status_code == 200
     assert send_event(slack_client, home_event()).status_code == 200
     publisher = Publisher()
     worker = dispatcher(slack_client, settings, slack_settings, publisher)

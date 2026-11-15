@@ -19,7 +19,7 @@ from tests.conftest import AGENT_TOKEN, READ_TOKEN
 from tests.resource_fixtures import resource_observation
 
 
-def batch(seq=1, seconds_ago=0, **changes):
+def batch(seq=1, seconds_ago=0, compute_processes=None, **changes):
     now = datetime.now(UTC) - timedelta(seconds=seconds_ago)
     payload = {
         "type": "telemetry",
@@ -51,6 +51,18 @@ def batch(seq=1, seconds_ago=0, **changes):
         else datetime.fromisoformat(payload["observed_at"]),
         gpus=gpus,
     ).model_dump(mode="json")
+    if compute_processes is not None:
+        payload["resources"]["compute"].update(
+            reported_processes=compute_processes,
+            gpus=[
+                {
+                    "gpu_uuid": gpu["gpu_uuid"],
+                    "reported_processes": compute_processes,
+                    "reported_memory_mib": None,
+                }
+                for gpu in gpus
+            ],
+        )
     return payload
 
 
@@ -75,7 +87,7 @@ def test_idle_snapshot_is_persistent_and_audited(client):
     with client.app.state.engine.connect() as connection:
         expected_revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
     assert client.get("/health/ready").json()["schema_revision"] == expected_revision
-    assert post(client, batch()).status_code == 200
+    assert post(client, batch(compute_processes=0)).status_code == 200
     node = status(client)["nodes"][0]
     assert node["status"] == "ONLINE"
     assert node["gpus"][0]["observed_state"] == "idle"

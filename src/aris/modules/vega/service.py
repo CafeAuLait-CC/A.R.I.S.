@@ -12,6 +12,7 @@ from aris.core.contracts import DomainError
 from aris.core.events import DomainEvent, OutboxEntry
 from aris.core.time import utc
 from aris.modules.vega.disk_schemas import DISK_STALE_AFTER_SECONDS
+from aris.modules.vega.gpu_activity import gpu_activity
 from aris.modules.vega.models import AgentMessage, GpuDevice, Node, NodeResource
 from aris.modules.vega.repo import VegaRepository
 from aris.modules.vega.reports import AgentReport
@@ -263,12 +264,29 @@ class VegaService:
                         and utc(node.collector_health_at) >= utc(node.telemetry_at)
                     ):
                         quality = "ERROR"
+                stored = repo.resource(node.id)
+                compute = (
+                    ResourceObservation.model_validate(stored.observation).compute
+                    if stored is not None
+                    else None
+                )
+                processes = (
+                    {part.gpu_uuid: part.reported_processes for part in compute.gpus}
+                    if compute is not None
+                    and compute.quality == "ok"
+                    and -self.settings.max_clock_skew_seconds
+                    <= (now - compute.observed_at).total_seconds()
+                    < self.settings.stale_after_seconds
+                    else {}
+                )
                 gpus: list[GpuStatus] = []
                 for gpu in repo.gpus(node.id):
                     observed: Literal["idle", "busy", "unknown"] = "unknown"
                     if health == "ONLINE" and quality == "CURRENT" and gpu.present:
-                        observed = (
-                            "busy" if gpu.memory_used_mib or gpu.utilization_percent else "idle"
+                        observed = gpu_activity(
+                            gpu.memory_used_mib,
+                            gpu.utilization_percent,
+                            processes.get(gpu.gpu_uuid),
                         )
                     gpus.append(
                         GpuStatus(

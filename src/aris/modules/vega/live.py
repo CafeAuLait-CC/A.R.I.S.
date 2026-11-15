@@ -11,8 +11,10 @@ from uuid import UUID, uuid4
 
 from aris.core.contracts import DomainError
 from aris.modules.vega.disk_schemas import DISK_STALE_AFTER_SECONDS
+from aris.modules.vega.gpu_activity import gpu_activity
 from aris.modules.vega.live_schemas import (
     LiveFrame,
+    LiveGpuSample,
     LiveHello,
     LiveNode,
     LiveSnapshot,
@@ -168,7 +170,7 @@ class LiveHub:
                 quality=quality,
                 seq=frame.seq if frame else None,
                 observed_at=frame.observed_at if frame else None,
-                gpus=frame.gpus if frame and quality == "live" else [],
+                gpus=[],
             )
             for name, max_age in (
                 ("system", 3),
@@ -187,6 +189,24 @@ class LiveHub:
                 )
                 values[name + "_observed_at"] = part.observed_at if part else None
                 values[name] = part if current else None
+            if frame is not None and quality == "live":
+                compute = frame.resources.compute
+                processes = (
+                    {part.gpu_uuid: part.reported_processes for part in compute.gpus}
+                    if values["compute_freshness"] == "CURRENT" and compute.quality == "ok"
+                    else {}
+                )
+                values["gpus"] = [
+                    LiveGpuSample(
+                        **gpu.model_dump(),
+                        observed_state=gpu_activity(
+                            gpu.memory_used_mib,
+                            gpu.utilization_percent,
+                            processes.get(gpu.gpu_uuid),
+                        ),
+                    )
+                    for gpu in frame.gpus
+                ]
             nodes.append(LiveNode.model_validate(values))
         return LiveSnapshot(generated_at=now, nodes=nodes)
 

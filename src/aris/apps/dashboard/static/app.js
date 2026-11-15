@@ -141,7 +141,7 @@ function previewSnapshot(){
   const ids=new Set([...archived.keys(),...previews.keys()]);
   return {nodes:[...ids].map(id=>{
     const base=archived.get(id)||{}, preview=previews.get(id), fresh=preview?.quality==="live";
-    const gpus=fresh?preview.gpus.map(g=>({...g,present:true,observed_state:g.utilization_percent>0||g.memory_used_mib>0?"busy":"idle"})):(base.gpus||[]);
+    const gpus=fresh?preview.gpus.map(g=>({...g,present:true,observed_state:["idle","busy"].includes(g.observed_state)?g.observed_state:"unknown"})):(base.gpus||[]);
     return {...base,node_id:id,hostname:preview?.hostname||base.hostname||"",gpus,
       system:preview?.system||null,system_freshness:preview?.system_freshness||"MISSING",system_observed_at:preview?.system_observed_at,
       compute:preview?.compute||null,compute_freshness:preview?.compute_freshness||"MISSING",compute_observed_at:preview?.compute_observed_at,

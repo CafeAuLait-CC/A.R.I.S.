@@ -60,7 +60,7 @@ def test_heartbeat_does_not_refresh_old_samples_or_hide_collector_failure(client
     assert node["telemetry_status"] == "ERROR"
     assert node["gpus"][0]["observed_state"] == "unknown"
     # Recovery requires new facts, not just a healthy heartbeat over stale facts.
-    assert post(client, batch(seq=5)).status_code == 200
+    assert post(client, batch(seq=5, compute_processes=0)).status_code == 200
     assert beat(client, heartbeat(seq=6)).status_code == 200
     assert status(client)["nodes"][0]["gpus"][0]["observed_state"] == "idle"
 
@@ -74,7 +74,10 @@ def test_delayed_heartbeat_never_revives_old_node(client, age, health):
 def test_heartbeat_and_samples_have_independent_projection_sequences(client):
     newer = heartbeat(seq=3)
     assert beat(client, newer).json()["applied_to_current"] is True
-    assert post(client, batch(seq=2, seconds_ago=1)).json()["applied_to_current"] is True
+    assert (
+        post(client, batch(seq=2, seconds_ago=1, compute_processes=0)).json()["applied_to_current"]
+        is True
+    )
     old = heartbeat(seq=1, seconds_ago=120, collector_status="error")
     assert beat(client, old).json()["applied_to_current"] is False
     node = status(client)["nodes"][0]
@@ -105,7 +108,10 @@ def test_postgres_heartbeat_and_sample_concurrent_first_reports(client):
     if client.app.state.engine.dialect.name != "postgresql":
         pytest.skip("requires PostgreSQL row locking")
     start = Barrier(2)
-    calls = [lambda: beat(client, heartbeat(seq=2)), lambda: post(client, batch())]
+    calls = [
+        lambda: beat(client, heartbeat(seq=2)),
+        lambda: post(client, batch(compute_processes=0)),
+    ]
 
     def submit(call):
         start.wait(timeout=10)
@@ -127,6 +133,9 @@ def test_postgres_heartbeat_and_sample_concurrent_first_reports(client):
 
 def test_upgrade_preserves_existing_telemetry_and_replay(client):
     original = batch()
+    # Independent GPU busy evidence survives the deliberate downgrade that
+    # drops newer CPU/compute projections; all GPU fields must still match.
+    original["resources"]["gpu"]["gpus"][0]["memory_used_mib"] = 2048
     assert post(client, original).status_code == 200
     before = status(client)["nodes"][0]
     command.downgrade(Config("alembic.ini"), "0001")

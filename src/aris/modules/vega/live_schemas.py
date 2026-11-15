@@ -7,6 +7,7 @@ from pydantic import AwareDatetime, Field
 
 from aris.core.contracts import Contract
 from aris.modules.vega.disk_schemas import DiskObservation
+from aris.modules.vega.gpu_activity import ObservedGpuState
 from aris.modules.vega.resource_schemas import (
     ComputeObservation,
     ResourceObservation,
@@ -48,6 +49,10 @@ class LiveFrame(Contract):
         return self.resources.gpu.gpus
 
 
+class LiveGpuSample(GpuSample):
+    observed_state: ObservedGpuState = "unknown"
+
+
 class LiveNode(Contract):
     node_id: str
     agent_id: str
@@ -57,7 +62,7 @@ class LiveNode(Contract):
     session_id: UUID
     seq: int | None = None
     observed_at: AwareDatetime | None = None
-    gpus: list[GpuSample] = Field(default_factory=list)
+    gpus: list[LiveGpuSample] = Field(default_factory=list)
     system_freshness: Literal["CURRENT", "STALE", "MISSING"]
     system_observed_at: AwareDatetime | None = None
     system: SystemObservation | None = None
