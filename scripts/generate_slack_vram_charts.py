@@ -19,7 +19,8 @@ ROOT = Path(__file__).resolve().parents[1]
 MODULE = ROOT / "src/aris/interfaces/slack/vram_charts.py"
 DIRECTORY = MODULE.with_name("assets") / "vram_chart"
 BARS = MODULE.with_name("assets") / "vram"
-WIDTH, HEIGHT, BAR_Y, SCALE = 256, 32, 22, 4
+WIDTH, HEIGHT, BAR_Y, SCALE = 256, 46, 30, 4
+PADDING, TEXT_Y = 8, 6
 
 
 def label(text: str, *, bold: bool = False) -> Image.Image:
@@ -43,13 +44,15 @@ def chart_bytes(percent: int | None) -> bytes:
     canvas = Image.new("RGBA", (WIDTH, HEIGHT))
     left = label("VRAM")
     right = label("Unknown" if percent is None else f"{percent}%", bold=True)
-    canvas.alpha_composite(left, (0, 0))
+    canvas.alpha_composite(left, (PADDING, TEXT_Y))
     # Crop measured ink, not the font's advance width: the visible rightmost
-    # percentage pixel and the PNG bar both end at x=255, with no space padding.
-    canvas.alpha_composite(right, (WIDTH - right.width, 0))
+    # percentage pixel and the PNG bar both end at x=247. Transparent safety
+    # margins keep Slack's native rounded image border away from the glyphs.
+    canvas.alpha_composite(right, (WIDTH - PADDING - right.width, TEXT_Y))
     name = "vram-unknown.png" if percent is None else f"vram-{percent:03d}.png"
     with Image.open(BARS / name) as bar:
-        canvas.alpha_composite(bar.convert("RGBA"), (0, BAR_Y))
+        scaled = bar.convert("RGBA").resize((WIDTH - 2 * PADDING, 10), Image.Resampling.LANCZOS)
+        canvas.alpha_composite(scaled, (PADDING, BAR_Y))
     output = BytesIO()
     canvas.save(output, format="PNG", optimize=True)
     return output.getvalue()

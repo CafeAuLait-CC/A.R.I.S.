@@ -433,9 +433,13 @@ def test_chart_ink_and_bar_share_right_edge_with_explicit_configuration(slack_cl
     assert len(assets) == 102 and asset_set_digest(assets) == VRAM_CHART_SET
     for data in assets.values():
         image = Image.open(BytesIO(data)).convert("RGBA")
-        assert image.size == (256, 32)
-        assert image.crop((128, 0, 256, 22)).getbbox()[2] == 128
-        assert image.crop((0, 22, 256, 32)).getbbox()[2] == 256
+        assert image.size == (256, 46)
+        assert image.crop((128, 0, 256, 30)).getbbox()[2] == 120
+        assert image.crop((0, 30, 256, 40)).getbbox() == (8, 0, 248, 10)
+        assert image.crop((0, 0, 8, 46)).getbbox() is None
+        assert image.crop((248, 0, 256, 46)).getbbox() is None
+        assert image.crop((0, 0, 256, 6)).getbbox() is None
+        assert image.crop((0, 40, 256, 46)).getbbox() is None
     response = slack_client.get(VRAM_CHART_ROUTE + "/vram-062.png")
     assert response.status_code == 200 and response.headers["content-type"] == "image/png"
     assert "immutable" in response.headers["cache-control"]
