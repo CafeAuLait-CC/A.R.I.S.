@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-VRAM_ASSET_SET = "5cdcfb515c70"
+VRAM_ASSET_SET = "86baca2ab629"
 VRAM_ASSET_ROUTE = f"/slack/assets/vram/{VRAM_ASSET_SET}"
 _DIRECTORY = Path(__file__).with_name("assets") / "vram"
 _FILES = {f"vram-{percent:03d}.png" for percent in range(101)} | {"vram-unknown.png"}

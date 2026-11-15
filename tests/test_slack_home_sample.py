@@ -3,6 +3,8 @@ import socket
 import struct
 import threading
 import time
+import zlib
+from pathlib import Path
 from urllib.parse import urlencode
 
 import httpx
@@ -19,8 +21,9 @@ from aris.interfaces.slack.config import SlackSettings
 from aris.interfaces.slack.home import block_cost, home_view
 from aris.interfaces.slack.models import SlackHomeJob, SlackReceipt
 from aris.interfaces.slack.schemas import ModalHandle
-from aris.interfaces.slack.vram_assets import VRAM_ASSET_ROUTE
+from aris.interfaces.slack.vram_assets import VRAM_ASSET_ROUTE, VRAM_ASSET_SET
 from aris.modules.vega.service import VegaService
+from scripts.generate_slack_vram_assets import asset_set_digest, png_bytes
 from tests.test_slack import signed
 from tests.test_slack import slack_client as slack_client
 from tests.test_slack import slack_settings as slack_settings
@@ -122,16 +125,50 @@ def test_data_free_assets_are_public_bounded_and_do_not_query_database(client):
     try:
         response = client.get(VRAM_ASSET_ROUTE + "/vram-070.png")
         assert response.status_code == 200 and response.headers["content-type"] == "image/png"
-        assert struct.unpack(">II", response.content[16:24]) == (640, 20)
+        assert struct.unpack(">II", response.content[16:24]) == (256, 10)
         assert "immutable" in response.headers["cache-control"]
         assert response.headers["x-content-type-options"] == "nosniff"
         assert client.get(VRAM_ASSET_ROUTE + "/vram-unknown.png").status_code == 200
+        assert client.get("/slack/assets/vram/5cdcfb515c70/vram-070.png").status_code == 404
         for filename in ("vram-101.png", "manifest.json", "api.env", "..%2Fapi.env"):
             assert client.get(VRAM_ASSET_ROUTE + "/" + filename).status_code == 404
         assert queries == []
     finally:
         # The listener belongs only to this disposable engine.
         client.app.state.engine.dispose()
+
+
+def test_native_sized_pngs_preserve_visible_percentage_and_content_version():
+    directory = Path(__file__).resolve().parents[1] / "src/aris/interfaces/slack/assets/vram"
+    assets = {path.name: path.read_bytes() for path in directory.glob("*.png")}
+    assert len(assets) == 102
+    assert asset_set_digest(assets) == VRAM_ASSET_SET != "5cdcfb515c70"
+    for data in assets.values():
+        assert struct.unpack(">II", data[16:24]) == (256, 10)
+    for percent in (None, 0, 62, 70, 90, 100):
+        name = "vram-unknown.png" if percent is None else f"vram-{percent:03d}.png"
+        data = assets[name]
+        assert png_bytes(percent) == data
+        offset, compressed = 8, bytearray()
+        kinds = []
+        while offset < len(data):
+            size = struct.unpack(">I", data[offset : offset + 4])[0]
+            kind, payload = data[offset + 4 : offset + 8], data[offset + 8 : offset + 8 + size]
+            assert struct.unpack(">I", data[offset + 8 + size : offset + 12 + size])[0] == (
+                zlib.crc32(kind + payload)
+            )
+            kinds.append(kind)
+            if kind == b"IDAT":
+                compressed.extend(payload)
+            offset += size + 12
+        assert kinds == [b"IHDR", b"IDAT", b"IEND"]  # No embedded identities or metadata.
+        rows = zlib.decompress(compressed)
+        assert len(rows) == 10 * (1 + 256 * 4)
+        middle = rows[5 * (1 + 256 * 4) + 1 : 6 * (1 + 256 * 4)]
+        opaque_pixels = sum(middle[x * 4 + 3] == 255 for x in range(256))
+        assert abs(opaque_pixels - 256 * (percent or 0) / 100) <= 1
+        if percent == 62:
+            assert middle[255 * 4 + 3] == 56  # The gray tail remains inside the actual image.
 
 
 def test_asset_configuration_rejects_credential_or_non_http_urls():
