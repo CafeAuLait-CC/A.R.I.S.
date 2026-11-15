@@ -75,11 +75,38 @@ def memory_percent(entry: NodeResourceStatus, gpu: GpuStatus) -> int | None:
 
 
 def memory_used(gpu: GpuStatus) -> str:
-    return (
-        f"{gpu.memory_used_mib} MiB"
-        if gpu.memory_used_mib < 1024
-        else f"{gpu.memory_used_mib / 1024:.1f} GiB"
+    return memory_amount(gpu.memory_used_mib * 1024**2)
+
+
+def memory_amount(byte_count: int) -> str:
+    unit, divisor = ("MB", 10**6) if byte_count < 10**9 else ("GB", 10**9)
+    return f"{byte_count / divisor:.1f} {unit}"
+
+
+def memory_range(gpu: GpuStatus) -> str:
+    total_gb = gpu.memory_total_mib * 1024**2 / 10**9
+    return f"{memory_used(gpu).removesuffix(' GB')} / {total_gb:.1f} GB"
+
+
+def node_heading(node_id: str, status: str) -> dict[str, Any]:
+    # Literal rich-text elements keep names safe from mrkdwn/mention parsing.
+    # Remove line controls so the normal-weight status stays on the same line.
+    name = "".join(
+        " " if ord(char) < 32 or ord(char) == 127 or char in "\u2028\u2029" else char
+        for char in node_id[:128]
     )
+    return {
+        "type": "rich_text",
+        "elements": [
+            {
+                "type": "rich_text_section",
+                "elements": [
+                    {"type": "text", "text": name, "style": {"bold": True}},
+                    {"type": "text", "text": " · " + status},
+                ],
+            }
+        ],
+    }
 
 
 def owner_text(entry: NodeResourceStatus, gpu: GpuStatus) -> str:
@@ -118,8 +145,8 @@ def disk_text(entry: NodeResourceStatus) -> str:
         return "Disk unknown"
     total = sum(v.total_bytes for v in volumes)
     used = sum(v.used_bytes for v in volumes)
-    unit, divisor = ("TiB", 2**40) if total >= 2**40 else ("GiB", 2**30)
-    return f"Disk {used / divisor:.1f} / {total / divisor:.1f} {unit} ({len(volumes)} volumes)"
+    unit, divisor = ("TB", 10**12) if total >= 10**12 else ("GB", 10**9)
+    return f"Disk {used / divisor:.1f} {unit} used / {total / divisor:.1f} {unit}"
 
 
 def system_text(entry: NodeResourceStatus) -> str:
@@ -138,8 +165,8 @@ def system_text(entry: NodeResourceStatus) -> str:
         ram = system.memory
         if ram.quality == "ok" and ram.total_bytes is not None and ram.available_bytes is not None:
             memory = (
-                f"RAM {(ram.total_bytes - ram.available_bytes) / 2**30:.1f} / "
-                f"{ram.total_bytes / 2**30:.1f} GiB"
+                f"RAM {(ram.total_bytes - ram.available_bytes) / 10**9:.1f} / "
+                f"{ram.total_bytes / 10**9:.1f} GB"
             )
     return f"{cpu} · {memory} · {disk_text(entry)}"
 
@@ -178,11 +205,8 @@ def device_blocks(
         memory = "VRAM unknown"
         footer = "Current metrics unknown"
     else:
-        free = (gpu.memory_total_mib - gpu.memory_used_mib) / 1024
-        memory = (
-            f"{memory_used(gpu).removesuffix(' GiB')} / {gpu.memory_total_mib / 1024:.1f} GiB"
-            f" · {free:.1f} GiB free"
-        )
+        free_bytes = (gpu.memory_total_mib - gpu.memory_used_mib) * 1024**2
+        memory = f"{memory_range(gpu)} · {memory_amount(free_bytes)} free"
         temperature = (
             "Temperature unknown" if gpu.temperature_c is None else f"{gpu.temperature_c}\u00a0°C"
         )
@@ -267,7 +291,11 @@ def home_view(
                             {
                                 "width": "narrow",
                                 "horizontal_alignment": "end",
-                                "block": {"type": "actions", "elements": [refresh]},
+                                # An empty-looking native section avoids the
+                                # actions row's extra padding beside the H1.
+                                # Slack owns vertical layout; there is no
+                                # public vertical_alignment field to set.
+                                "block": section("\u00a0", refresh),
                             },
                         ]
                     }
@@ -290,11 +318,7 @@ def home_view(
         node = entry.node
         node_blocks: list[dict[str, Any]] = [
             {"type": "divider"},
-            {
-                "type": "header",
-                "level": 2,
-                "text": plain(node.node_id[:120] + " · " + health[node.status]),
-            },
+            node_heading(node.node_id, health[node.status]),
             section(node_summary(entry)),
             context(system_text(entry)),
         ]
@@ -359,7 +383,7 @@ def unavailable_details_view(message: str) -> dict[str, Any]:
 def details_view(entry: NodeResourceStatus, gpu: GpuStatus) -> dict[str, Any]:
     percent = memory_percent(entry, gpu)
     known = percent is not None
-    metric = f"{memory_used(gpu)} / {gpu.memory_total_mib / 1024:.1f} GiB" if known else "Unknown"
+    metric = memory_range(gpu) if known else "Unknown"
     fields = [
         ("Node", escape(entry.node.node_id)),
         ("Status", state_text(entry, gpu)),

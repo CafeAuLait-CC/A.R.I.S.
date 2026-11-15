@@ -18,10 +18,19 @@ from aris.core.audit import AuditEntry
 from aris.core.db import session_factory
 from aris.interfaces.slack.client import SlackClient, SlackDeliveryError
 from aris.interfaces.slack.config import SlackSettings
-from aris.interfaces.slack.home import block_cost, details_view, home_view, node_summary
+from aris.interfaces.slack.home import (
+    block_cost,
+    details_view,
+    disk_text,
+    home_view,
+    node_heading,
+    node_summary,
+    system_text,
+)
 from aris.interfaces.slack.models import SlackHomeJob, SlackReceipt
 from aris.interfaces.slack.schemas import ModalHandle
 from aris.interfaces.slack.vram_assets import VRAM_ASSET_ROUTE, VRAM_ASSET_SET
+from aris.modules.vega.disk_schemas import DiskObservation
 from aris.modules.vega.resource_schemas import ComputeOwnership
 from aris.modules.vega.service import VegaService
 from scripts.generate_slack_vram_assets import asset_set_digest, png_bytes
@@ -67,11 +76,12 @@ def test_native_pairs_use_matching_quantized_vram_and_complete_fallback(slack_cl
     title_item, refresh_item = banner["rows"][0]["items"]
     assert title_item["block"]["type"] == "header" and title_item["block"]["level"] == 1
     assert title_item["width"] == "wide" and title_item["horizontal_alignment"] == "start"
-    assert refresh_item["block"]["type"] == "actions"
+    assert refresh_item["block"]["type"] == "section"
     assert refresh_item["horizontal_alignment"] == "end"
-    assert refresh_item["block"]["elements"][0]["action_id"] == "refresh_home"
+    assert refresh_item["block"]["accessory"]["action_id"] == "refresh_home"
     assert [block["type"] for block in banner["fallback"]] == ["header", "section"]
-    assert banner["fallback"][1]["accessory"] == refresh_item["block"]["elements"][0]
+    assert banner["fallback"][1]["accessory"] == refresh_item["block"]["accessory"]
+    assert "vertical_alignment" not in json.dumps(banner)
     assert block_cost(banner) == 3
     layouts = [block for block in view["blocks"][1:] if block["type"] == "layout"]
     assert [len(block["rows"][0]["items"]) for block in layouts] == [2, 1]
@@ -89,7 +99,7 @@ def test_native_pairs_use_matching_quantized_vram_and_complete_fallback(slack_cl
     ]
     assert panels[0]["child_blocks"][2]["image_url"].endswith("vram-070.png")
     assert panels[1]["child_blocks"][2]["image_url"].endswith("vram-070.png")
-    assert "GiB free" in panels[0]["child_blocks"][3]["elements"][0]["text"]
+    assert "GB free" in panels[0]["child_blocks"][3]["elements"][0]["text"]
     assert block_cost(layout) == 13  # Layout + 2 containers + all 10 device blocks.
     odd_item = odd_layout["rows"][0]["items"][0]
     assert odd_item["horizontal_alignment"] == "start"
@@ -109,7 +119,7 @@ def test_native_pairs_use_matching_quantized_vram_and_complete_fallback(slack_cl
         "gpu_uuid": "GPU-c",
     }
     footer = panels[0]["child_blocks"][-1]["text"]["text"]
-    assert footer.startswith("GPU ") and "\u00a0°C" in footer and "GiB" not in footer
+    assert footer.startswith("GPU ") and "\u00a0°C" in footer and "GB" not in footer
     assert sum(block_cost(block) for block in view["blocks"]) <= 100
     assert [block["type"] for block in layout["fallback"]] == [
         "section",
@@ -184,24 +194,114 @@ def test_summary_uses_observations_without_writing_placeholder_reservations(slac
     finally:
         event.remove(slack_client.app.state.engine, "before_cursor_execute", queried)
     assert queries == [] and data.model_dump(mode="json") == before
-    headers = [block for block in view["blocks"] if block["type"] == "header"]
-    assert headers[0]["level"] == 2 and headers[0]["text"]["text"] == "node-a · Online"
+    heading = next(block for block in view["blocks"] if block["type"] == "rich_text")
+    assert heading["elements"][0]["elements"] == [
+        {"type": "text", "text": "node-a", "style": {"bold": True}},
+        {"type": "text", "text": " · Online"},
+    ]
     for changes in ({"status": "OFFLINE"}, {"telemetry_status": "STALE"}, {"gpus": []}):
         unknown = entry.model_copy(update={"node": entry.node.model_copy(update=changes)})
         assert "GPU availability unknown" in node_summary(unknown)
         assert "0 GPUs available" not in node_summary(unknown)
 
 
-@pytest.mark.parametrize("used", [1, 9])
-def test_home_preserves_small_mib_readings_instead_of_rounding_to_zero(
-    slack_client, settings, used
-):
+@pytest.mark.parametrize(("used", "display"), [(1, "1.0 MB"), (9, "9.4 MB")])
+def test_home_converts_small_mib_readings_to_decimal_mb(slack_client, settings, used, display):
     data = snapshot(slack_client, settings, used=used, gpu_count=1)
     view = home_view(data, asset_base_url="https://assets.example.test/vram")
     memory = view["blocks"][-2]["rows"][0]["items"][0]["block"]["child_blocks"][3]["elements"][0][
         "text"
     ]
-    assert memory.startswith(f"{used} MiB / ")
+    assert memory.startswith(f"{display} / ")
+
+
+def test_slack_capacity_values_convert_bytes_to_si_without_mutating_source(slack_client, settings):
+    data = snapshot(slack_client, settings, gpu_count=1)
+    entry = data.nodes[0]
+    gpu = entry.node.gpus[0].model_copy(update={"memory_total_mib": 49140, "memory_used_mib": 4096})
+    total, used = int(62.6 * 2**40), int(27.9 * 2**40)
+    disks = DiskObservation.model_validate(
+        {
+            "observed_at": entry.node.observed_at,
+            "quality": "ok",
+            "volumes": [
+                {
+                    "device_id": "8:1",
+                    "source": "/dev/test1",
+                    "fs_type": "xfs",
+                    "mount_points": ["/mnt/example"],
+                    "quality": "ok",
+                    "total_bytes": total,
+                    "used_bytes": used,
+                    "available_bytes": total - used - 2**40,
+                }
+            ],
+        }
+    )
+    entry = entry.model_copy(
+        update={
+            "node": entry.node.model_copy(update={"gpus": [gpu]}),
+            "system": entry.system.model_copy(
+                update={
+                    "memory": entry.system.memory.model_copy(
+                        update={
+                            "total_bytes": 128 * 2**30,
+                            "available_bytes": 42 * 2**30,
+                        }
+                    )
+                }
+            ),
+            "disks": disks,
+            "disks_freshness": "CURRENT",
+        }
+    )
+    before = entry.model_dump(mode="json")
+    assert disk_text(entry) == "Disk 30.7 TB used / 68.8 TB"
+    assert "RAM 92.3 / 137.4 GB" in system_text(entry)
+    view = home_view(
+        data.model_copy(update={"nodes": [entry]}),
+        asset_base_url="https://assets.example.test/vram",
+    )
+    serialized = json.dumps(view, ensure_ascii=False)
+    assert "4.3 / 51.5 GB · 47.2 GB free" in serialized
+    modal = details_view(entry, gpu)
+    assert modal["blocks"][1]["fields"][0]["text"] == "*VRAM*\n4.3 / 51.5 GB"
+    assert modal["blocks"][1]["fields"][1]["text"] == "*Memory occupancy*\n8%"
+    assert all(unit not in serialized + json.dumps(modal) for unit in ("MiB", "GiB", "TiB"))
+    assert entry.model_dump(mode="json") == before
+    partial = entry.model_copy(update={"disks": disks.model_copy(update={"quality": "partial"})})
+    assert disk_text(partial) == "Disk partially unknown"
+    assert disk_text(entry.model_copy(update={"disks_freshness": "STALE"})) == "Disk unknown"
+    small = entry.model_copy(
+        update={
+            "disks": disks.model_copy(
+                update={
+                    "volumes": [
+                        disks.volumes[0].model_copy(
+                            update={
+                                "total_bytes": 900 * 10**9,
+                                "used_bytes": 400 * 10**9,
+                                "available_bytes": 400 * 10**9,
+                            }
+                        )
+                    ]
+                }
+            )
+        }
+    )
+    assert disk_text(small) == "Disk 400.0 GB used / 900.0 GB"
+
+
+def test_node_weight_uses_single_line_literal_text_without_mentions_or_mrkdwn():
+    heading = node_heading("host<@U999> *literal*\nnext\u2028line", "Online")
+    node, status = heading["elements"][0]["elements"]
+    assert node == {
+        "type": "text",
+        "text": "host<@U999> *literal* next line",
+        "style": {"bold": True},
+    }
+    assert status == {"type": "text", "text": " · Online"}
+    assert all(part["type"] == "text" for part in heading["elements"][0]["elements"])
 
 
 def test_stale_pair_uses_unknown_asset_and_does_not_show_old_numbers(slack_client, settings):
