@@ -9,7 +9,7 @@ from aris.core.contracts import Contract, DomainError
 from aris.core.time import utc
 from aris.interfaces.slack.client import HomePublisher, SlackDeliveryError
 from aris.interfaces.slack.config import SlackSettings
-from aris.interfaces.slack.presentation import home_view
+from aris.interfaces.slack.home import home_view
 from aris.interfaces.slack.repo import SlackRepository
 from aris.interfaces.slack.schemas import HomeJobClaim
 from aris.modules.vega.service import VegaService
@@ -119,7 +119,14 @@ class SlackDispatcher:
         try:
             if claim.team_id != self.config.team_id:
                 raise SlackDeliveryError("workspace_mismatch", retryable=False)
-            self.publisher.publish_home(claim.user_id, home_view(self.vega.status()))
+            self.publisher.publish_home(
+                claim.user_id,
+                home_view(
+                    self.vega.resource_status(),
+                    asset_base_url=self.config.home_asset_base_url,
+                    layout=self.config.home_layout,
+                ),
+            )
         except SlackDeliveryError as exc:
             error = exc
         except Exception:

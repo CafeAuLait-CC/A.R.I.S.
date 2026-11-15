@@ -19,8 +19,8 @@ from aris.core.db import session_factory
 from aris.interfaces.slack.client import SlackClient, SlackDeliveryError
 from aris.interfaces.slack.config import SlackSettings
 from aris.interfaces.slack.dispatch import SlackDispatcher
+from aris.interfaces.slack.home import block_cost, home_view
 from aris.interfaces.slack.models import SlackHomeJob, SlackReceipt
-from aris.interfaces.slack.presentation import home_view
 from aris.interfaces.slack.repo import SlackRepository
 from aris.interfaces.slack.schemas import HomeJobClaim
 from aris.modules.vega.service import VegaService
@@ -224,9 +224,9 @@ def test_home_does_not_draw_current_meters_for_stale_or_missing_gpu_data(slack_c
     payload["resources"]["gpu"]["gpus"][0]["model"] = "<@U999> *untrusted*"
     assert post(slack_client, payload).status_code == 200
     service = VegaService(session_factory(slack_client.app.state.engine), settings)
-    view = home_view(service.status())
+    view = home_view(service.resource_status())
     serialized = json.dumps(view, ensure_ascii=False)
-    assert "指标未知" in serialized
+    assert "观测未知" in serialized
     assert "▰" not in serialized and "▱" not in serialized and "GiB" not in serialized
     for block in view["blocks"]:
         if "<@U999>" in block.get("text", {}).get("text", ""):
@@ -236,23 +236,33 @@ def test_home_does_not_draw_current_meters_for_stale_or_missing_gpu_data(slack_c
 def test_home_respects_slack_block_budget_and_discloses_hidden_devices(slack_client, settings):
     assert post(slack_client, batch()).status_code == 200
     service = VegaService(session_factory(slack_client.app.state.engine), settings)
-    snapshot = service.status()
-    node = snapshot.nodes[0]
+    snapshot = service.resource_status()
+    entry = snapshot.nodes[0]
+    node = entry.node
     many = [
-        node.model_copy(
+        entry.model_copy(
             update={
-                "node_id": "node-" + str(index),
-                "gpus": [
-                    gpu.model_copy(update={"index": number})
-                    for number in range(64)
-                    for gpu in node.gpus
-                ],
+                "node": node.model_copy(
+                    update={
+                        "node_id": "node-" + str(index),
+                        "gpus": [
+                            gpu.model_copy(
+                                update={"index": number, "gpu_uuid": f"GPU-{index}-{number}"}
+                            )
+                            for number in range(64)
+                            for gpu in node.gpus
+                        ],
+                    }
+                )
             }
         )
         for index in range(3)
     ]
-    view = home_view(snapshot.model_copy(update={"nodes": many}))
-    assert len(view["blocks"]) <= 100
+    view = home_view(
+        snapshot.model_copy(update={"nodes": many}),
+        asset_base_url="https://assets.example.test/vram",
+    )
+    assert sum(block_cost(block) for block in view["blocks"]) <= 100
     assert "部分节点或 GPU 未显示" in json.dumps(view, ensure_ascii=False)
     assert "预约可用性尚未评估" in json.dumps(view, ensure_ascii=False)
     for block in view["blocks"]:

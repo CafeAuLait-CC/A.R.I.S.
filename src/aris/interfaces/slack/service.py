@@ -1,6 +1,9 @@
 import hashlib
 import json
+import logging
+import time
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any
 from urllib.parse import parse_qs
 from uuid import uuid4
@@ -10,12 +13,27 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from aris.core.audit import AuditEntry
 from aris.core.contracts import DomainError
+from aris.interfaces.slack.client import ModalPublisher, SlackClient, SlackDeliveryError
 from aris.interfaces.slack.config import SlackSettings
+from aris.interfaces.slack.home import (
+    DETAILS_ACTION,
+    details_view,
+    loading_details_view,
+    unavailable_details_view,
+)
 from aris.interfaces.slack.presentation import resource_text
 from aris.interfaces.slack.repo import SlackRepository
-from aris.interfaces.slack.schemas import EventEnvelope, Interaction, SlackReply, SlashCommand
+from aris.interfaces.slack.schemas import (
+    EventEnvelope,
+    GpuSelection,
+    Interaction,
+    SlackReply,
+    SlashCommand,
+)
 from aris.interfaces.slack.security import require_workspace, verify_request
 from aris.modules.vega.service import VegaService
+
+logger = logging.getLogger(__name__)
 
 
 def json_object(raw: bytes | str) -> dict[str, Any]:
@@ -34,11 +52,16 @@ def form_fields(body: bytes) -> dict[str, str]:
 
 class SlackService:
     def __init__(
-        self, sessions: sessionmaker[Session], config: SlackSettings, vega: VegaService
+        self,
+        sessions: sessionmaker[Session],
+        config: SlackSettings,
+        vega: VegaService,
+        modal_publisher: ModalPublisher | None = None,
     ) -> None:
         self.sessions = sessions
         self.config = config
         self.vega = vega
+        self.modal = modal_publisher or SlackClient(config)
 
     def command(self, body: bytes, timestamp: str | None, signature: str | None) -> SlackReply:
         verify_request(self.config, body, timestamp, signature)
@@ -63,6 +86,7 @@ class SlackService:
         signature: str | None,
         request_id: str,
     ) -> SlackReply:
+        received = time.monotonic()
         verify_request(self.config, body, timestamp, signature)
         try:
             media_type = content_type.split(";", 1)[0].lower().strip()
@@ -109,7 +133,19 @@ class SlackService:
                     else None
                 )
                 fingerprint = self._fingerprint(payload)
-                self._receive(
+                detail_actions = [
+                    action
+                    for action in interaction.actions
+                    if action.action_id.startswith(DETAILS_ACTION)
+                ]
+                selection = None
+                if detail_actions:
+                    if len(interaction.actions) != 1 or interaction.type != "block_actions":
+                        raise ValueError("details require one block action")
+                    if not interaction.trigger_id or detail_actions[0].value is None:
+                        raise ValueError("details require trigger and resource selection")
+                    selection = GpuSelection.model_validate_json(detail_actions[0].value)
+                created = self._receive(
                     interaction.team.id,
                     "i:" + fingerprint,
                     payload,
@@ -117,6 +153,19 @@ class SlackService:
                     home_user,
                     request_id,
                 )
+                if created and selection is not None and interaction.trigger_id is not None:
+                    return SlackReply(
+                        {"ok": True},
+                        after_ack=partial(
+                            self._details,
+                            selection,
+                            interaction.trigger_id.get_secret_value(),
+                            interaction.team.id,
+                            interaction.user.id,
+                            request_id,
+                            received,
+                        ),
+                    )
             else:
                 raise DomainError("UNSUPPORTED_MEDIA_TYPE", "Unsupported Slack media type", 415)
         except (ValueError, KeyError, ValidationError) as exc:
@@ -137,7 +186,7 @@ class SlackService:
         kind: str,
         home_user: str | None,
         request_id: str,
-    ) -> None:
+    ) -> bool:
         now = datetime.now(UTC)
         fingerprint = self._fingerprint(payload)
         with self.sessions.begin() as session:
@@ -146,7 +195,7 @@ class SlackService:
             if receipt.fingerprint != fingerprint:
                 raise DomainError("CONFLICT", "Slack event ID has different content", 409)
             if not created:
-                return
+                return False
             if home_user:
                 repo.add_home_job(receipt, home_user, now)
             session.add(
@@ -160,3 +209,63 @@ class SlackService:
                     changes={"kind": kind, "home_job_created": bool(home_user)},
                 )
             )
+        return True
+
+    def _details(
+        self,
+        selection: GpuSelection,
+        trigger: str,
+        team: str,
+        user: str,
+        request_id: str,
+        received: float,
+    ) -> None:
+        error_code = ""
+        try:
+            if time.monotonic() - received >= 2.5:
+                raise SlackDeliveryError("trigger_expired_locally", retryable=False)
+            # Consume the short-lived trigger before querying the database.
+            # A native loading modal is then updated outside the trigger deadline.
+            handle = self.modal.open_modal(trigger, loading_details_view())
+            try:
+                snapshot = self.vega.resource_status()
+                entry = next(
+                    (item for item in snapshot.nodes if item.node.node_id == selection.node_id),
+                    None,
+                )
+                gpu = (
+                    next(
+                        (item for item in entry.node.gpus if item.gpu_uuid == selection.gpu_uuid),
+                        None,
+                    )
+                    if entry
+                    else None
+                )
+                if entry is None or gpu is None:
+                    error_code = "resource_not_found"
+                    view = unavailable_details_view("该节点或 GPU 当前没有观测记录，请刷新 Home。")
+                else:
+                    view = details_view(entry, gpu)
+            except Exception:
+                error_code = "dependency_unavailable"
+                view = unavailable_details_view("暂时无法读取资源观测，当前指标未知，请稍后重试。")
+            self.modal.update_modal(handle, view)
+        except SlackDeliveryError as exc:
+            error_code = exc.code
+        except Exception:
+            error_code = "delivery_unavailable"
+        try:
+            with self.sessions.begin() as session:
+                session.add(
+                    AuditEntry(
+                        id=str(uuid4()),
+                        actor=team + ":" + user,
+                        action="slack.details.failed" if error_code else "slack.details.opened",
+                        target=selection.node_id,
+                        request_id=request_id,
+                        recorded_at=datetime.now(UTC),
+                        changes={"error_code": error_code},
+                    )
+                )
+        except Exception as exc:
+            logger.warning("slack_details_audit failure_type=%s", type(exc).__name__)

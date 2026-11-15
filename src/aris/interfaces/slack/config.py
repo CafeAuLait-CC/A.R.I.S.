@@ -1,4 +1,7 @@
-from pydantic import Field, SecretStr
+from typing import Literal
+from urllib.parse import urlsplit
+
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -13,6 +16,30 @@ class SlackSettings(BaseSettings):
     max_body_bytes: int = Field(default=262144, ge=1024, le=1048576)
     job_lease_seconds: int = Field(default=60, ge=30, le=600)
     job_max_attempts: int = Field(default=5, ge=1, le=20)
+    home_asset_base_url: str | None = Field(default=None, max_length=2048, repr=False)
+    home_layout: Literal["two-column", "single-column"] = "two-column"
+
+    @field_validator("home_asset_base_url")
+    @classmethod
+    def valid_assets(cls, value: str | None) -> str | None:
+        if not value:
+            return None
+        url = urlsplit(value)
+        if (
+            not url.hostname
+            or url.username
+            or url.password
+            or url.query
+            or url.fragment
+            or (
+                url.scheme != "https"
+                and not (url.scheme == "http" and url.hostname in {"127.0.0.1", "localhost", "::1"})
+            )
+        ):
+            raise ValueError(
+                "Home asset base requires HTTPS without credentials, query or fragment"
+            )
+        return value.rstrip("/")
 
     @property
     def configured(self) -> bool:

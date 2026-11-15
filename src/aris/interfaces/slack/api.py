@@ -1,15 +1,31 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Header, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
 from aris.core.contracts import DomainError
 from aris.interfaces.slack.service import SlackService
+from aris.interfaces.slack.vram_assets import VRAM_ASSET_ROUTE, asset_file
 
 
 def build_router(service: SlackService) -> APIRouter:
     router = APIRouter(tags=["slack"])
+
+    @router.get(VRAM_ASSET_ROUTE + "/{filename}", include_in_schema=False)
+    def vram_bar(filename: str) -> FileResponse:
+        path = asset_file(filename)
+        if path is None:
+            raise DomainError("NOT_FOUND", "Unknown static asset", 404)
+        return FileResponse(
+            path,
+            media_type="image/png",
+            headers={
+                "Cache-Control": "public, max-age=31536000, immutable",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
     async def read_body(request: Request) -> bytes:
         body = bytearray()
@@ -44,6 +60,10 @@ def build_router(service: SlackService) -> APIRouter:
             x_slack_signature,
             request.state.request_id,
         )
-        return JSONResponse(reply.payload, status_code=reply.status_code)
+        return JSONResponse(
+            reply.payload,
+            status_code=reply.status_code,
+            background=BackgroundTask(reply.after_ack) if reply.after_ack else None,
+        )
 
     return router
