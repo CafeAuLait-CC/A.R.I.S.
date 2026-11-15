@@ -180,7 +180,7 @@ def device_blocks(
     else:
         free = (gpu.memory_total_mib - gpu.memory_used_mib) / 1024
         memory = (
-            f"{gpu.memory_used_mib / 1024:.1f} / {gpu.memory_total_mib / 1024:.1f} GiB"
+            f"{memory_used(gpu).removesuffix(' GiB')} / {gpu.memory_total_mib / 1024:.1f} GiB"
             f" · {free:.1f} GiB free"
         )
         temperature = (
@@ -250,21 +250,41 @@ def home_view(
 ) -> dict[str, Any]:
     if layout not in {"two-column", "single-column"}:
         raise ValueError("unsupported Home layout")
-    blocks: list[dict[str, Any]] = [
-        {"type": "header", "level": 1, "text": plain("Hardware resources")},
-        section(
-            "Snapshot updated " + slack_time(snapshot.generated_at),
-            button("Refresh", "refresh_home"),
-        ),
-    ]
-    cost = len(blocks)
+    title = {"type": "header", "level": 1, "text": plain("Hardware resources")}
+    refresh = button("Refresh", "refresh_home")
+    fallback = [title, section("Refresh for latest observations.", refresh)]
+    blocks: list[dict[str, Any]] = (
+        [
+            {
+                "type": "layout",
+                "label": "Hardware resource controls",
+                "is_label_visible": False,
+                "grid_lines": "none",
+                "rows": [
+                    {
+                        "items": [
+                            {"width": "wide", "horizontal_alignment": "start", "block": title},
+                            {
+                                "width": "narrow",
+                                "horizontal_alignment": "end",
+                                "block": {"type": "actions", "elements": [refresh]},
+                            },
+                        ]
+                    }
+                ],
+                "fallback": fallback,
+            }
+        ]
+        if layout == "two-column"
+        else fallback
+    )
+    cost = sum(block_cost(block) for block in blocks)
     truncated = False
     health = {"ONLINE": "Online", "STALE": "Activity stale", "OFFLINE": "Offline"}
     quality = {
-        "CURRENT": "Current sample",
-        "STALE": "Stale sample",
+        "STALE": "Stale",
         "ERROR": "Collection error",
-        "MISSING": "No samples",
+        "MISSING": "Unknown",
     }
     for entry in snapshot.nodes:
         node = entry.node
@@ -277,31 +297,14 @@ def home_view(
             },
             section(node_summary(entry)),
             context(system_text(entry)),
-            context(
-                (
-                    quality[node.telemetry_status] + " · "
-                    if node.telemetry_status != "CURRENT"
-                    else ""
-                )
-                + "GPU "
-                + slack_time(node.observed_at)
-                + " · System "
-                + slack_time(entry.system_observed_at)
-                + " · Heartbeat "
-                + slack_time(node.heartbeat_at)
-            ),
         ]
-        disk_stamp = getattr(entry, "disks_observed_at", None)
-        if cost + len(node_blocks) + bool(disk_stamp is not None) + 3 > 98:
+        if node.telemetry_status != "CURRENT":
+            node_blocks.append(context(quality[node.telemetry_status]))
+        if cost + len(node_blocks) + 3 > 98:
             truncated = True
             break
         blocks.extend(node_blocks)
         cost += len(node_blocks)
-        if disk_stamp is not None:
-            blocks.append(
-                context("Disk sampled " + slack_time(disk_stamp) + " · sampled at most hourly")
-            )
-            cost += 1
         if not node.gpus:
             blocks.append(context("GPU inventory not reported."))
             cost += 1

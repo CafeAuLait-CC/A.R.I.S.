@@ -63,7 +63,17 @@ def details_body(**changes):
 def test_native_pairs_use_matching_quantized_vram_and_complete_fallback(slack_client, settings):
     data = snapshot(slack_client, settings, gpu_count=3)
     view = home_view(data, asset_base_url="https://assets.example.test/vram")
-    layouts = [block for block in view["blocks"] if block["type"] == "layout"]
+    banner = view["blocks"][0]
+    title_item, refresh_item = banner["rows"][0]["items"]
+    assert title_item["block"]["type"] == "header" and title_item["block"]["level"] == 1
+    assert title_item["width"] == "wide" and title_item["horizontal_alignment"] == "start"
+    assert refresh_item["block"]["type"] == "actions"
+    assert refresh_item["horizontal_alignment"] == "end"
+    assert refresh_item["block"]["elements"][0]["action_id"] == "refresh_home"
+    assert [block["type"] for block in banner["fallback"]] == ["header", "section"]
+    assert banner["fallback"][1]["accessory"] == refresh_item["block"]["elements"][0]
+    assert block_cost(banner) == 3
+    layouts = [block for block in view["blocks"][1:] if block["type"] == "layout"]
     assert [len(block["rows"][0]["items"]) for block in layouts] == [2, 1]
     layout, odd_layout = layouts
     assert [len(row["items"]) for row in layout["rows"]] == [2]
@@ -131,6 +141,11 @@ def test_native_pairs_use_matching_quantized_vram_and_complete_fallback(slack_cl
     serialized = json.dumps(view, ensure_ascii=False)
     assert "*0 GPUs available* · 3 in use · 0 reserved" in serialized
     assert "▰" not in serialized and "Disk unknown" in serialized
+    assert all(
+        text not in serialized
+        for text in ("Heartbeat", "Disk sampled", "System ", "Snapshot updated", "Current sample")
+    )
+    assert serialized.count("Updated ") == 1
     single = home_view(
         data, asset_base_url="https://assets.example.test/vram", layout="single-column"
     )
@@ -170,12 +185,23 @@ def test_summary_uses_observations_without_writing_placeholder_reservations(slac
         event.remove(slack_client.app.state.engine, "before_cursor_execute", queried)
     assert queries == [] and data.model_dump(mode="json") == before
     headers = [block for block in view["blocks"] if block["type"] == "header"]
-    assert headers[0]["level"] == 1 and headers[0]["text"]["text"] == "Hardware resources"
-    assert headers[1]["level"] == 2 and headers[1]["text"]["text"] == "node-a · Online"
+    assert headers[0]["level"] == 2 and headers[0]["text"]["text"] == "node-a · Online"
     for changes in ({"status": "OFFLINE"}, {"telemetry_status": "STALE"}, {"gpus": []}):
         unknown = entry.model_copy(update={"node": entry.node.model_copy(update=changes)})
         assert "GPU availability unknown" in node_summary(unknown)
         assert "0 GPUs available" not in node_summary(unknown)
+
+
+@pytest.mark.parametrize("used", [1, 9])
+def test_home_preserves_small_mib_readings_instead_of_rounding_to_zero(
+    slack_client, settings, used
+):
+    data = snapshot(slack_client, settings, used=used, gpu_count=1)
+    view = home_view(data, asset_base_url="https://assets.example.test/vram")
+    memory = view["blocks"][-2]["rows"][0]["items"][0]["block"]["child_blocks"][3]["elements"][0][
+        "text"
+    ]
+    assert memory.startswith(f"{used} MiB / ")
 
 
 def test_stale_pair_uses_unknown_asset_and_does_not_show_old_numbers(slack_client, settings):
