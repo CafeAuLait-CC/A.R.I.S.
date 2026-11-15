@@ -123,7 +123,8 @@ def main() -> None:
                         headers={"Authorization": f"Bearer {read_token}"},
                     )
                     response.raise_for_status()
-                    node = response.json()["nodes"][0]["node"]
+                    initial = response.json()["nodes"][0]
+                    node = initial["node"]
                     assert node["node_id"] == "smoke-node"
                     assert node["status"] == "ONLINE"
                     assert node["heartbeat_at"] is not None
@@ -136,7 +137,29 @@ def main() -> None:
                             gpu["observed_state"] in {"idle", "busy"} for gpu in node["gpus"]
                         )
                     else:
-                        assert node["gpus"][0]["observed_state"] == "idle"
+                        gpu = node["gpus"][0]
+                        assert gpu["memory_used_mib"] == gpu["utilization_percent"] == 0
+                        # A GPU-only fixture cannot invent compute visibility on
+                        # a runner without NVIDIA. Unknown is then required.
+                        compute = initial["compute"]
+                        processes = (
+                            next(
+                                (
+                                    part["reported_processes"]
+                                    for part in compute["gpus"]
+                                    if part["gpu_uuid"] == gpu["gpu_uuid"]
+                                ),
+                                None,
+                            )
+                            if initial["compute_freshness"] == "CURRENT"
+                            and compute is not None
+                            and compute["quality"] == "ok"
+                            else None
+                        )
+                        expected = (
+                            "unknown" if processes is None else "busy" if processes else "idle"
+                        )
+                        assert gpu["observed_state"] == expected
                     print(
                         json.dumps(
                             {
