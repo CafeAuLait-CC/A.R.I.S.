@@ -20,6 +20,7 @@ from aris.interfaces.slack.client import SlackClient, SlackDeliveryError
 from aris.interfaces.slack.config import SlackSettings
 from aris.interfaces.slack.dispatch import SlackDispatcher
 from aris.interfaces.slack.models import SlackHomeJob, SlackReceipt
+from aris.interfaces.slack.presentation import home_view
 from aris.interfaces.slack.repo import SlackRepository
 from aris.interfaces.slack.schemas import HomeJobClaim
 from aris.modules.vega.service import VegaService
@@ -218,6 +219,49 @@ def test_status_escapes_slack_mentions_in_resource_names(slack_client):
     assert "<@U999>" not in text and "&lt;@U999&gt; &amp;" in text
 
 
+def test_home_does_not_draw_current_meters_for_stale_or_missing_gpu_data(slack_client, settings):
+    payload = batch(seconds_ago=120)
+    payload["resources"]["gpu"]["gpus"][0]["model"] = "<@U999> *untrusted*"
+    assert post(slack_client, payload).status_code == 200
+    service = VegaService(session_factory(slack_client.app.state.engine), settings)
+    view = home_view(service.status())
+    serialized = json.dumps(view, ensure_ascii=False)
+    assert "指标未知" in serialized
+    assert "▰" not in serialized and "▱" not in serialized and "GiB" not in serialized
+    for block in view["blocks"]:
+        if "<@U999>" in block.get("text", {}).get("text", ""):
+            assert block["text"]["type"] == "plain_text"
+
+
+def test_home_respects_slack_block_budget_and_discloses_hidden_devices(slack_client, settings):
+    assert post(slack_client, batch()).status_code == 200
+    service = VegaService(session_factory(slack_client.app.state.engine), settings)
+    snapshot = service.status()
+    node = snapshot.nodes[0]
+    many = [
+        node.model_copy(
+            update={
+                "node_id": "node-" + str(index),
+                "gpus": [
+                    gpu.model_copy(update={"index": number})
+                    for number in range(64)
+                    for gpu in node.gpus
+                ],
+            }
+        )
+        for index in range(3)
+    ]
+    view = home_view(snapshot.model_copy(update={"nodes": many}))
+    assert len(view["blocks"]) <= 100
+    assert "部分节点或 GPU 未显示" in json.dumps(view, ensure_ascii=False)
+    assert "预约可用性尚未评估" in json.dumps(view, ensure_ascii=False)
+    for block in view["blocks"]:
+        if block["type"] == "header":
+            assert len(block["text"]["text"]) <= 150
+        for field in block.get("fields", []):
+            assert len(field["text"]) <= 2000
+
+
 class Publisher:
     def __init__(self, failure=None):
         self.failure = failure
@@ -242,7 +286,7 @@ def test_home_job_only_completes_after_publish_receipt(slack_client, settings, s
     assert worker.run_once().outcome == "delivered"
     assert worker.run_once().outcome == "idle"
     assert len(publisher.calls) == 1 and publisher.calls[0][0] == "U111"
-    assert "观测空闲" in publisher.calls[0][1]["blocks"][0]["text"]["text"]
+    assert "观测空闲" in json.dumps(publisher.calls[0][1], ensure_ascii=False)
     with Session(slack_client.app.state.engine) as session:
         job = session.scalars(select(SlackHomeJob)).one()
         assert job.state == "completed" and job.attempts == 1
