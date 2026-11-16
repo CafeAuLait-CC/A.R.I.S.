@@ -1,5 +1,7 @@
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 
 from sqlalchemy import case, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -10,6 +12,20 @@ from aris.core.time import utc
 from aris.modules.vega.models import AgentMessage, GpuDevice, Node, NodeResource
 from aris.modules.vega.reports import AgentReport
 from aris.modules.vega.storage_schemas import MessageStorage
+
+
+@dataclass(frozen=True)
+class GpuTargetRecord:
+    gpu_uuid: str
+    node_id: str
+    present: bool
+    last_seen_at: datetime
+    last_received_at: datetime
+    observed_at: datetime | None
+    received_at: datetime | None
+    telemetry_seq: int
+    collector_status: Literal["ok", "error", "unknown"]
+    collector_health_at: datetime | None
 
 
 class VegaRepository:
@@ -67,6 +83,27 @@ class VegaRepository:
 
     def gpu(self, gpu_uuid: str) -> GpuDevice | None:
         return self.session.get(GpuDevice, gpu_uuid)
+
+    def gpu_target(self, gpu_uuid: str) -> GpuTargetRecord | None:
+        # Scalar columns bypass possibly stale ORM identities in a caller's
+        # transaction; one statement sees node/GPU from one database snapshot.
+        row = self.session.execute(
+            select(
+                GpuDevice.gpu_uuid,
+                GpuDevice.node_id,
+                GpuDevice.present,
+                Node.observed_at,
+                Node.received_at,
+                Node.telemetry_at,
+                Node.telemetry_received_at,
+                Node.telemetry_seq,
+                Node.collector_status,
+                Node.collector_health_at,
+            )
+            .join(Node, Node.id == GpuDevice.node_id)
+            .where(GpuDevice.gpu_uuid == gpu_uuid)
+        ).one_or_none()
+        return GpuTargetRecord(*row) if row is not None else None
 
     def resource(self, node_id: str) -> NodeResource | None:
         return self.session.get(NodeResource, node_id)
