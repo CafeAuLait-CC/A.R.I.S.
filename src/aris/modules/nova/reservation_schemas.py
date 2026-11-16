@@ -40,7 +40,7 @@ class CreatedReservation(AvailabilityContract):
     maintenance_fingerprint: str
 
 
-class CancelReservation(AvailabilityContract):
+class OwnerReservationChange(AvailabilityContract):
     reservation_id: UUID
     expected_version: int = Field(ge=1, strict=True)
     reason: str = Field(min_length=1, max_length=256)
@@ -49,8 +49,22 @@ class CancelReservation(AvailabilityContract):
     @classmethod
     def nonblank_reason(cls, value: str) -> str:
         if not value.strip():
-            raise ValueError("cancellation reason must not be blank")
+            raise ValueError("reservation change reason must not be blank")
         return value.strip()
+
+
+class CancelReservation(OwnerReservationChange):
+    pass
+
+
+class ReleaseReservation(OwnerReservationChange):
+    pass
+
+
+class ReleasedReservation(AvailabilityContract):
+    reservation: ReservationView
+    released_at: AwareDatetime
+    effective_end_at: AwareDatetime
 
 
 class MineCursor(AvailabilityContract):

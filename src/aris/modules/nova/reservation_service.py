@@ -27,6 +27,8 @@ from aris.modules.nova.reservation_schemas import (
     MineCursor,
     MineQuery,
     MineResult,
+    ReleasedReservation,
+    ReleaseReservation,
     ReservationView,
 )
 from aris.modules.vega.target_schemas import GpuTargetQuery
@@ -396,3 +398,143 @@ class ReservationService:
             )
             session.flush()
             return view
+
+    def _release_authority_and_time(
+        self, session: Session, execution: CommandExecution, row: Reservation
+    ) -> datetime:
+        self._release_scope_access(session, execution)
+        now = self._now()
+        if now < utc(row.start_at):
+            raise DomainError("CONFLICT", "RESERVATION_NOT_STARTED", 409)
+        return now
+
+    def release_in_transaction(
+        self,
+        session: Session,
+        execution: CommandExecution,
+        principal: UserPrincipal,
+        request: ReleaseReservation,
+    ) -> ReleasedReservation:
+        if principal.user_id != execution.actor_id:
+            raise DomainError("PERMISSION_DENIED", "Reservation actor differs", 403)
+        with atomic_reservation_write(session):
+            repo = ReservationRepository(session)
+            self._release_scope_access(session, execution)
+            reference = repo.reference(str(request.reservation_id))
+            if reference is None or reference[0] != str(execution.actor_id):
+                raise DomainError("NOT_FOUND", "Reservation is not available", 404)
+            repo.lock_target(reference[1])
+            row = repo.lock_reservation(str(request.reservation_id))
+            if row is None or row.owner_id != str(execution.actor_id):
+                raise DomainError("NOT_FOUND", "Reservation is not available", 404)
+            if row.gpu_uuid != reference[1]:
+                raise DomainError(
+                    "RETRYABLE_CONFLICT", "Reservation target changed; retry command", 503
+                )
+            now = self._release_authority_and_time(session, execution, row)
+            version = repo.history_version(row.id)
+            if version is None:
+                raise DomainError("DEPENDENCY_UNAVAILABLE", "Reservation history is missing", 503)
+            if request.expected_version != version:
+                raise DomainError("CONFLICT", "RESERVATION_VERSION_CHANGED", 409)
+            if row.status not in {"confirmed", "active"}:
+                raise DomainError("CONFLICT", "RESERVATION_NOT_RELEASABLE", 409)
+            previous = row.status
+            row.status, row.updated_at = "completed", now
+            session.flush()
+            now = self._release_authority_and_time(session, execution, row)
+            row.updated_at = now
+            effective_end = min(now, utc(row.end_at))
+            timing = {
+                "released_at": now.isoformat(),
+                "effective_end_at": effective_end.isoformat(),
+            }
+            view = ReservationView(
+                id=row.id,
+                gpu_uuid=row.gpu_uuid,
+                start_at=utc(row.start_at),
+                end_at=utc(row.end_at),
+                status=row.status,
+                purpose=row.purpose,
+                policy_version=row.policy_version,
+                created_at=utc(row.created_at),
+                updated_at=now,
+                version=version + 1,
+            )
+            repo.append_event(
+                ReservationEvent(
+                    id=str(uuid4()),
+                    reservation_id=row.id,
+                    version=version + 1,
+                    event_type="reservation.released",
+                    actor=str(execution.actor_id),
+                    occurred_at=now,
+                    payload={
+                        "previous_status": previous,
+                        "reservation": view.model_dump(mode="json"),
+                        "reason": request.reason,
+                        "command_id": str(execution.command_id),
+                        "request_id": execution.request_id,
+                        **timing,
+                    },
+                )
+            )
+            event_id = str(uuid4())
+            session.add(
+                DomainEvent(
+                    event_id=event_id,
+                    event_type="reservation.released",
+                    event_version=1,
+                    aggregate_type="reservation",
+                    aggregate_id=row.id,
+                    aggregate_version=version + 1,
+                    occurred_at=now,
+                    recorded_at=now,
+                    actor=str(execution.actor_id),
+                    correlation_id=execution.request_id,
+                    causation_id=str(execution.command_id),
+                    payload={
+                        "reservation_id": row.id,
+                        "gpu_uuid": row.gpu_uuid,
+                        "version": version + 1,
+                        "previous_status": previous,
+                        "status": "completed",
+                        **timing,
+                    },
+                )
+            )
+            session.flush()
+            session.add(OutboxEntry(event_id=event_id, created_at=now))
+            session.add(
+                AuditEntry(
+                    id=str(uuid4()),
+                    actor=str(execution.actor_id),
+                    action="reservation.released",
+                    target=row.id,
+                    request_id=execution.request_id,
+                    recorded_at=now,
+                    changes={
+                        "command_id": str(execution.command_id),
+                        "version": version + 1,
+                        "previous_status": previous,
+                        "status": "completed",
+                        "reason": request.reason,
+                        **timing,
+                    },
+                )
+            )
+            session.flush()
+            return ReleasedReservation(
+                reservation=view, released_at=now, effective_end_at=effective_end
+            )
+
+    def _release_scope_access(self, session: Session, execution: CommandExecution) -> None:
+        scope = AccessScope(type="global", id="*")
+        if execution.scope != scope:
+            raise DomainError("PERMISSION_DENIED", "Release scope differs", 403)
+        self.access.require_in_transaction(
+            session,
+            AccessRequest(
+                user_id=execution.actor_id, permission="reservation.release_own", scope=scope
+            ),
+        )
