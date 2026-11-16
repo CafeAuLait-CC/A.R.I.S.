@@ -354,7 +354,7 @@ def test_postgres_concurrent_identity_linking_cannot_bind_one_subject_to_two_use
         assert db.scalar(select(func.count()).select_from(ExternalIdentity)) == 3
 
 
-def test_0006_is_additive_empty_and_round_trip_preserves_existing_facts(client):
+def test_identity_migration_is_additive_empty_and_preserves_existing_facts_at_head(client):
     original = batch()
     assert post(client, original).status_code == 200
     engine = client.app.state.engine
@@ -398,6 +398,6 @@ def test_0006_is_additive_empty_and_round_trip_preserves_existing_facts(client):
     assert facts() == frozen
     command.upgrade(config, "head")
     command.check(config)
-    assert client.get("/health/ready").json()["schema_revision"] == "0006"
+    assert client.get("/health/ready").json()["schema_revision"] == "0007"
     assert facts() == frozen
     assert post(client, original).json()["duplicate"] is True

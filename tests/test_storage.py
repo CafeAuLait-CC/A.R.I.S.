@@ -80,6 +80,7 @@ def test_postgres_storage_sizes_are_scoped_to_current_test_schema_and_read_only(
         "role_permissions",
         "role_bindings",
         "node_user_mappings",
+        "commands",
     }
     assert result.relation_bytes == sum(row.total_bytes for row in result.relations)
     assert result.database_bytes >= result.relation_bytes > 0

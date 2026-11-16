@@ -40,7 +40,11 @@ class AccessService:
 
     def require_permission(self, request: AccessRequest) -> UserPrincipal:
         with self.sessions() as session:
-            user = self._principal(AccessRepository(session).permitted_user(request))
+            return self.require_in_transaction(session, request)
+
+    def require_in_transaction(self, session: Session, request: AccessRequest) -> UserPrincipal:
+        """Check current grants in a transaction owned by a platform service."""
+        user = self._principal(AccessRepository(session).permitted_user(request))
         if user is None:
             raise DomainError("PERMISSION_DENIED", "Permission is not granted", 403)
         return user
