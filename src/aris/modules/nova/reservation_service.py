@@ -1,5 +1,8 @@
 import hashlib
 import json
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from datetime import datetime
 from uuid import uuid4
 
 from sqlalchemy.exc import DBAPIError
@@ -12,11 +15,13 @@ from aris.core.commands.schemas import ActorContext, CommandExecution
 from aris.core.contracts import DomainError
 from aris.core.db import transaction_savepoint
 from aris.core.events import DomainEvent, OutboxEntry
+from aris.core.time import utc
 from aris.modules.nova.availability import AvailabilityService
 from aris.modules.nova.availability_schemas import AvailabilityQuery, AvailabilityResult
 from aris.modules.nova.models import Reservation, ReservationEvent
 from aris.modules.nova.repo import ReservationRepository
 from aris.modules.nova.reservation_schemas import (
+    CancelReservation,
     CreatedReservation,
     CreateReservation,
     MineCursor,
@@ -27,12 +32,42 @@ from aris.modules.nova.reservation_schemas import (
 from aris.modules.vega.target_schemas import GpuTargetQuery
 
 
+@contextmanager
+def atomic_reservation_write(session: Session) -> Iterator[None]:
+    try:
+        with transaction_savepoint(session):
+            yield
+    except DBAPIError as error:
+        sqlstate = getattr(error.orig, "sqlstate", None)
+        constraint = getattr(getattr(error.orig, "diag", None), "constraint_name", None)
+        if sqlstate == "23P01" and constraint == "ex_reservation_gpu_interval":
+            raise DomainError("CONFLICT", "RESERVATION_OVERLAP", 409) from None
+        if sqlstate in {"40P01", "40001"}:
+            raise DomainError(
+                "RETRYABLE_CONFLICT", "Retry the complete command with the same key", 503
+            ) from None
+        raise
+
+
 class ReservationService:
     """Internal self-service actions; no application adapter is enabled by default."""
 
-    def __init__(self, sessions: sessionmaker[Session], availability: AvailabilityService) -> None:
+    def __init__(
+        self,
+        sessions: sessionmaker[Session],
+        availability: AvailabilityService,
+        *,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self.sessions, self.availability = sessions, availability
+        self.clock = clock or availability.clock
         self.access = AccessService(sessions)
+
+    def _now(self) -> datetime:
+        now = self.clock()
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("reservation clock requires a timezone")
+        return utc(now)
 
     def target_scope(self, session: Session, gpu_uuid: str) -> AccessScope:
         with session.no_autoflush:
@@ -84,19 +119,8 @@ class ReservationService:
     ) -> CreatedReservation:
         if principal.user_id != execution.actor_id:
             raise DomainError("PERMISSION_DENIED", "Reservation actor differs", 403)
-        try:
-            with transaction_savepoint(session):
-                return self._create(session, execution, request)
-        except DBAPIError as error:
-            sqlstate = getattr(error.orig, "sqlstate", None)
-            constraint = getattr(getattr(error.orig, "diag", None), "constraint_name", None)
-            if sqlstate == "23P01" and constraint == "ex_reservation_gpu_interval":
-                raise DomainError("CONFLICT", "RESERVATION_OVERLAP", 409) from None
-            if sqlstate in {"40P01", "40001"}:
-                raise DomainError(
-                    "RETRYABLE_CONFLICT", "Retry the complete command with the same key", 503
-                ) from None
-            raise
+        with atomic_reservation_write(session):
+            return self._create(session, execution, request)
 
     def _create(
         self, session: Session, execution: CommandExecution, request: CreateReservation
@@ -247,3 +271,128 @@ class ReservationService:
             else None
         )
         return MineResult(reservations=page, next_cursor=cursor)
+
+    def _cancel_authority_and_time(
+        self, session: Session, execution: CommandExecution, row: Reservation
+    ) -> datetime:
+        global_scope = AccessScope(type="global", id="*")
+        if execution.scope != global_scope:
+            raise DomainError("PERMISSION_DENIED", "Cancellation scope differs", 403)
+        self.access.require_in_transaction(
+            session,
+            AccessRequest(
+                user_id=execution.actor_id, permission="reservation.cancel_own", scope=global_scope
+            ),
+        )
+        now = self._now()
+        if now >= utc(row.start_at):
+            raise DomainError("CONFLICT", "RESERVATION_ALREADY_STARTED", 409)
+        return now
+
+    def cancel_in_transaction(
+        self,
+        session: Session,
+        execution: CommandExecution,
+        principal: UserPrincipal,
+        request: CancelReservation,
+    ) -> ReservationView:
+        if principal.user_id != execution.actor_id:
+            raise DomainError("PERMISSION_DENIED", "Reservation actor differs", 403)
+        with atomic_reservation_write(session):
+            repo = ReservationRepository(session)
+            reference = repo.reference(str(request.reservation_id))
+            if reference is None or reference[0] != str(execution.actor_id):
+                raise DomainError("NOT_FOUND", "Reservation is not available", 404)
+            repo.lock_target(reference[1])
+            row = repo.lock_reservation(str(request.reservation_id))
+            if row is None or row.owner_id != str(execution.actor_id):
+                raise DomainError("NOT_FOUND", "Reservation is not available", 404)
+            if row.gpu_uuid != reference[1]:
+                raise DomainError(
+                    "RETRYABLE_CONFLICT", "Reservation target changed; retry command", 503
+                )
+            now = self._cancel_authority_and_time(session, execution, row)
+            version = repo.history_version(row.id)
+            if version is None:
+                raise DomainError("DEPENDENCY_UNAVAILABLE", "Reservation history is missing", 503)
+            if request.expected_version != version:
+                raise DomainError("CONFLICT", "RESERVATION_VERSION_CHANGED", 409)
+            if row.status != "confirmed":
+                raise DomainError("CONFLICT", "RESERVATION_NOT_CANCELLABLE", 409)
+            row.status, row.updated_at = "cancelled", now
+            session.flush()
+            now = self._cancel_authority_and_time(session, execution, row)
+            row.updated_at = now
+            view = ReservationView(
+                id=row.id,
+                gpu_uuid=row.gpu_uuid,
+                start_at=utc(row.start_at),
+                end_at=utc(row.end_at),
+                status=row.status,
+                purpose=row.purpose,
+                policy_version=row.policy_version,
+                created_at=utc(row.created_at),
+                updated_at=now,
+                version=version + 1,
+            )
+            repo.append_event(
+                ReservationEvent(
+                    id=str(uuid4()),
+                    reservation_id=row.id,
+                    version=version + 1,
+                    event_type="reservation.cancelled",
+                    actor=str(execution.actor_id),
+                    occurred_at=now,
+                    payload={
+                        "previous_status": "confirmed",
+                        "reservation": view.model_dump(mode="json"),
+                        "reason": request.reason,
+                        "command_id": str(execution.command_id),
+                        "request_id": execution.request_id,
+                    },
+                )
+            )
+            event_id = str(uuid4())
+            session.add(
+                DomainEvent(
+                    event_id=event_id,
+                    event_type="reservation.cancelled",
+                    event_version=1,
+                    aggregate_type="reservation",
+                    aggregate_id=row.id,
+                    aggregate_version=version + 1,
+                    occurred_at=now,
+                    recorded_at=now,
+                    actor=str(execution.actor_id),
+                    correlation_id=execution.request_id,
+                    causation_id=str(execution.command_id),
+                    payload={
+                        "reservation_id": row.id,
+                        "gpu_uuid": row.gpu_uuid,
+                        "previous_status": "confirmed",
+                        "status": "cancelled",
+                        "version": version + 1,
+                    },
+                )
+            )
+            session.flush()
+            session.add(OutboxEntry(event_id=event_id, created_at=now))
+            session.add(
+                AuditEntry(
+                    id=str(uuid4()),
+                    actor=str(execution.actor_id),
+                    action="reservation.cancelled",
+                    target=row.id,
+                    request_id=execution.request_id,
+                    recorded_at=now,
+                    changes={
+                        "command_id": str(execution.command_id),
+                        "previous_status": "confirmed",
+                        "status": "cancelled",
+                        "version": version + 1,
+                        "reason": request.reason,
+                    },
+                )
+            )
+            session.flush()
+            return view

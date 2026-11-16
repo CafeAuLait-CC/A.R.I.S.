@@ -80,6 +80,30 @@ class ReservationRepository:
     def append_event(self, event: ReservationEvent) -> None:
         self.session.add(event)
 
+    def reference(self, reservation_id: str) -> tuple[str, str] | None:
+        row = self.session.execute(
+            select(Reservation.owner_id, Reservation.gpu_uuid).where(
+                Reservation.id == reservation_id
+            )
+        ).one_or_none()
+        return (row[0], row[1]) if row is not None else None
+
+    def lock_reservation(self, reservation_id: str) -> Reservation | None:
+        return self.session.scalar(
+            select(Reservation)
+            .where(Reservation.id == reservation_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+
+    def history_version(self, reservation_id: str) -> int | None:
+        version = self.session.scalar(
+            select(func.max(ReservationEvent.version)).where(
+                ReservationEvent.reservation_id == reservation_id
+            )
+        )
+        return int(version) if version is not None else None
+
     def mine(self, owner_id: str, query: MineQuery) -> tuple[ReservationView, ...]:
         version = (
             select(func.max(ReservationEvent.version))
