@@ -4,7 +4,7 @@ from sqlalchemy import Engine, create_engine, event, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-SCHEMA_REVISION = "0007"
+SCHEMA_REVISION = "0008"
 
 
 class Base(DeclarativeBase):

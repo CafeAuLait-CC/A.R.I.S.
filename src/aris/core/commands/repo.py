@@ -15,6 +15,13 @@ class CommandRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
 
+    def lock_owned(self, command_id: str, actor_id: str) -> CommandRecord | None:
+        return self.session.scalar(
+            select(CommandRecord)
+            .where(CommandRecord.id == command_id, CommandRecord.actor_id == actor_id)
+            .with_for_update()
+        )
+
     def claim(
         self,
         context: CommandContext,

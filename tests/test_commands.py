@@ -45,6 +45,9 @@ class RenameFixture(DatabaseCommand):
             raise ValueError("empty name")
         return {"name": name}
 
+    def authorization_scope(self, session, parameters):
+        return AccessScope(type="global", id="*")
+
     def execute(self, session, principal, parameters):
         self.calls += 1
         user = session.get(User, str(principal.user_id))
@@ -144,7 +147,8 @@ def test_reused_key_with_changed_meaning_never_executes_a_second_action(command_
         retry = retry.model_copy(update={"command": "profile.other"})
     with pytest.raises(DomainError) as error:
         service.execute(context(ids), retry)
-    assert error.value.code == "CONFLICT" and action.calls == 1
+    assert error.value.code == ("PERMISSION_DENIED" if change == "scope" else "CONFLICT")
+    assert action.calls == 1
     assert counts(sessions) == (1, 1)
     assert service.execute(context(ids), request()).command_id == first.command_id
 
@@ -158,6 +162,45 @@ def test_identical_key_is_independent_for_distinct_authenticated_actors(command_
     with sessions() as db:
         assert db.get(User, ids["alice"]).display_name == "A"
         assert db.get(User, ids["bob"]).display_name == "B"
+
+
+@pytest.mark.parametrize(
+    "claimed,target,allowed",
+    [("node-a", "node-b", False), ("node-b", "node-b", False), ("node-a", "node-a", True)],
+)
+def test_scope_is_derived_from_the_actual_target_before_permission_check(
+    command_state, claimed, target, allowed
+):
+    _, sessions, ids, _ = command_state
+
+    class ScopedInput(RenameParameters):
+        node_id: str = Field(min_length=1, max_length=128)
+
+    class ScopedRename(RenameFixture):
+        def normalize(self, parameters):
+            return ScopedInput.model_validate(parameters).model_dump(mode="json")
+
+        def authorization_scope(self, session, parameters):
+            return AccessScope(type="node", id=parameters["node_id"])
+
+    with sessions.begin() as db:
+        binding = db.scalars(select(RoleBinding).where(RoleBinding.user_id == ids["alice"])).one()
+        binding.scope_type, binding.scope_id = "node", "node-a"
+    action = ScopedRename()
+    service = CommandService(sessions, [action])
+    query = CommandRequest(
+        command="profile.rename",
+        scope=AccessScope(type="node", id=claimed),
+        parameters={"name": "Scoped", "node_id": target},
+    )
+    if allowed:
+        assert not service.execute(context(ids), query).duplicate
+        assert action.calls == 1 and counts(sessions) == (1, 1)
+    else:
+        with pytest.raises(DomainError) as error:
+            service.execute(context(ids), query)
+        assert error.value.code == "PERMISSION_DENIED"
+        assert action.calls == 0 and counts(sessions) == (0, 0)
 
 
 @pytest.mark.parametrize("revocation", ["binding", "permission", "suspension"])
