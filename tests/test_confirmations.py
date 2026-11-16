@@ -350,6 +350,7 @@ def test_0008_downgrade_refuses_to_destroy_waiting_or_completed_confirmation_his
 ):
     service, sessions, ids, _, _ = confirmed_state
     pending = service.execute(context(ids), request())
+    command.downgrade(Config("alembic.ini"), "0008")
     for completed in (False, True):
         if completed:
             service.confirm(actor(ids), confirmation(pending))
@@ -357,5 +358,6 @@ def test_0008_downgrade_refuses_to_destroy_waiting_or_completed_confirmation_his
             command.downgrade(Config("alembic.ini"), "0007")
         with sessions() as db:
             assert db.scalar(text("SELECT version_num FROM alembic_version")) == "0008"
-        command.check(Config("alembic.ini"))
+    command.upgrade(Config("alembic.ini"), "head")
+    command.check(Config("alembic.ini"))
     assert counts(sessions) == (1, 3)
