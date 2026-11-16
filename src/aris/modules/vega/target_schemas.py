@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import AwareDatetime, Field
+from pydantic import AwareDatetime, ConfigDict, Field
 
 from aris.core.contracts import Contract
 
@@ -11,6 +11,8 @@ class GpuTargetQuery(Contract):
 
 class GpuTargetFact(Contract):
     """Durable target identity and freshness; no reservation decision."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     generated_at: AwareDatetime
     gpu_uuid: str
