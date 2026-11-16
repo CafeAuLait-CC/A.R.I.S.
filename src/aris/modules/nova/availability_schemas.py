@@ -54,6 +54,12 @@ class MaintenanceCoverage(AvailabilityContract):
                 raise ValueError("maintenance window lies outside known coverage")
         return self
 
+    @property
+    def fingerprint(self) -> str:
+        return hashlib.sha256(
+            json.dumps(self.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
 
 class ConflictSummary(AvailabilityContract):
     total: int = Field(ge=0)

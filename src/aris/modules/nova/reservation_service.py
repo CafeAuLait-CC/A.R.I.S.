@@ -1,10 +1,9 @@
-import hashlib
-import json
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from uuid import uuid4
 
+from pydantic import ValidationError
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -24,6 +23,7 @@ from aris.modules.nova.reservation_schemas import (
     CancelReservation,
     CreatedReservation,
     CreateReservation,
+    CreationEvidence,
     MineCursor,
     MineQuery,
     MineResult,
@@ -160,10 +160,7 @@ class ReservationService:
         maintenance = self.availability.maintenance_snapshot(request.gpu_uuid)
         if maintenance is None or final.rules_fingerprint is None:
             raise DomainError("NOT_EVALUATED", "Decision configuration changed", 503)
-        maintenance_json = maintenance.model_dump(mode="json")
-        maintenance_fingerprint = hashlib.sha256(
-            json.dumps(maintenance_json, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+        maintenance_fingerprint = maintenance.fingerprint
         reservation.updated_at = final.generated_at
         view = ReservationView(
             id=reservation_id,
@@ -177,14 +174,20 @@ class ReservationService:
             updated_at=final.generated_at,
             version=1,
         )
-        evidence = {
-            "assessment_scope": "basic_window",
-            "command_id": str(execution.command_id),
-            "request_id": execution.request_id,
-            "assessment": final.model_dump(mode="json"),
-            "maintenance_snapshot": maintenance_json,
-            "maintenance_fingerprint": maintenance_fingerprint,
-        }
+        try:
+            evidence = CreationEvidence(
+                reservation=view,
+                assessment_scope="basic_window",
+                command_id=execution.command_id,
+                request_id=execution.request_id,
+                assessment=final,
+                maintenance_snapshot=maintenance,
+                maintenance_fingerprint=maintenance_fingerprint,
+            )
+        except ValidationError:
+            raise DomainError(
+                "INTERNAL_ERROR", "Creation decision evidence is inconsistent", 500
+            ) from None
         repo.append_event(
             ReservationEvent(
                 id=str(uuid4()),
@@ -193,7 +196,7 @@ class ReservationService:
                 event_type="reservation.created",
                 actor=str(execution.actor_id),
                 occurred_at=final.generated_at,
-                payload={"reservation": view.model_dump(mode="json"), **evidence},
+                payload=evidence.model_dump(mode="json"),
             )
         )
         event_id = str(uuid4())

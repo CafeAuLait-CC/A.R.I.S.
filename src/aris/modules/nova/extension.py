@@ -1,9 +1,8 @@
-import hashlib
-import json
 from collections.abc import Callable
 from datetime import datetime
 from uuid import uuid4
 
+from pydantic import ValidationError
 from sqlalchemy.orm import Session, sessionmaker
 
 from aris.core.access.schemas import AccessRequest, AccessScope, UserPrincipal
@@ -18,6 +17,7 @@ from aris.modules.nova.availability_schemas import AvailabilityQuery, Availabili
 from aris.modules.nova.models import Reservation, ReservationEvent
 from aris.modules.nova.repo import ReservationRepository
 from aris.modules.nova.reservation_schemas import (
+    CreationEvidence,
     ExtendedReservation,
     ExtendReservation,
     ReservationView,
@@ -80,6 +80,26 @@ class ReservationExtensionService:
             raise DomainError("CONFLICT", "RESERVATION_ALREADY_ENDED", 409)
 
     @staticmethod
+    def _creation_basis(repo: ReservationRepository, row: Reservation) -> None:
+        original = repo.creation_basis(row.id)
+        if original is not None:
+            actor, payload = original
+            try:
+                evidence = CreationEvidence.model_validate(payload)
+            except ValidationError:
+                evidence = None
+            if evidence is not None and (
+                actor == row.owner_id
+                and str(evidence.reservation.id) == row.id
+                and evidence.reservation.gpu_uuid == row.gpu_uuid
+                and evidence.reservation.start_at == utc(row.start_at)
+                and evidence.reservation.end_at <= utc(row.end_at)
+                and evidence.reservation.purpose == row.purpose
+            ):
+                return
+        raise DomainError("DEPENDENCY_UNAVAILABLE", "Extension creation evidence is invalid", 503)
+
+    @staticmethod
     def _assessment(
         assessment: AvailabilityResult, scope: AccessScope, row: Reservation, new_end: datetime
     ) -> None:
@@ -125,14 +145,11 @@ class ReservationExtensionService:
                 )
             self._personal_access(session, execution)
             version = repo.history_version(row.id)
-            if (
-                version is None
-                or row.policy_version is not None
-                or repo.origin_assessment_scope(row.id) != "basic_window"
-            ):
+            if version is None or row.policy_version is not None:
                 raise DomainError(
                     "DEPENDENCY_UNAVAILABLE", "Extension policy basis is unavailable", 503
                 )
+            self._creation_basis(repo, row)
             if version != request.expected_version:
                 raise DomainError("CONFLICT", "RESERVATION_VERSION_CHANGED", 409)
             if row.status not in {"confirmed", "active"}:
@@ -161,9 +178,7 @@ class ReservationExtensionService:
             if maintenance is None or final.rules_fingerprint is None:
                 raise DomainError("NOT_EVALUATED", "Decision configuration changed", 503)
             maintenance_json = maintenance.model_dump(mode="json")
-            maintenance_hash = hashlib.sha256(
-                json.dumps(maintenance_json, sort_keys=True, separators=(",", ":")).encode()
-            ).hexdigest()
+            maintenance_hash = maintenance.fingerprint
             row.updated_at = final.generated_at
             view = ReservationView(
                 id=row.id,

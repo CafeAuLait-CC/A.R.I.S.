@@ -6,7 +6,7 @@ from threading import Barrier, Event
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import delete, event, text, update
+from sqlalchemy import delete, event, select, text, update
 
 from aris.core.access.models import Permission, RolePermission
 from aris.core.access.schemas import AccessScope, UserPrincipal
@@ -15,7 +15,7 @@ from aris.core.commands.service import CommandService
 from aris.core.contracts import DomainError
 from aris.core.time import utc
 from aris.modules.nova.availability import AvailabilityService
-from aris.modules.nova.availability_schemas import AvailabilityWindow
+from aris.modules.nova.availability_schemas import AvailabilityWindow, MaintenanceCoverage
 from aris.modules.nova.commands import CreateReservationCommand, ExtendReservationCommand
 from aris.modules.nova.extension import ReservationExtensionService
 from aris.modules.nova.models import Reservation, ReservationEvent
@@ -229,6 +229,41 @@ def test_changed_dependencies_are_not_treated_as_approval(extending, changed):
     }[changed]
     denied(lambda: confirm(extending, waiting), code)
     assert counts(extending) == ((1, 0, 1, 1) if changed == "history" else (1, 1, 1, 1))
+
+
+@pytest.mark.parametrize(
+    "damage", ["marker_only", "actor", "window", "fingerprint", "maintenance", "gpu"]
+)
+def test_extension_requires_complete_coherent_creation_evidence_not_just_a_marker(
+    extending, damage
+):
+    reservation_id = create(extending).result["reservation"]["id"]
+    with extending[2].begin() as session:
+        original = session.scalar(select(ReservationEvent))
+        payload = json.loads(json.dumps(original.payload))
+        if damage == "marker_only":
+            payload = {"assessment_scope": "basic_window"}
+        elif damage == "actor":
+            original.actor = extending[3]["bob"]
+        elif damage == "window":
+            payload["reservation"]["end_at"] = (NOW + timedelta(hours=1, minutes=30)).isoformat()
+        elif damage == "fingerprint":
+            payload["maintenance_fingerprint"] = "0" * 64
+        elif damage == "maintenance":
+            known = calendar(
+                AvailabilityWindow(
+                    start_at=NOW + timedelta(hours=1), end_at=NOW + timedelta(hours=2)
+                )
+            )
+            payload["maintenance_snapshot"] = known.model_dump(mode="json")
+            payload["maintenance_fingerprint"] = MaintenanceCoverage.model_validate(
+                payload["maintenance_snapshot"]
+            ).fingerprint
+        else:
+            payload["assessment"]["resource"]["gpu_uuid"] = "GPU-other"
+        original.payload = payload
+    denied(lambda: extend(extending, reservation_id), "DEPENDENCY_UNAVAILABLE")
+    assert counts(extending) == (1, 1, 1, 1)
 
 
 @pytest.mark.parametrize("status", ["pending", "completed", "cancelled", "rejected", "reclaiming"])

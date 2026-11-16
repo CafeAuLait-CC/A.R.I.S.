@@ -1,4 +1,5 @@
 import hashlib
+from typing import Any
 
 from sqlalchemy import and_, func, or_, select, text, true
 from sqlalchemy.orm import Session
@@ -104,14 +105,15 @@ class ReservationRepository:
         )
         return int(version) if version is not None else None
 
-    def origin_assessment_scope(self, reservation_id: str) -> str | None:
-        payload = self.session.scalar(
-            select(ReservationEvent.payload).where(
-                ReservationEvent.reservation_id == reservation_id, ReservationEvent.version == 1
+    def creation_basis(self, reservation_id: str) -> tuple[str, dict[str, Any]] | None:
+        row = self.session.execute(
+            select(ReservationEvent.actor, ReservationEvent.payload).where(
+                ReservationEvent.reservation_id == reservation_id,
+                ReservationEvent.version == 1,
+                ReservationEvent.event_type == "reservation.created",
             )
-        )
-        scope = payload.get("assessment_scope") if payload else None
-        return scope if isinstance(scope, str) else None
+        ).one_or_none()
+        return (row[0], row[1]) if row is not None else None
 
     def mine(self, owner_id: str, query: MineQuery) -> tuple[ReservationView, ...]:
         version = (

@@ -2,10 +2,15 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import AwareDatetime, Field, field_validator
+from pydantic import AwareDatetime, Field, field_validator, model_validator
 
 from aris.core.time import utc
-from aris.modules.nova.availability_schemas import AvailabilityContract, AvailabilityQuery
+from aris.modules.nova.availability_schemas import (
+    AvailabilityContract,
+    AvailabilityQuery,
+    AvailabilityResult,
+    MaintenanceCoverage,
+)
 from aris.modules.nova.schemas import ReservationStatus
 
 
@@ -38,6 +43,42 @@ class CreatedReservation(AvailabilityContract):
     assessment_scope: Literal["basic_window"] = "basic_window"
     rules_fingerprint: str
     maintenance_fingerprint: str
+
+
+class CreationEvidence(AvailabilityContract):
+    reservation: ReservationView
+    assessment_scope: Literal["basic_window"]
+    command_id: UUID
+    request_id: str = Field(min_length=1, max_length=128)
+    assessment: AvailabilityResult
+    maintenance_snapshot: MaintenanceCoverage
+    maintenance_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def coherent_creation(self) -> "CreationEvidence":
+        view, decision, known = self.reservation, self.assessment, self.maintenance_snapshot
+        if (
+            view.status != "confirmed"
+            or view.version != 1
+            or view.policy_version is not None
+            or decision.code != "AVAILABLE"
+            or decision.resource is None
+            or decision.resource.gpu_uuid != view.gpu_uuid
+            or decision.query.gpu_uuid != view.gpu_uuid
+            or decision.query.start_at != view.start_at
+            or decision.query.end_at != view.end_at
+            or decision.generated_at != view.updated_at
+            or known.gpu_uuid != view.gpu_uuid
+            or known.coverage.start_at > view.start_at
+            or known.coverage.end_at < view.end_at
+            or any(
+                window.start_at < view.end_at and window.end_at > view.start_at
+                for window in known.windows
+            )
+            or known.fingerprint != self.maintenance_fingerprint
+        ):
+            raise ValueError("creation evidence does not match its reservation")
+        return self
 
 
 class OwnerReservationChange(AvailabilityContract):
