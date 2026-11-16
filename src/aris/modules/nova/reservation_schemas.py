@@ -67,6 +67,23 @@ class ReleasedReservation(AvailabilityContract):
     effective_end_at: AwareDatetime
 
 
+class ExtendReservation(OwnerReservationChange):
+    new_end_at: AwareDatetime
+
+    @field_validator("new_end_at")
+    @classmethod
+    def utc_end(cls, value: datetime) -> datetime:
+        return utc(value)
+
+
+class ExtendedReservation(AvailabilityContract):
+    reservation: ReservationView
+    previous_end_at: AwareDatetime
+    assessment_scope: Literal["extension_delta"] = "extension_delta"
+    rules_fingerprint: str
+    maintenance_fingerprint: str
+
+
 class MineCursor(AvailabilityContract):
     created_at: AwareDatetime
     reservation_id: UUID

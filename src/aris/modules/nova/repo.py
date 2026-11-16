@@ -104,6 +104,15 @@ class ReservationRepository:
         )
         return int(version) if version is not None else None
 
+    def origin_assessment_scope(self, reservation_id: str) -> str | None:
+        payload = self.session.scalar(
+            select(ReservationEvent.payload).where(
+                ReservationEvent.reservation_id == reservation_id, ReservationEvent.version == 1
+            )
+        )
+        scope = payload.get("assessment_scope") if payload else None
+        return scope if isinstance(scope, str) else None
+
     def mine(self, owner_id: str, query: MineQuery) -> tuple[ReservationView, ...]:
         version = (
             select(func.max(ReservationEvent.version))
