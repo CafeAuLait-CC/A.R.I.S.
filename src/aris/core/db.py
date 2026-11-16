@@ -1,10 +1,12 @@
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 from sqlalchemy import Engine, create_engine, event, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-SCHEMA_REVISION = "0005"
+SCHEMA_REVISION = "0010"
 
 
 class Base(DeclarativeBase):
@@ -27,6 +29,22 @@ def build_engine(url: str) -> Engine:
 
 def session_factory(engine: Engine) -> sessionmaker[Session]:
     return sessionmaker(engine, expire_on_commit=False)
+
+
+@contextmanager
+def transaction_savepoint(session: Session) -> Iterator[None]:
+    """Protect a write batch; pending owner work can flush before the savepoint."""
+    connection = session.connection()
+    if connection.dialect.name == "sqlite":
+        driver = connection.connection.driver_connection
+        if not isinstance(driver, sqlite3.Connection):
+            raise RuntimeError("unsupported SQLite transaction driver")
+        # sqlite3 legacy mode does not BEGIN for SELECT or SAVEPOINT. Without
+        # this, releasing the first savepoint can commit before the owner does.
+        if not driver.in_transaction:
+            connection.exec_driver_sql("BEGIN")
+    with session.begin_nested():
+        yield
 
 
 def check_database(engine: Engine) -> None:

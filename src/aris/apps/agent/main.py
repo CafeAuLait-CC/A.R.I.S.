@@ -20,6 +20,7 @@ from aris.apps.agent.live import LiveClient
 from aris.apps.agent.lock import CollectorAlreadyRunning, collector_lock
 from aris.apps.agent.resource_sampler import ResourceSampler
 from aris.apps.agent.spool import Spool
+from aris.apps.agent.spool_status import inspect_spool
 from aris.apps.agent.transport import DeliveryWorker, flush, report
 from aris.modules.vega.resource_schemas import ResourceInspection
 from aris.modules.vega.schemas import GpuSample
@@ -88,7 +89,32 @@ def main() -> None:
         action="store_true",
         help="Print read-only GPU, CPU/RAM and compute counts without credentials or network",
     )
+    source.add_argument(
+        "--spool-status",
+        action="store_true",
+        help="Read existing local backlog without sampling, delivery, initialization or repair",
+    )
     args = parser.parse_args()
+    if args.spool_status:
+        if args.once:
+            parser.error("--spool-status cannot be combined with --once")
+        try:
+            settings = AgentSettings()
+            status = inspect_spool(
+                settings.spool_path,
+                settings.id,
+                settings.node_id,
+                max_batches=settings.max_buffered_batches,
+                max_heartbeats=settings.max_buffered_heartbeats,
+                interval_seconds=settings.interval_seconds,
+            )
+        except Exception as exc:
+            print(json.dumps({"status": "unknown", "error_type": type(exc).__name__}))
+            raise SystemExit(1) from None
+        print(json.dumps(status))
+        if status["status"] != "ok":
+            raise SystemExit(1)
+        return
     if args.inspect:
         observation = ResourceSampler().sample()
         print(
