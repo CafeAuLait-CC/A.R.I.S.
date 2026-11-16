@@ -1,6 +1,7 @@
 "use strict";
 const $ = (id) => document.getElementById(id);
 const samplesByGpu = new Map();
+const expandedSystems = new Set();
 let source = null, lastSnapshot = null, lastReceived = 0, healthy = false;
 let liveSource=null, liveMode=false, lastPreview=null;
 const displayZone=document.documentElement.dataset.timeZone||"UTC";
@@ -22,6 +23,7 @@ function chart(gpu, stamp, known){
   for(const y of [18,36,54]){const line=document.createElementNS(ns,"line"); line.setAttribute("x1","0");line.setAttribute("x2","480");line.setAttribute("y1",y);line.setAttribute("y2",y);line.setAttribute("class","gridline");svg.append(line);}
   if(known && values.length){
     const points=values.map((entry,index)=>[values.length===1?480:index*480/(values.length-1),68-Math.min(100,Math.max(0,entry.value))*0.62]);
+    const area=document.createElementNS(ns,"polygon");area.setAttribute("class","chart-area");area.setAttribute("points",[[points[0][0],68],...points,[points[points.length-1][0],68]].map(p=>p.join(",")).join(" "));svg.append(area);
     const line=document.createElementNS(ns,"polyline");line.setAttribute("points",points.map(p=>p.join(",")).join(" "));svg.append(line);
     const dot=document.createElementNS(ns,"circle"), last=points[points.length-1];dot.setAttribute("cx",last[0]);dot.setAttribute("cy",last[1]);dot.setAttribute("r","2.5");svg.append(dot);
   }
@@ -94,23 +96,29 @@ function systemPanel(node,connected){
   const cpuKnown=cpu?.quality==="ok", memoryKnown=memory?.quality==="ok", computeKnown=compute?.quality==="ok";
   const ownership=compute?.ownership;
   const ownerNote=!ownership?"驱动报告 · 此 Vega 未提供用户明细":ownership.quality==="unsupported"?"驱动报告 · 用户识别不支持":ownership.users.length+" 个 Linux UID · "+ownership.unresolved_processes+" 个进程归属未知";
-  const panel=make("div","system-panel"), metrics=make("div","system-metrics");
+  const panel=make("details","system-panel"), summary=make("summary","system-summary"), metrics=make("div","system-metrics"), details=make("div","system-details"), notes=make("div","system-notes");
+  panel.dataset.nodeId=node.node_id;panel.open=expandedSystems.has(node.node_id);
   const entries=[
-    ["CPU 使用率",cpuKnown?cpu.utilization_percent.toFixed(1)+"%":"—",cpuKnown?cpu.logical_count+" 逻辑核心 · "+cpu.window_seconds.toFixed(1)+" 秒窗口":qualityLabel(cpu?.quality)],
-    ["系统内存",memoryKnown?((memory.total_bytes-memory.available_bytes)/2**30).toFixed(1)+" / "+(memory.total_bytes/2**30).toFixed(1)+" GiB":"—",memoryKnown?"可用 "+(memory.available_bytes/2**30).toFixed(1)+" GiB（内核估计）":qualityLabel(memory?.quality)],
-    ["报告的计算进程",computeKnown?String(compute.reported_processes):"—",computeKnown?ownerNote:qualityLabel(compute?.quality)],
+    ["CPU",cpuKnown?cpu.utilization_percent.toFixed(1)+"%":"—",cpuKnown?cpu.logical_count+" 逻辑核心 · "+cpu.window_seconds.toFixed(1)+" 秒窗口":qualityLabel(cpu?.quality)],
+    ["内存",memoryKnown?((memory.total_bytes-memory.available_bytes)/2**30).toFixed(1)+" / "+(memory.total_bytes/2**30).toFixed(1)+" GiB":"—",memoryKnown?"可用 "+(memory.available_bytes/2**30).toFixed(1)+" GiB（内核估计）":qualityLabel(memory?.quality)],
+    ["计算进程",computeKnown?String(compute.reported_processes):"—",computeKnown?ownerNote:qualityLabel(compute?.quality)],
   ];
-  for(const [label,value,note] of entries){const cell=make("div","system-cell");cell.append(make("span","data-label",label),make("strong","system-value",value),make("span","metric-note",note));metrics.append(cell);}
+  for(const [label,value,note] of entries){const cell=make("div","system-cell");cell.title=note;cell.append(make("span","data-label",label),make("strong","system-value",value));if(value==="—")cell.append(make("span","metric-note",note));metrics.append(cell);notes.append(make("span","",label+" · "+note));}
+  const disk=connected && node.disks_freshness==="CURRENT"?node.disks:null, diskCell=make("div","system-cell");
+  const diskErrors=disk?.volumes.filter(volume=>volume.quality!=="ok").length||0;
+  diskCell.append(make("span","data-label","磁盘"),make("strong","system-value",disk?.volumes.length?disk.volumes.length+" 卷"+(diskErrors?" · "+diskErrors+" 项未知":""):disk?.quality==="unsupported"?"不支持":"未知"));metrics.append(diskCell);
   const stamps=make("div","system-stamps");stamps.append(make("span","","CPU / 内存采样 "+clock(node.system_observed_at)),make("span","","计算进程采样 "+clock(node.compute_observed_at)+" · 约每15秒查询"));
-  panel.append(metrics,stamps);
-  const owners=computeKnown?ownershipPanel(ownership,node):null;if(owners) panel.append(owners);
-  panel.append(diskPanel(node,connected));
+  summary.append(metrics,make("span","system-toggle","系统详情"));details.append(notes,stamps);
+  const owners=computeKnown?ownershipPanel(ownership,node):null;if(owners) details.append(owners);
+  details.append(diskPanel(node,connected));panel.append(summary,details);
   return panel;
 }
 function normalizedSnapshot(snapshot){
   return {...snapshot,nodes:(snapshot.nodes||[]).map(item=>item.node?({...item,...item.node}):item)};
 }
 function render(snapshot,connected){
+  for(const panel of document.querySelectorAll("details.system-panel")){if(panel.open)expandedSystems.add(panel.dataset.nodeId);else expandedSystems.delete(panel.dataset.nodeId);}
+  const focusedSystem=document.activeElement?.classList.contains("system-summary")?document.activeElement.parentElement.dataset.nodeId:null;
   const nodes=snapshot.nodes||[], gpus=nodes.flatMap(n=>n.gpus.filter(g=>g.present).map(g=>({gpu:g,node:n})));
   const known=gpus.filter(x=>connected && x.node.status==="ONLINE" && x.node.telemetry_status==="CURRENT" && x.gpu.observed_state!=="unknown");
   $("online-count").textContent=connected?nodes.filter(n=>n.status==="ONLINE").length:"—";
@@ -134,6 +142,7 @@ function render(snapshot,connected){
     section.append(heading,systemPanel(node,connected),grid);fragment.append(section);
   }
   $("nodes").replaceChildren(fragment);
+  if(focusedSystem){const panel=[...document.querySelectorAll("details.system-panel")].find(item=>item.dataset.nodeId===focusedSystem);panel?.querySelector("summary").focus({preventScroll:true});}
 }
 function previewSnapshot(){
   const archived=new Map((lastSnapshot?.nodes||[]).map(n=>[n.node_id,n]));
