@@ -22,6 +22,11 @@ class CommandContext(ActorContext):
     idempotency_key: str = Field(min_length=1, max_length=128, repr=False)
 
 
+class CommandExecution(ActorContext):
+    command_id: UUID
+    scope: AccessScope
+
+
 class CommandRequest(AccessContract):
     command: PermissionName
     scope: AccessScope

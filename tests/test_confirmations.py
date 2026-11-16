@@ -210,8 +210,8 @@ def test_abrupt_confirmation_fixture_exit_restores_waiting_intent_and_allows_ret
         class BlockingRename(RenameFixture):
             definition = CommandDefinition(
                 name='profile.rename', required_permission='profile.write')
-            def execute(self, session, principal, parameters):
-                result = super().execute(session, principal, parameters)
+            def execute(self, session, execution, principal, parameters):
+                result = super().execute(session, execution, principal, parameters)
                 session.flush()
                 print(json.dumps({'phase': 'confirmation_business_flushed'}), flush=True)
                 sys.stdin.read()

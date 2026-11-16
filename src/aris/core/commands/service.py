@@ -19,6 +19,7 @@ from aris.core.commands.schemas import (
     ActorContext,
     CommandContext,
     CommandDefinition,
+    CommandExecution,
     CommandOutcome,
     CommandRequest,
     CommandResult,
@@ -49,7 +50,11 @@ class DatabaseCommand(ABC):
 
     @abstractmethod
     def execute(
-        self, session: Session, principal: UserPrincipal, parameters: dict[str, JsonValue]
+        self,
+        session: Session,
+        execution: CommandExecution,
+        principal: UserPrincipal,
+        parameters: dict[str, JsonValue],
     ) -> dict[str, JsonValue]:
         """Write only inside the caller-owned transaction; do not commit it."""
 
@@ -205,7 +210,17 @@ class CommandService:
 
         event.listen(session, "before_commit", reject_action_commit)
         try:
-            result = action.execute(session, principal, parameters)
+            result = action.execute(
+                session,
+                CommandExecution(
+                    command_id=record.id,
+                    actor_id=context.actor_id,
+                    request_id=context.request_id,
+                    scope=AccessScope(type=record.scope_type, id=record.scope_id),
+                ),
+                principal,
+                parameters,
+            )
         finally:
             event.remove(session, "before_commit", reject_action_commit)
         bounded_json(result, 65536, result=True)

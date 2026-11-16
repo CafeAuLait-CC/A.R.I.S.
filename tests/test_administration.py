@@ -700,7 +700,7 @@ def test_user_administration_composes_with_confirmed_idempotent_commands(admin_s
         def authorization_scope(self, session, parameters):
             return GLOBAL
 
-        def execute(self, session, principal, parameters):
+        def execute(self, session, execution, principal, parameters):
             assert principal.user_id == admin_context.actor_id
             result = service.apply_in_transaction(
                 session,

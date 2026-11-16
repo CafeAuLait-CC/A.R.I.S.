@@ -48,7 +48,7 @@ class RenameFixture(DatabaseCommand):
     def authorization_scope(self, session, parameters):
         return AccessScope(type="global", id="*")
 
-    def execute(self, session, principal, parameters):
+    def execute(self, session, execution, principal, parameters):
         self.calls += 1
         user = session.get(User, str(principal.user_id))
         user.display_name = parameters["name"]
@@ -270,8 +270,8 @@ def test_action_cannot_accidentally_commit_business_work_outside_result_and_audi
     _, sessions, ids, _ = command_state
 
     class EarlyCommit(RenameFixture):
-        def execute(self, session, principal, parameters):
-            result = super().execute(session, principal, parameters)
+        def execute(self, session, execution, principal, parameters):
+            result = super().execute(session, execution, principal, parameters)
             session.commit()
             return result
 
@@ -286,9 +286,9 @@ def test_action_can_release_a_savepoint_without_committing_the_owner_transaction
     _, sessions, ids, _ = command_state
 
     class NestedRename(RenameFixture):
-        def execute(self, session, principal, parameters):
+        def execute(self, session, execution, principal, parameters):
             with session.begin_nested():
-                return super().execute(session, principal, parameters)
+                return super().execute(session, execution, principal, parameters)
 
     result = CommandService(sessions, [NestedRename()]).execute(context(ids), request())
     assert result.result == {"name": "Renamed"} and counts(sessions) == (1, 1)
@@ -298,9 +298,9 @@ def test_session_commit_inside_savepoint_cannot_commit_the_owner_early(command_s
     _, sessions, ids, _ = command_state
 
     class NestedEarlyCommit(RenameFixture):
-        def execute(self, session, principal, parameters):
+        def execute(self, session, execution, principal, parameters):
             with session.begin_nested():
-                result = super().execute(session, principal, parameters)
+                result = super().execute(session, execution, principal, parameters)
                 session.commit()
                 return result
 
@@ -357,8 +357,8 @@ def test_abrupt_fixture_exit_before_commit_rolls_back_then_original_key_succeeds
         from tests.test_commands import RenameFixture
 
         class BlockingRename(RenameFixture):
-            def execute(self, session, principal, parameters):
-                result = super().execute(session, principal, parameters)
+            def execute(self, session, execution, principal, parameters):
+                result = super().execute(session, execution, principal, parameters)
                 session.flush()
                 print(json.dumps({'phase': 'business_flushed_before_commit'}), flush=True)
                 sys.stdin.read()

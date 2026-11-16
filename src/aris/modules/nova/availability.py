@@ -52,6 +52,20 @@ class AvailabilityService:
     def assess_in_transaction(
         self, session: Session, query: AvailabilityQuery
     ) -> AvailabilityResult:
+        return self._assess_in_transaction(session, query)
+
+    def maintenance_snapshot(self, gpu_uuid: str) -> MaintenanceCoverage | None:
+        return self._maintenance.get(gpu_uuid)
+
+    def _assess_in_transaction(
+        self,
+        session: Session,
+        query: AvailabilityQuery,
+        *,
+        exclude_reservation_id: str | None = None,
+    ) -> AvailabilityResult:
+        # Only Nova's provisional-write recheck excludes its own freshly inserted
+        # ID. The public read contract always includes every blocking reservation.
         now = self.clock()
         if now.tzinfo is None or now.utcoffset() is None:
             raise ValueError("availability clock requires a timezone")
@@ -111,7 +125,9 @@ class AvailabilityService:
                 or coverage.coverage.end_at < query.end_at
             ):
                 return result("NOT_EVALUATED", "MAINTENANCE_NOT_COVERED")
-            conflicts = ReservationRepository(session).conflict_summary(query.gpu_uuid, query)
+            conflicts = ReservationRepository(session).conflict_summary(
+                query.gpu_uuid, query, exclude_reservation_id=exclude_reservation_id
+            )
             windows = tuple(
                 sorted(
                     (
