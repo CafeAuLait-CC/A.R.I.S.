@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from aris.apps.api.main import create_app
 from aris.core.audit import AuditEntry
 from aris.core.db import session_factory
+from aris.core.time import utc
 from aris.interfaces.slack.client import SlackClient, SlackDeliveryError
 from aris.interfaces.slack.config import SlackSettings
 from aris.interfaces.slack.dispatch import SlackDispatcher
@@ -313,7 +314,7 @@ def test_rate_limit_retry_and_permanent_failure_are_explicit(
     assert worker.run_once().outcome == "idle"
     with Session(slack_client.app.state.engine) as session:
         job = session.scalars(select(SlackHomeJob)).one()
-        future = job.available_at.replace(tzinfo=UTC)
+        future = utc(job.available_at)
         assert future > datetime.now(UTC) + timedelta(seconds=50)
         job.available_at = datetime.now(UTC) - timedelta(seconds=1)
         session.commit()

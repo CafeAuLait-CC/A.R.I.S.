@@ -2,9 +2,10 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import event, select, update
+from sqlalchemy import event, select, text, update
 
 from aris.core.db import build_engine, session_factory
+from aris.core.time import utc
 from aris.modules.vega.models import GpuDevice, Node
 from aris.modules.vega.target_schemas import GpuTargetQuery
 from aris.modules.vega.target_service import VegaTargetService
@@ -158,14 +159,14 @@ def test_scalar_query_does_not_reuse_a_stale_orm_identity(target):
     service, sessions, _ = target
     with sessions() as session:
         cached = session.get(Node, "node-a")
-        assert cached.telemetry_at.replace(tzinfo=UTC) == NOW
+        assert utc(cached.telemetry_at) == NOW
         with sessions.begin() as writer:
             writer.execute(update(Node).values(telemetry_at=NOW - timedelta(minutes=2)))
         fact = service.gpu_in_transaction(session, GpuTargetQuery(gpu_uuid="GPU-target"))
         assert fact.telemetry_status == "STALE"
         assert fact.observed_at == NOW - timedelta(minutes=2)
         # Reading scalar facts also leaves the caller's tracked entities alone.
-        assert cached.telemetry_at.replace(tzinfo=UTC) == NOW
+        assert utc(cached.telemetry_at) == NOW
 
 
 def test_target_query_rejects_unbounded_or_empty_ids_and_naive_clock(target):
@@ -176,3 +177,16 @@ def test_target_query_rejects_unbounded_or_empty_ids_and_naive_clock(target):
     service.clock = lambda: NOW.replace(tzinfo=None)
     with pytest.raises(ValueError, match="timezone"):
         service.gpu(GpuTargetQuery(gpu_uuid="GPU-target"))
+
+
+def test_target_facts_preserve_instants_in_a_non_utc_database_session(target):
+    service, sessions, engine = target
+    if engine.dialect.name != "postgresql":
+        pytest.skip("requires PostgreSQL timezone-aware results")
+    with sessions.begin() as session:
+        session.execute(text("SET LOCAL TIME ZONE 'Pacific/Auckland'"))
+        fact = service.gpu_in_transaction(session, GpuTargetQuery(gpu_uuid="GPU-target"))
+        assert fact.generated_at == fact.observed_at == fact.last_seen_at == NOW
+        assert fact.observed_at.utcoffset() == timedelta(0)
+        assert fact.node_status == "ONLINE" and fact.telemetry_status == "CURRENT"
+        assert session.scalar(text("SHOW TimeZone")) == "Pacific/Auckland"
