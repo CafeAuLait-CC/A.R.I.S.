@@ -71,5 +71,5 @@ def test_projection_cleanup_keeps_original_history_fingerprints_and_current_fact
         assert projection.seq == seq
         expected = {k: v for k, v in prior_projection.items() if k != "schema_version"}
         assert projection.observation == expected
-    assert client.get("/health/ready").json()["schema_revision"] == "0009"
+    assert client.get("/health/ready").json()["schema_revision"] == "0010"
     assert resources(client)["nodes"][0]["system_freshness"] == "CURRENT"

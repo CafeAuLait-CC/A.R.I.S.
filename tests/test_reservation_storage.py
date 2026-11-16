@@ -295,6 +295,9 @@ def test_0009_empty_roundtrip_and_drift_do_not_change_existing_platform_rows(res
 
 def test_0009_refuses_downgrade_when_reservation_history_exists(reservation_state):
     sessions, owners = reservation_state
+    # Exercise this migration at its own revision, independently of later guards
+    # and each database's transactional-DDL rollback behavior.
+    command.downgrade(Config("alembic.ini"), "0009")
     with sessions.begin() as db:
         db.add(row(owners[0]))
     with pytest.raises(RuntimeError, match="reservation history prevents downgrade"):
@@ -302,6 +305,7 @@ def test_0009_refuses_downgrade_when_reservation_history_exists(reservation_stat
     with sessions() as db:
         assert db.scalar(text("SELECT version_num FROM alembic_version")) == "0009"
         assert db.scalar(select(func.count()).select_from(Reservation)) == 1
+    command.upgrade(Config("alembic.ini"), "head")
     command.check(Config("alembic.ini"))
 
 

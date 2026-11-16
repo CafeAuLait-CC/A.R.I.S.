@@ -23,7 +23,11 @@ def imports(path, source_root=Path("src")):
 
 def private_core_component(module):
     for component in ("access", "commands"):
-        if module in {f"aris.core.{component}.models", f"aris.core.{component}.repo"}:
+        if module in {
+            f"aris.core.{component}.models",
+            f"aris.core.{component}.repo",
+            f"aris.core.{component}.admin_repo",
+        }:
             return component
     return None
 
@@ -80,6 +84,11 @@ def test_core_components_use_each_others_public_contracts():
             "aris/core/commands/service.py",
             "from ..access import models as hidden\nfrom . import repo as own_repo\n",
             {"aris.core.access.models", "aris.core.commands.repo"},
+        ),
+        (
+            "aris/modules/nova/service.py",
+            "from aris.core.access import admin_repo as hidden_admin\n",
+            {"aris.core.access.admin_repo"},
         ),
     ],
 )

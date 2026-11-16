@@ -197,8 +197,11 @@ class CommandService:
         principal: UserPrincipal,
         parameters: dict[str, JsonValue],
     ) -> CommandResult:
-        def reject_action_commit(_: Session) -> None:
-            raise DomainError("INTERNAL_ERROR", "Command action cannot commit its transaction", 500)
+        def reject_action_commit(active: Session) -> None:
+            if not active.in_nested_transaction():
+                raise DomainError(
+                    "INTERNAL_ERROR", "Command action cannot commit its transaction", 500
+                )
 
         event.listen(session, "before_commit", reject_action_commit)
         try:

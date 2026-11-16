@@ -282,6 +282,35 @@ def test_action_cannot_accidentally_commit_business_work_outside_result_and_audi
         assert db.get(User, ids["alice"]).display_name == "Original A"
 
 
+def test_action_can_release_a_savepoint_without_committing_the_owner_transaction(command_state):
+    _, sessions, ids, _ = command_state
+
+    class NestedRename(RenameFixture):
+        def execute(self, session, principal, parameters):
+            with session.begin_nested():
+                return super().execute(session, principal, parameters)
+
+    result = CommandService(sessions, [NestedRename()]).execute(context(ids), request())
+    assert result.result == {"name": "Renamed"} and counts(sessions) == (1, 1)
+
+
+def test_session_commit_inside_savepoint_cannot_commit_the_owner_early(command_state):
+    _, sessions, ids, _ = command_state
+
+    class NestedEarlyCommit(RenameFixture):
+        def execute(self, session, principal, parameters):
+            with session.begin_nested():
+                result = super().execute(session, principal, parameters)
+                session.commit()
+                return result
+
+    with pytest.raises(DomainError) as error:
+        CommandService(sessions, [NestedEarlyCommit()]).execute(context(ids), request())
+    assert error.value.code == "INTERNAL_ERROR" and counts(sessions) == (0, 0)
+    with sessions() as db:
+        assert db.get(User, ids["alice"]).display_name == "Original A"
+
+
 def test_confirmation_is_required_by_default_and_cannot_be_overridden_by_parameters(command_state):
     _, sessions, ids, action = command_state
     action.definition = CommandDefinition(

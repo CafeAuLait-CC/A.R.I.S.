@@ -84,6 +84,9 @@ class VegaRepository:
     def gpu(self, gpu_uuid: str) -> GpuDevice | None:
         return self.session.get(GpuDevice, gpu_uuid)
 
+    def node_exists(self, node_id: str) -> bool:
+        return self.session.scalar(select(Node.id).where(Node.id == node_id)) is not None
+
     def gpu_target(self, gpu_uuid: str) -> GpuTargetRecord | None:
         # Scalar columns bypass possibly stale ORM identities in a caller's
         # transaction; one statement sees node/GPU from one database snapshot.
