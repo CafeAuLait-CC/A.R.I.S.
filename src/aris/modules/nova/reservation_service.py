@@ -61,7 +61,9 @@ class ReservationService:
         )
 
     @staticmethod
-    def _require_available(assessment: AvailabilityResult) -> None:
+    def _require_available(assessment: AvailabilityResult, scope: AccessScope) -> None:
+        if assessment.resource is not None and assessment.resource.node_id != scope.id:
+            raise DomainError("PERMISSION_DENIED", "Reservation target scope differs", 403)
         if assessment.code == "AVAILABLE":
             return
         status = {
@@ -106,7 +108,7 @@ class ReservationService:
             gpu_uuid=request.gpu_uuid, start_at=request.start_at, end_at=request.end_at
         )
         first = self.availability.assess_in_transaction(session, query)
-        self._require_available(first)
+        self._require_available(first, execution.scope)
         reservation_id = str(uuid4())
         reservation = Reservation(
             id=reservation_id,
@@ -128,7 +130,7 @@ class ReservationService:
         final = self.availability._assess_in_transaction(
             session, query, exclude_reservation_id=reservation_id
         )
-        self._require_available(final)
+        self._require_available(final, execution.scope)
         maintenance = self.availability.maintenance_snapshot(request.gpu_uuid)
         if maintenance is None or final.rules_fingerprint is None:
             raise DomainError("NOT_EVALUATED", "Decision configuration changed", 503)

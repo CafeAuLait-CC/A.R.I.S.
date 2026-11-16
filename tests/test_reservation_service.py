@@ -251,6 +251,30 @@ def test_scope_is_derived_from_the_actual_target_and_key_does_not_hide_changed_c
     assert counts(booking) == (1, 1, 1, 1)
 
 
+@pytest.mark.parametrize("changed_read", [4, 6])
+def test_assessment_fact_cannot_switch_node_between_scope_check_and_evaluation(
+    booking, changed_read
+):
+    service, commands, _, _, _, _ = booking
+    targets = service.availability.targets
+    reads = []
+
+    class MovingTarget:
+        def gpu_in_transaction(self, session, query):
+            fact = targets.gpu_in_transaction(session, query)
+            reads.append(True)
+            return (
+                fact.model_copy(update={"node_id": "node-b"})
+                if len(reads) == changed_read
+                else fact
+            )
+
+    service.availability.targets = MovingTarget()
+    pending = commands.execute(context(booking), request())
+    denied(lambda: confirm(booking, pending), "PERMISSION_DENIED")
+    assert len(reads) == changed_read and counts(booking) == (0, 0, 0, 0)
+
+
 @pytest.mark.parametrize("mode", ["overlap", "maintenance", "duration", "notice", "coverage"])
 def test_resource_and_basic_window_rejections_do_not_claim_success(booking, mode):
     service, _, sessions, ids, _, _ = booking
