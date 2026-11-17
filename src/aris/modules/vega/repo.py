@@ -12,6 +12,7 @@ from aris.core.time import utc
 from aris.modules.vega.models import AgentMessage, GpuDevice, Node, NodeResource
 from aris.modules.vega.reports import AgentReport
 from aris.modules.vega.storage_schemas import MessageStorage
+from aris.modules.vega.target_schemas import GpuInventoryLabel
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,18 @@ class GpuTargetRecord:
 class VegaRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
+
+    def gpu_label(self, gpu_uuid: str) -> GpuInventoryLabel | None:
+        row = self.session.execute(
+            select(GpuDevice.gpu_uuid, GpuDevice.node_id, GpuDevice.index, GpuDevice.model).where(
+                GpuDevice.gpu_uuid == gpu_uuid
+            )
+        ).one_or_none()
+        return (
+            GpuInventoryLabel(gpu_uuid=row[0], node_id=row[1], index=row[2], model=row[3])
+            if row
+            else None
+        )
 
     def lock_node(self, batch: AgentReport, now: datetime) -> Node | None:
         dialect = self.session.get_bind().dialect.name

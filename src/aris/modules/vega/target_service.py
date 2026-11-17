@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from aris.core.config import Settings
 from aris.core.time import utc
 from aris.modules.vega.repo import VegaRepository
-from aris.modules.vega.target_schemas import GpuTargetFact, GpuTargetQuery
+from aris.modules.vega.target_schemas import GpuInventoryLabel, GpuTargetFact, GpuTargetQuery
 
 
 class VegaTargetService:
@@ -27,6 +27,13 @@ class VegaTargetService:
     def gpu(self, query: GpuTargetQuery) -> GpuTargetFact | None:
         with self.sessions() as session:
             return self.gpu_in_transaction(session, query)
+
+    def label_in_transaction(
+        self, session: Session, query: GpuTargetQuery
+    ) -> GpuInventoryLabel | None:
+        """Last-known identity for display; this makes no freshness/slot claim."""
+        with session.no_autoflush:
+            return VegaRepository(session).gpu_label(query.gpu_uuid)
 
     def gpu_in_transaction(self, session: Session, query: GpuTargetQuery) -> GpuTargetFact | None:
         """Read inside the command owner's transaction without flushing it."""

@@ -1,8 +1,10 @@
 import hashlib
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import and_, func, or_, select, text, true
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from aris.core.time import utc
 from aris.modules.nova.availability_schemas import (
@@ -15,9 +17,52 @@ from aris.modules.nova.reservation_schemas import MineQuery, ReservationView
 from aris.modules.nova.schemas import BLOCKING_STATUSES, ReservationWindow
 
 
+@dataclass(frozen=True)
+class ReservationNoticeRecord:
+    event_type: str
+    actor: str
+    occurred_at: datetime
+    payload: dict[str, Any]
+    owner_id: str
+    gpu_uuid: str
+    origin_actor: str
+    origin_payload: dict[str, Any]
+    origin_at: datetime
+
+
 class ReservationRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
+
+    def notice_record(self, reservation_id: str, version: int) -> ReservationNoticeRecord | None:
+        origin = aliased(ReservationEvent)
+        row = self.session.execute(
+            select(
+                ReservationEvent.event_type,
+                ReservationEvent.actor,
+                ReservationEvent.occurred_at,
+                ReservationEvent.payload,
+                Reservation.owner_id,
+                Reservation.gpu_uuid,
+                origin.actor,
+                origin.payload,
+                origin.occurred_at,
+            )
+            .join(Reservation, Reservation.id == ReservationEvent.reservation_id)
+            .join(
+                origin,
+                and_(
+                    origin.reservation_id == Reservation.id,
+                    origin.version == 1,
+                    origin.event_type == "reservation.created",
+                ),
+            )
+            .where(
+                ReservationEvent.reservation_id == reservation_id,
+                ReservationEvent.version == version,
+            )
+        ).one_or_none()
+        return ReservationNoticeRecord(*row) if row is not None else None
 
     def overlapping(self, gpu_uuid: str, window: ReservationWindow) -> list[Reservation]:
         """Candidate conflicts; the PG constraint remains the write authority."""

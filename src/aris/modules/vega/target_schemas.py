@@ -9,6 +9,14 @@ class GpuTargetQuery(Contract):
     gpu_uuid: str = Field(min_length=1, max_length=128)
 
 
+class GpuInventoryLabel(Contract):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    gpu_uuid: str
+    node_id: str
+    index: int = Field(ge=0)
+    model: str = Field(min_length=1, max_length=256)
+
+
 class GpuTargetFact(Contract):
     """Durable target identity and freshness; no reservation decision."""
 

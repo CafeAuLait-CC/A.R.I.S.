@@ -13,20 +13,23 @@ from aris.core.commands.intake import CommandIntakeService
 from aris.core.commands.worker import CommandWorker
 from aris.core.notifications.dispatch import NotificationDispatcher
 from aris.core.notifications.models import NotificationOutbox
-from aris.core.notifications.schemas import NotificationIntent
 from aris.core.notifications.service import NotificationService
 from aris.core.relay.models import ConsumerInbox
-from aris.core.relay.schemas import ConsumerDefinition, EventSelector
-from aris.core.relay.service import DatabaseEventConsumer, EventRelay
+from aris.core.relay.service import EventRelay
 from aris.interfaces.commands.auth import BoundSubjectTokens, UserTokenBinding
 from aris.interfaces.commands.service import UserCommandSurface
 from aris.interfaces.slack.config import SlackSettings
 from aris.modules.nova.models import Reservation, ReservationEvent
+from aris.modules.nova.notifications import (
+    ReservationNoticeTemplate,
+    ReservationNotificationConsumer,
+)
+from aris.modules.vega.target_service import VegaTargetService
 from tests.test_command_intake import LIMITS as INTAKE_LIMITS
 from tests.test_command_intake import NAMESPACE, WORKER_LIMITS, subject
 from tests.test_event_relay import LIMITS as RELAY_LIMITS
 from tests.test_notifications import LIMITS as NOTIFICATION_LIMITS
-from tests.test_notifications import FixtureTemplate, FixtureTransport
+from tests.test_notifications import FixtureTransport
 from tests.test_reservation_service import booking as booking
 from tests.test_reservation_service import request as reservation_request
 from tests.test_user_commands import ALICE_TOKEN, BOB_TOKEN, LIMITS, headers
@@ -54,34 +57,16 @@ def test_http_identity_confirmation_real_reservation_outbox_and_mock_notice_form
     )
     surface = UserCommandSurface(UserCommandGateway(intake, ["reservation.create"], LIMITS), auth)
     notifications = NotificationService(
-        sessions, NAMESPACE, [FixtureTemplate()], clock=lambda: clock["now"]
+        sessions, NAMESPACE, [ReservationNoticeTemplate()], clock=lambda: clock["now"]
     )
     transport = FixtureTransport(sessions)
     dispatch = NotificationDispatcher(notifications, NOTIFICATION_LIMITS, transport)
 
-    class FixtureReservationConsumer(DatabaseEventConsumer):
-        # Integration fixture only. Actual business notification templates and
-        # recipient policy are not installed into the application runtime.
-        definition = ConsumerDefinition(
-            consumer_id="fixture.reservation-notice",
-            revision="1",
-            events=(EventSelector(event_type="reservation.created", event_version=1),),
-        )
-
-        def consume(self, session, envelope):
-            notifications.enqueue(
-                session,
-                NotificationIntent(
-                    event_id=envelope.event_id,
-                    recipient_user_id=envelope.payload["owner_id"],
-                    template_id="fixture.notice",
-                    parameters={"text": "Reservation event committed"},
-                    request_id=envelope.correlation_id,
-                ),
-            )
-
     relay = EventRelay(
-        sessions, [FixtureReservationConsumer()], RELAY_LIMITS, clock=lambda: clock["now"]
+        sessions,
+        [ReservationNotificationConsumer(notifications, VegaTargetService(sessions, settings))],
+        RELAY_LIMITS,
+        clock=lambda: clock["now"],
     )
     with TestClient(
         create_app(settings, SlackSettings(_env_file=None), user_commands=surface),
