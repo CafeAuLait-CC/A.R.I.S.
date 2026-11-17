@@ -9,12 +9,27 @@ class GpuTargetQuery(Contract):
     gpu_uuid: str = Field(min_length=1, max_length=128)
 
 
+class GpuCatalogQuery(Contract):
+    limit: int = Field(default=100, ge=1, le=100, strict=True)
+
+
 class GpuInventoryLabel(Contract):
     model_config = ConfigDict(extra="forbid", frozen=True)
     gpu_uuid: str
     node_id: str
     index: int = Field(ge=0)
     model: str = Field(min_length=1, max_length=256)
+
+
+class GpuCatalogPage(Contract):
+    labels: tuple[GpuInventoryLabel, ...] = Field(max_length=100)
+    truncated: bool
+
+    @model_validator(mode="after")
+    def unique_targets(self) -> "GpuCatalogPage":
+        if len({label.gpu_uuid for label in self.labels}) != len(self.labels):
+            raise ValueError("catalog labels must be unique")
+        return self
 
 
 class GpuLabelQuery(Contract):

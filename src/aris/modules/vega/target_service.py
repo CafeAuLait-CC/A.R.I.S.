@@ -8,6 +8,8 @@ from aris.core.config import Settings
 from aris.core.time import utc
 from aris.modules.vega.repo import VegaRepository
 from aris.modules.vega.target_schemas import (
+    GpuCatalogPage,
+    GpuCatalogQuery,
     GpuInventoryLabel,
     GpuLabelQuery,
     GpuTargetFact,
@@ -45,6 +47,11 @@ class VegaTargetService:
     ) -> tuple[GpuInventoryLabel, ...]:
         with session.no_autoflush:
             return VegaRepository(session).gpu_labels(query.gpu_uuids)
+
+    def catalog_in_transaction(self, session: Session, query: GpuCatalogQuery) -> GpuCatalogPage:
+        with session.no_autoflush:
+            labels = VegaRepository(session).gpu_catalog(query.limit)
+        return GpuCatalogPage(labels=labels[: query.limit], truncated=len(labels) > query.limit)
 
     def gpu_in_transaction(self, session: Session, query: GpuTargetQuery) -> GpuTargetFact | None:
         """Read inside the command owner's transaction without flushing it."""

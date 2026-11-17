@@ -19,13 +19,22 @@ from aris.interfaces.reservations.schemas import LabeledMinePage, OwnedReservati
 from aris.modules.nova.availability_schemas import AvailabilityQuery, AvailabilityResult
 from aris.modules.nova.reservation_schemas import MineQuery, MineResult
 from aris.modules.nova.reservation_service import ReservationService
-from aris.modules.vega.target_schemas import GpuInventoryLabel, GpuLabelQuery
+from aris.modules.vega.target_schemas import (
+    GpuCatalogPage,
+    GpuCatalogQuery,
+    GpuInventoryLabel,
+    GpuLabelQuery,
+)
 
 
 class GpuLabels(Protocol):
     def labels_in_transaction(
         self, session: Session, query: GpuLabelQuery
     ) -> tuple[GpuInventoryLabel, ...]: ...
+
+    def catalog_in_transaction(
+        self, session: Session, query: GpuCatalogQuery
+    ) -> GpuCatalogPage: ...
 
 
 class PersonalReservationQueries:
@@ -121,9 +130,7 @@ class PersonalReservationQueries:
             )
 
     def _recheck_mine(self, session: Session, context: ExternalCommandActor, user_id: UUID) -> None:
-        current = self.access.resolve_external_in_transaction(session, context.subject)
-        if current is None or current.user_id != user_id:
-            raise DomainError("PERMISSION_DENIED", "Current user identity differs", 403)
+        self._recheck_identity(session, context, user_id)
         self.access.require_in_transaction(
             session,
             AccessRequest(
@@ -132,6 +139,58 @@ class PersonalReservationQueries:
                 scope=AccessScope(type="global", id="*"),
             ),
         )
+
+    def _recheck_identity(
+        self, session: Session, context: ExternalCommandActor, user_id: UUID
+    ) -> None:
+        current = self.access.resolve_external_in_transaction(session, context.subject)
+        if current is None or current.user_id != user_id:
+            raise DomainError("PERMISSION_DENIED", "Current user identity differs", 403)
+
+    def create_choices(self, context: ExternalCommandActor) -> GpuCatalogPage:
+        if self.labels is None:
+            raise DomainError("DEPENDENCY_UNAVAILABLE", "Resource labels are unavailable", 503)
+        with self._query_session(context) as (session, principal):
+            page = self.labels.catalog_in_transaction(session, GpuCatalogQuery())
+            nodes = {label.node_id for label in page.labels}
+            allowed = self._create_nodes(session, principal.user_id, nodes)
+            selected = tuple(label for label in page.labels if label.node_id in allowed)
+            final = (
+                self.labels.labels_in_transaction(
+                    session, GpuLabelQuery(gpu_uuids=tuple(label.gpu_uuid for label in selected))
+                )
+                if selected
+                else ()
+            )
+            stable = {(label.gpu_uuid, label.node_id) for label in final}
+            self._recheck_identity(session, context, principal.user_id)
+            allowed = self._create_nodes(session, principal.user_id, allowed)
+            return GpuCatalogPage(
+                labels=tuple(
+                    label
+                    for label in selected
+                    if (label.gpu_uuid, label.node_id) in stable and label.node_id in allowed
+                ),
+                truncated=page.truncated,
+            )
+
+    def _create_nodes(self, session: Session, user_id: UUID, nodes: set[str]) -> set[str]:
+        allowed = set()
+        for node in sorted(nodes):
+            try:
+                self.access.require_in_transaction(
+                    session,
+                    AccessRequest(
+                        user_id=user_id,
+                        permission="reservation.create",
+                        scope=AccessScope(type="node", id=node),
+                    ),
+                )
+                allowed.add(node)
+            except DomainError as error:
+                if error.code != "PERMISSION_DENIED":
+                    raise
+        return allowed
 
     def availability(
         self, context: ExternalCommandActor, query: AvailabilityQuery

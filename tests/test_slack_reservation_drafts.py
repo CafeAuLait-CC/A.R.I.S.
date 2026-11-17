@@ -38,7 +38,7 @@ class AckObserved:
             await send(message)
             if (
                 scope["type"] == "http"
-                and scope["path"] == "/slack/commands"
+                and scope["path"] in {"/slack/commands", "/slack/events"}
                 and message["type"] == "http.response.body"
                 and not message.get("more_body", False)
             ):
@@ -213,7 +213,6 @@ def test_duplicate_slash_keeps_one_pending_intent_and_never_executes_implicitly(
 @pytest.mark.parametrize(
     "text",
     [
-        "reserve",
         "reserve GPU-target bad-date bad-date purpose",
         "reserve GPU-target 2026-11-17T01:00:00 2026-11-17T02:00:00 purpose",
         "reserve GPU-target 2026-11-17T01:00:00Z 2026-11-17T01:00:00Z purpose",

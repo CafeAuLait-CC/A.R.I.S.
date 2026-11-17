@@ -26,6 +26,7 @@ from aris.interfaces.reservations.service import PersonalReservationQueries
 from aris.interfaces.slack.client import ModalPublisher
 from aris.interfaces.slack.config import SlackSettings
 from aris.interfaces.slack.presentation import markdown, plain, slack_time
+from aris.interfaces.slack.reservation_forms import SlackReservationForms
 from aris.interfaces.slack.schemas import ModalHandle, SlackPayload, SlackReply, SlashCommand
 from aris.interfaces.slack.user_commands import (
     CONFIRM_ACTION,
@@ -352,6 +353,13 @@ class SlackReservationDrafts:
             not gateway.definition(name).requires_confirmation for name in exposed
         ):
             raise ValueError("reservation drafts require exposed confirmed owner commands")
+        self.forms = (
+            SlackReservationForms(
+                gateway, publisher, presenter, presenter.queries, clock=presenter.clock
+            )
+            if "reservation.create" in exposed
+            else None
+        )
 
     def validate_configuration(self, config: SlackSettings) -> None:
         namespace = self.gateway.intake.namespace
@@ -365,6 +373,10 @@ class SlackReservationDrafts:
     def start(
         self, command: SlashCommand, body: bytes, request_id: str, received: float
     ) -> SlackReply:
+        if command.text.strip().lower() == "reserve":
+            self.gateway.definition("reservation.create")
+            assert self.forms is not None
+            return self.forms.start(command, request_id, received)
         first = command.text.strip().split(maxsplit=1)
         operation = first[0].lower() if first else ""
         try:
