@@ -1,5 +1,7 @@
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from typing import Protocol
+from uuid import UUID
 
 from pydantic import SecretStr
 from sqlalchemy.exc import DBAPIError
@@ -13,9 +15,17 @@ from aris.core.commands.gateway_schemas import ExternalCommandActor, GatewayLimi
 from aris.core.commands.schemas import ActorContext
 from aris.core.contracts import DomainError
 from aris.interfaces.commands.auth import UserCommandAuthenticator
+from aris.interfaces.reservations.schemas import LabeledMinePage, OwnedReservationDetail
 from aris.modules.nova.availability_schemas import AvailabilityQuery, AvailabilityResult
 from aris.modules.nova.reservation_schemas import MineQuery, MineResult
 from aris.modules.nova.reservation_service import ReservationService
+from aris.modules.vega.target_schemas import GpuInventoryLabel, GpuLabelQuery
+
+
+class GpuLabels(Protocol):
+    def labels_in_transaction(
+        self, session: Session, query: GpuLabelQuery
+    ) -> tuple[GpuInventoryLabel, ...]: ...
 
 
 class PersonalReservationQueries:
@@ -25,10 +35,12 @@ class PersonalReservationQueries:
         reservations: ReservationService,
         namespace: IdentityNamespace,
         limits: GatewayLimits,
+        labels: GpuLabels | None = None,
     ) -> None:
         self.sessions, self.reservations = sessions, reservations
         self.namespace, self.limits = namespace, limits
         self.access = AccessService(sessions)
+        self.labels = labels
 
     @contextmanager
     def _query_session(
@@ -63,11 +75,63 @@ class PersonalReservationQueries:
 
     def mine(self, context: ExternalCommandActor, query: MineQuery) -> MineResult:
         with self._query_session(context) as (session, principal):
-            return self.reservations.mine_in_transaction(
+            result = self.reservations.mine_in_transaction(
                 session,
                 ActorContext(actor_id=principal.user_id, request_id=context.request_id),
                 query,
             )
+            self._recheck_mine(session, context, principal.user_id)
+            return result
+
+    def mine_labeled(self, context: ExternalCommandActor, query: MineQuery) -> LabeledMinePage:
+        with self._query_session(context) as (session, principal):
+            result = self.reservations.mine_in_transaction(
+                session,
+                ActorContext(actor_id=principal.user_id, request_id=context.request_id),
+                query,
+            )
+            targets = tuple(dict.fromkeys(view.gpu_uuid for view in result.reservations))
+            labels = (
+                self.labels.labels_in_transaction(session, GpuLabelQuery(gpu_uuids=targets))
+                if targets and self.labels
+                else ()
+            )
+            self._recheck_mine(session, context, principal.user_id)
+            return LabeledMinePage(page=result, labels=labels)
+
+    def detail(self, context: ExternalCommandActor, reservation_id: UUID) -> OwnedReservationDetail:
+        with self._query_session(context) as (session, principal):
+            view = self.reservations.owned_in_transaction(
+                session,
+                ActorContext(actor_id=principal.user_id, request_id=context.request_id),
+                reservation_id,
+            )
+            labels = (
+                self.labels.labels_in_transaction(
+                    session, GpuLabelQuery(gpu_uuids=(view.gpu_uuid,))
+                )
+                if self.labels
+                else ()
+            )
+            if len(labels) > 1:
+                raise DomainError("DEPENDENCY_UNAVAILABLE", "Reservation labels are ambiguous", 503)
+            self._recheck_mine(session, context, principal.user_id)
+            return OwnedReservationDetail(
+                reservation=view, resource_label=labels[0] if labels else None
+            )
+
+    def _recheck_mine(self, session: Session, context: ExternalCommandActor, user_id: UUID) -> None:
+        current = self.access.resolve_external_in_transaction(session, context.subject)
+        if current is None or current.user_id != user_id:
+            raise DomainError("PERMISSION_DENIED", "Current user identity differs", 403)
+        self.access.require_in_transaction(
+            session,
+            AccessRequest(
+                user_id=user_id,
+                permission="reservation.mine",
+                scope=AccessScope(type="global", id="*"),
+            ),
+        )
 
     def availability(
         self, context: ExternalCommandActor, query: AvailabilityQuery
@@ -118,6 +182,11 @@ class UserReservationSurface:
         self, authorization: str | None, request_id: str, query: AvailabilityQuery
     ) -> AvailabilityResult:
         return self.queries.availability(self._context(authorization, request_id), query)
+
+    def detail(
+        self, authorization: str | None, request_id: str, reservation_id: UUID
+    ) -> OwnedReservationDetail:
+        return self.queries.detail(self._context(authorization, request_id), reservation_id)
 
     def _context(self, authorization: str | None, request_id: str) -> ExternalCommandActor:
         return ExternalCommandActor(

@@ -239,7 +239,7 @@ def build_m2_components(
     )
     gateway = UserCommandGateway(intake, config.commands, config.gateway_limits)
     personal_queries = PersonalReservationQueries(
-        sessions, reservations, config.namespace, config.gateway_limits
+        sessions, reservations, config.namespace, config.gateway_limits, labels=targets
     )
     user_api = (
         UserCommandSurface(

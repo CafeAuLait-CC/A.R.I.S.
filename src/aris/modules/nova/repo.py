@@ -176,6 +176,15 @@ class ReservationRepository:
         return (row[0], row[1]) if row is not None else None
 
     def mine(self, owner_id: str, query: MineQuery) -> tuple[ReservationView, ...]:
+        return self._owned_views(owner_id, query=query)
+
+    def owned_view(self, owner_id: str, reservation_id: str) -> ReservationView | None:
+        rows = self._owned_views(owner_id, reservation_id=reservation_id)
+        return rows[0] if rows else None
+
+    def _owned_views(
+        self, owner_id: str, *, query: MineQuery | None = None, reservation_id: str | None = None
+    ) -> tuple[ReservationView, ...]:
         version = (
             select(func.max(ReservationEvent.version))
             .where(ReservationEvent.reservation_id == Reservation.id)
@@ -194,7 +203,9 @@ class ReservationRepository:
             Reservation.updated_at,
             version.label("version"),
         ).where(Reservation.owner_id == owner_id)
-        if query.cursor is not None:
+        if reservation_id is not None:
+            statement = statement.where(Reservation.id == reservation_id)
+        if query is not None and query.cursor is not None:
             statement = statement.where(
                 or_(
                     Reservation.created_at < query.cursor.created_at,
@@ -206,7 +217,7 @@ class ReservationRepository:
             )
         rows = self.session.execute(
             statement.order_by(Reservation.created_at.desc(), Reservation.id.desc()).limit(
-                query.limit + 1
+                query.limit + 1 if query is not None else 1
             )
         ).mappings()
         return tuple(

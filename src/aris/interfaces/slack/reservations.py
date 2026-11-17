@@ -7,11 +7,14 @@ from aris.interfaces.slack.config import SlackSettings
 from aris.interfaces.slack.presentation import markdown, plain, slack_time
 from aris.interfaces.slack.schemas import SlackReply, SlashCommand
 from aris.modules.nova.reservation_schemas import MineQuery, MineResult
+from aris.modules.vega.target_schemas import GpuInventoryLabel
 
 SLACK_PAGE_SIZE = 5
 
 
-def personal_reservations(result: MineResult) -> dict[str, Any]:
+def personal_reservations(
+    result: MineResult, labels: tuple[GpuInventoryLabel, ...] = ()
+) -> dict[str, Any]:
     if not result.reservations:
         return {
             "response_type": "ephemeral",
@@ -19,14 +22,20 @@ def personal_reservations(result: MineResult) -> dict[str, Any]:
             "blocks": [{"type": "section", "text": plain("You have no reservations.")}],
         }
     blocks: list[dict[str, Any]] = [{"type": "header", "text": plain("Your reservations")}]
+    inventory = {label.gpu_uuid: label for label in labels}
     for reservation in result.reservations:
+        label = inventory.get(reservation.gpu_uuid)
+        resource = (
+            f"{label.node_id} · GPU {label.index} · {label.model}"
+            if label
+            else "GPU information unavailable"
+        )
         blocks.extend(
             [
                 {
                     "type": "section",
                     "text": plain(
-                        f"GPU {reservation.gpu_uuid} · {reservation.status.capitalize()}\n"
-                        + reservation.purpose
+                        f"{resource} · {reservation.status.capitalize()}\n" + reservation.purpose
                     ),
                 },
                 {
@@ -55,6 +64,9 @@ def personal_reservations(result: MineResult) -> dict[str, Any]:
                 ],
             }
         )
+    blocks.append(
+        {"type": "context", "elements": [plain("Resource labels use last-known inventory.")]}
+    )
     return {
         "response_type": "ephemeral",
         # Untrusted purposes and resource identifiers occur only in plain_text
@@ -80,7 +92,7 @@ class SlackReservationQueries:
 
     def mine(self, command: SlashCommand, request_id: str) -> SlackReply:
         try:
-            result = self.queries.mine(
+            result = self.queries.mine_labeled(
                 ExternalCommandActor(
                     subject={
                         "provider": "slack",
@@ -104,4 +116,4 @@ class SlackReservationQueries:
                     "blocks": [{"type": "section", "text": plain(text)}],
                 }
             )
-        return SlackReply(personal_reservations(result))
+        return SlackReply(personal_reservations(result.page, result.labels))

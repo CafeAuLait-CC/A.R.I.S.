@@ -188,6 +188,8 @@ def test_slack_mine_is_composed_without_http_user_bindings(slack_mine, settings,
         assert client.get("/internal/reservations/mine").status_code == 404
         response = slash(client, "mine")
         assert response.status_code == 200 and "Private fixture purpose" in response.text
+        assert "node-a" in response.text and "GPU 0" in response.text
+        assert "GPU-target" not in response.text
 
 
 def test_slack_query_refuses_inconsistent_workspace_configuration(

@@ -1,7 +1,7 @@
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from pydantic import ValidationError
 from sqlalchemy.exc import DBAPIError
@@ -278,6 +278,29 @@ class ReservationService:
             else None
         )
         return MineResult(reservations=page, next_cursor=cursor)
+
+    def owned(self, actor: ActorContext, reservation_id: UUID) -> ReservationView:
+        with self.sessions() as session:
+            return self.owned_in_transaction(session, actor, reservation_id)
+
+    def owned_in_transaction(
+        self, session: Session, actor: ActorContext, reservation_id: UUID
+    ) -> ReservationView:
+        with session.no_autoflush:
+            self.access.require_in_transaction(
+                session,
+                AccessRequest(
+                    user_id=actor.actor_id,
+                    permission="reservation.mine",
+                    scope=AccessScope(type="global", id="*"),
+                ),
+            )
+            view = ReservationRepository(session).owned_view(
+                str(actor.actor_id), str(reservation_id)
+            )
+        if view is None:
+            raise DomainError("NOT_FOUND", "Reservation is not available", 404)
+        return view
 
     def _cancel_authority_and_time(
         self, session: Session, execution: CommandExecution, row: Reservation

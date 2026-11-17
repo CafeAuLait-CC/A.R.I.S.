@@ -1,4 +1,5 @@
 import re
+from uuid import UUID
 
 from fastapi import APIRouter, Request
 from pydantic import ValidationError
@@ -69,6 +70,14 @@ def build_router(service: UserReservationSurface) -> APIRouter:
             authorization(request),
             request.state.request_id,
             availability_query(request),
+        )
+        return JSONResponse(result.model_dump(mode="json"), headers={"Cache-Control": "no-store"})
+
+    @router.get("/{reservation_id}")
+    async def detail(reservation_id: UUID, request: Request) -> JSONResponse:
+        query_values(request, set())
+        result = await run_in_threadpool(
+            service.detail, authorization(request), request.state.request_id, reservation_id
         )
         return JSONResponse(result.model_dump(mode="json"), headers={"Cache-Control": "no-store"})
 
