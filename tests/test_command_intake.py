@@ -472,8 +472,10 @@ def test_durable_records_cannot_be_executed_through_old_synchronous_entrypoints(
 def test_nonempty_durable_history_blocks_destructive_downgrade(durable_state):
     intake, sessions, ids, _, _ = durable_state
     queued(durable_state)
+    command.downgrade(Config("alembic.ini"), "0011")
     with pytest.raises(RuntimeError, match="durable command history prevents downgrade"):
         command.downgrade(Config("alembic.ini"), "0010")
+    command.upgrade(Config("alembic.ini"), "head")
     command.check(Config("alembic.ini"))
     assert stored_counts(sessions) == (1, 1, 1, 2)
 

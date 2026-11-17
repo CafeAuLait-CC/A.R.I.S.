@@ -6,7 +6,7 @@ from sqlalchemy import Engine, create_engine, event, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-SCHEMA_REVISION = "0011"
+SCHEMA_REVISION = "0012"
 
 
 class Base(DeclarativeBase):
@@ -29,6 +29,16 @@ def build_engine(url: str) -> Engine:
 
 def session_factory(engine: Engine) -> sessionmaker[Session]:
     return sessionmaker(engine, expire_on_commit=False)
+
+
+def commit_owned_transaction(session: Session) -> None:
+    """Commit our private session; an interrupted commit must not leak pooled work."""
+    connection = session.connection()
+    try:
+        session.commit()
+    except BaseException:
+        connection.invalidate()
+        raise
 
 
 @contextmanager

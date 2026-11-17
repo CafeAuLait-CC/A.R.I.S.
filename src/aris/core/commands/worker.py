@@ -18,6 +18,7 @@ from aris.core.commands.queue_schemas import (
     DurableActorContext,
 )
 from aris.core.contracts import DomainError
+from aris.core.db import commit_owned_transaction
 from aris.core.time import utc
 
 TerminalState = Literal["succeeded", "failed", "expired", "cancelled"]
@@ -226,15 +227,7 @@ class CommandWorker:
                     result = self._finish(job, "succeeded", self.commands._now())
                     session.flush()
                     check_deadline()
-                    try:
-                        session.commit()
-                    except BaseException:
-                        # A Connection.commit listener can raise before DBAPI
-                        # commit while SQLAlchemy marks its transaction inactive.
-                        # Close this physical connection so uncommitted writes
-                        # cannot be reused/read by the recovery transaction.
-                        connection.invalidate()
-                        raise
+                    commit_owned_transaction(session)
                     return result
                 finally:
                     # Session/connection are private to this one worker attempt.

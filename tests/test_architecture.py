@@ -22,7 +22,7 @@ def imports(path, source_root=Path("src")):
 
 
 def private_core_component(module):
-    for component in ("access", "commands"):
+    for component in ("access", "commands", "relay"):
         if module in {
             f"aris.core.{component}.models",
             f"aris.core.{component}.repo",
