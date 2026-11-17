@@ -1,7 +1,7 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from sqlalchemy import case, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -27,6 +27,19 @@ class GpuTargetRecord:
     telemetry_seq: int
     collector_status: Literal["ok", "error", "unknown"]
     collector_health_at: datetime | None
+
+
+@dataclass(frozen=True)
+class StoredUsageMessage:
+    agent_id: str
+    node_id: str
+    message_id: str
+    seq: int
+    message_kind: str
+    observed_at: datetime
+    received_at: datetime
+    fingerprint: str
+    payload: dict[str, Any]
 
 
 class VegaRepository:
@@ -96,6 +109,22 @@ class VegaRepository:
                 AgentMessage.agent_id == agent_id, AgentMessage.message_id == message_id
             )
         )
+
+    def usage_message(self, agent_id: str, message_id: str) -> StoredUsageMessage | None:
+        row = self.session.execute(
+            select(
+                AgentMessage.agent_id,
+                AgentMessage.node_id,
+                AgentMessage.message_id,
+                AgentMessage.seq,
+                AgentMessage.message_kind,
+                AgentMessage.observed_at,
+                AgentMessage.received_at,
+                AgentMessage.fingerprint,
+                AgentMessage.payload,
+            ).where(AgentMessage.agent_id == agent_id, AgentMessage.message_id == message_id)
+        ).one_or_none()
+        return StoredUsageMessage(*row) if row is not None else None
 
     def sequence_exists(self, agent_id: str, seq: int) -> bool:
         return (
