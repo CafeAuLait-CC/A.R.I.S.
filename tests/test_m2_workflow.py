@@ -283,3 +283,7 @@ def test_identity_grants_confirmed_reservations_and_revocation_form_one_internal
         )
         assert set(session.scalars(select(GpuDevice.utilization_percent))) == {99}
         assert set(session.scalars(select(Reservation.status))) == {"cancelled", "completed"}
+        for fact in session.scalars(
+            select(DomainEvent).where(DomainEvent.aggregate_type == "reservation")
+        ):
+            assert fact.payload["owner_id"] == member and fact.payload["administrative"] is False

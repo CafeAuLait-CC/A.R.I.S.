@@ -215,6 +215,8 @@ class ReservationService:
                 causation_id=str(execution.command_id),
                 payload={
                     "reservation_id": reservation_id,
+                    "owner_id": str(execution.actor_id),
+                    "administrative": False,
                     "gpu_uuid": request.gpu_uuid,
                     "start_at": request.start_at.isoformat(),
                     "end_at": request.end_at.isoformat(),
@@ -373,6 +375,8 @@ class ReservationService:
                     causation_id=str(execution.command_id),
                     payload={
                         "reservation_id": row.id,
+                        "owner_id": row.owner_id,
+                        "administrative": False,
                         "gpu_uuid": row.gpu_uuid,
                         "previous_status": "confirmed",
                         "status": "cancelled",
@@ -498,6 +502,8 @@ class ReservationService:
                     causation_id=str(execution.command_id),
                     payload={
                         "reservation_id": row.id,
+                        "owner_id": row.owner_id,
+                        "administrative": False,
                         "gpu_uuid": row.gpu_uuid,
                         "version": version + 1,
                         "previous_status": previous,

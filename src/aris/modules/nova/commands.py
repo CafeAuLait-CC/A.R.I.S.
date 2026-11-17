@@ -4,8 +4,10 @@ from sqlalchemy.orm import Session
 from aris.core.access.schemas import AccessScope, UserPrincipal
 from aris.core.commands.schemas import CommandDefinition, CommandExecution
 from aris.core.commands.service import DatabaseCommand
+from aris.modules.nova.administration import ReservationAdministrationService
 from aris.modules.nova.extension import ReservationExtensionService
 from aris.modules.nova.reservation_schemas import (
+    AdministrativeReservationChange,
     CancelReservation,
     CreateReservation,
     ExtendReservation,
@@ -124,4 +126,66 @@ class ExtendReservationCommand(DatabaseCommand):
     ) -> dict[str, JsonValue]:
         return self.extensions.extend_in_transaction(
             session, execution, principal, ExtendReservation.model_validate(parameters)
+        ).model_dump(mode="json")
+
+
+class CancelAnyReservationCommand(DatabaseCommand):
+    definition = CommandDefinition(
+        name="reservation.cancel_any", required_permission="reservation.cancel_any"
+    )
+
+    def __init__(self, administration: ReservationAdministrationService) -> None:
+        self.administration = administration
+
+    def normalize(self, parameters: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        return AdministrativeReservationChange.model_validate(parameters).model_dump(mode="json")
+
+    def authorization_scope(
+        self, session: Session, parameters: dict[str, JsonValue]
+    ) -> AccessScope:
+        return AccessScope(type="global", id="*")
+
+    def execute(
+        self,
+        session: Session,
+        execution: CommandExecution,
+        principal: UserPrincipal,
+        parameters: dict[str, JsonValue],
+    ) -> dict[str, JsonValue]:
+        return self.administration.cancel_in_transaction(
+            session,
+            execution,
+            principal,
+            AdministrativeReservationChange.model_validate(parameters),
+        ).model_dump(mode="json")
+
+
+class ReleaseAnyReservationCommand(DatabaseCommand):
+    definition = CommandDefinition(
+        name="reservation.release_any", required_permission="reservation.release_any"
+    )
+
+    def __init__(self, administration: ReservationAdministrationService) -> None:
+        self.administration = administration
+
+    def normalize(self, parameters: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        return AdministrativeReservationChange.model_validate(parameters).model_dump(mode="json")
+
+    def authorization_scope(
+        self, session: Session, parameters: dict[str, JsonValue]
+    ) -> AccessScope:
+        return AccessScope(type="global", id="*")
+
+    def execute(
+        self,
+        session: Session,
+        execution: CommandExecution,
+        principal: UserPrincipal,
+        parameters: dict[str, JsonValue],
+    ) -> dict[str, JsonValue]:
+        return self.administration.release_in_transaction(
+            session,
+            execution,
+            principal,
+            AdministrativeReservationChange.model_validate(parameters),
         ).model_dump(mode="json")

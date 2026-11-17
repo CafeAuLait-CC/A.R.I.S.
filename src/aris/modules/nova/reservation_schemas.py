@@ -102,6 +102,29 @@ class ReleaseReservation(OwnerReservationChange):
     pass
 
 
+class AdministrativeReservationChange(OwnerReservationChange):
+    expected_owner_id: UUID
+
+
+class AdministrativeReservationState(AvailabilityContract):
+    id: UUID
+    gpu_uuid: str
+    start_at: AwareDatetime
+    end_at: AwareDatetime
+    status: ReservationStatus
+    version: int = Field(ge=1)
+    updated_at: AwareDatetime
+
+
+class AdministrativeReservationResult(AvailabilityContract):
+    reservation: AdministrativeReservationState
+    owner_id: UUID
+    actor_id: UUID
+    administrative: Literal[True] = True
+    operation: Literal["cancel", "release"]
+    effective_end_at: AwareDatetime | None = None
+
+
 class ReleasedReservation(AvailabilityContract):
     reservation: ReservationView
     released_at: AwareDatetime

@@ -234,7 +234,13 @@ class ReservationExtensionService:
                     actor=str(execution.actor_id),
                     correlation_id=execution.request_id,
                     causation_id=str(execution.command_id),
-                    payload={"reservation_id": row.id, "gpu_uuid": row.gpu_uuid, **change},
+                    payload={
+                        "reservation_id": row.id,
+                        "owner_id": row.owner_id,
+                        "administrative": False,
+                        "gpu_uuid": row.gpu_uuid,
+                        **change,
+                    },
                 )
             )
             session.flush()
