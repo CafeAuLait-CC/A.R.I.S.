@@ -100,17 +100,29 @@ class CommandWorker:
         )
         return self._finish(job, state, now, code)
 
+    def _eligible(self, session: Session, record: CommandRecord) -> bool:
+        return record.command_type in self.commands.commands and (
+            CommandQueueRepository(session).command_namespace(record.id)
+            == (self.intake.namespace.provider, self.intake.namespace.namespace)
+        )
+
     def claim(self) -> CommandClaim | CommandWorkResult | None:
         try:
             with self.sessions.begin() as session:
                 self._budget(session)
                 repo = CommandQueueRepository(session)
-                job = repo.next_job(self.commands._now())
+                job = repo.next_job(
+                    self.commands._now(),
+                    command_types=tuple(self.commands.commands),
+                    namespace=self.intake.namespace,
+                )
                 if job is None:
                     return None
                 record = repo.command(job.command_id, lock=True)
                 if record is None:
                     raise DomainError("DEPENDENCY_UNAVAILABLE", "Job command is missing", 503)
+                if not self._eligible(session, record):
+                    return None
                 terminal = self._terminal(session, job, record)
                 if terminal is not None:
                     return terminal
@@ -169,6 +181,8 @@ class CommandWorker:
                 record = repo.command(job.command_id, lock=True)
                 if record is None:
                     raise DomainError("DEPENDENCY_UNAVAILABLE", "Job command is missing", 503)
+                if not self._eligible(session, record):
+                    return self._lost(claim)
                 terminal = self._terminal(session, job, record)
                 if terminal is not None:
                     return terminal
@@ -258,6 +272,8 @@ class CommandWorker:
                 record = repo.command(job.command_id, lock=True)
                 if record is None:
                     raise DomainError("DEPENDENCY_UNAVAILABLE", "Job command is missing", 503)
+                if not self._eligible(session, record):
+                    return self._lost(claim)
                 terminal = self._terminal(session, job, record)
                 if terminal is not None:
                     return terminal

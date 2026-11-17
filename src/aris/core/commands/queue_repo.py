@@ -8,6 +8,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
+from aris.core.access.admin_schemas import IdentityNamespace
 from aris.core.commands.models import (
     CommandAdmission,
     CommandIntakeReceipt,
@@ -150,17 +151,32 @@ class CommandQueueRepository:
             statement = statement.with_for_update()
         return self.session.scalar(statement)
 
-    def next_job(self, now: datetime) -> CommandJob | None:
+    def command_namespace(self, command_id: str) -> tuple[str, str] | None:
+        row = self.session.execute(
+            select(CommandAdmission.provider, CommandAdmission.namespace).where(
+                CommandAdmission.command_id == command_id
+            )
+        ).one_or_none()
+        return (row[0], row[1]) if row else None
+
+    def next_job(
+        self, now: datetime, *, command_types: tuple[str, ...], namespace: IdentityNamespace
+    ) -> CommandJob | None:
         return self.session.scalar(
             select(CommandJob)
+            .join(CommandRecord, CommandRecord.id == CommandJob.command_id)
+            .join(CommandAdmission, CommandAdmission.command_id == CommandRecord.id)
             .where(
+                CommandRecord.command_type.in_(command_types),
+                CommandAdmission.provider == namespace.provider,
+                CommandAdmission.namespace == namespace.namespace,
                 or_(
                     and_(CommandJob.state == "queued", CommandJob.available_at <= now),
                     and_(CommandJob.state == "running", CommandJob.lease_expires_at <= now),
-                )
+                ),
             )
             .order_by(CommandJob.available_at, CommandJob.created_at, CommandJob.id)
             .limit(1)
-            .with_for_update(skip_locked=True)
+            .with_for_update(of=CommandJob, skip_locked=True)
             .execution_options(populate_existing=True)
         )
