@@ -134,6 +134,21 @@ class ReservationRepository:
         ).one_or_none()
         return (row[0], row[1]) if row is not None else None
 
+    def current_occupancy(
+        self, gpu_uuids: tuple[str, ...], at: datetime
+    ) -> dict[str, tuple[int, datetime]]:
+        rows = self.session.execute(
+            select(Reservation.gpu_uuid, func.count(), func.min(Reservation.end_at))
+            .where(
+                Reservation.gpu_uuid.in_(gpu_uuids),
+                Reservation.status.in_(BLOCKING_STATUSES),
+                Reservation.start_at <= at,
+                Reservation.end_at > at,
+            )
+            .group_by(Reservation.gpu_uuid)
+        )
+        return {row[0]: (int(row[1]), row[2]) for row in rows}
+
     def lock_reservation(self, reservation_id: str) -> Reservation | None:
         return self.session.scalar(
             select(Reservation)
