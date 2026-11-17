@@ -16,12 +16,12 @@ from aris.core.commands.gateway import UserCommandGateway
 from aris.core.commands.gateway_schemas import (
     ExternalCommandActor,
     ExternalCommandSubmit,
-    GatewayLimits,
     UserCommandInput,
 )
 from aris.core.commands.schemas import CommandReview, PendingConfirmation
 from aris.core.contracts import DomainError
 from aris.core.time import utc
+from aris.interfaces.reservations.schemas import ReservationQueryLimits
 from aris.interfaces.reservations.service import PersonalReservationQueries
 from aris.interfaces.slack.client import ModalPublisher
 from aris.interfaces.slack.config import SlackSettings
@@ -95,7 +95,7 @@ class ReservationReviewPresenter:
         self,
         sessions: sessionmaker[Session],
         targets: VegaTargetService,
-        limits: GatewayLimits,
+        limits: ReservationQueryLimits,
         queries: PersonalReservationQueries,
         *,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),

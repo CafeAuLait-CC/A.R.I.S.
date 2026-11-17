@@ -5,6 +5,18 @@ from aris.modules.nova.reservation_schemas import MineResult, ReservationView
 from aris.modules.vega.target_schemas import GpuInventoryLabel
 
 
+class ReservationQueryLimits(AccessContract):
+    lock_timeout_ms: int = Field(default=100, gt=0, le=1000, strict=True)
+    statement_timeout_ms: int = Field(default=1000, gt=0, le=5000, strict=True)
+    transaction_timeout_ms: int = Field(default=3000, gt=0, le=10000, strict=True)
+
+    @model_validator(mode="after")
+    def ordered_budgets(self) -> "ReservationQueryLimits":
+        if not self.lock_timeout_ms < self.statement_timeout_ms < self.transaction_timeout_ms:
+            raise ValueError("reservation read budgets must increase")
+        return self
+
+
 class LabeledMinePage(AccessContract):
     page: MineResult = Field(repr=False)
     labels: tuple[GpuInventoryLabel, ...] = Field(default=(), max_length=50)

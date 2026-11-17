@@ -34,6 +34,7 @@ from aris.interfaces.commands.service import UserCommandSurface
 from aris.interfaces.identity.service import IdentityAdminSurface, IdentityQueryLimits
 from aris.interfaces.identity.slack_directory import SlackDirectoryClient, SlackDirectoryProvider
 from aris.interfaces.notifications.service import NotificationAdminSurface
+from aris.interfaces.reservations.schemas import ReservationQueryLimits
 from aris.interfaces.reservations.service import PersonalReservationQueries, UserReservationSurface
 from aris.interfaces.slack.client import HomePublisher, ModalPublisher, SlackClient
 from aris.interfaces.slack.config import SlackSettings
@@ -106,6 +107,7 @@ class M2RuntimeConfig(AccessContract):
     notification_query_limits: NotificationQueryLimits = Field(
         default_factory=NotificationQueryLimits
     )
+    reservation_query_limits: ReservationQueryLimits = Field(default_factory=ReservationQueryLimits)
 
     @model_validator(mode="after")
     def explicit_authorities(self) -> "M2RuntimeConfig":
@@ -290,7 +292,7 @@ def build_m2_components(
     )
     gateway = UserCommandGateway(intake, config.commands, config.gateway_limits)
     personal_queries = PersonalReservationQueries(
-        sessions, reservations, config.namespace, config.gateway_limits, labels=targets
+        sessions, reservations, config.namespace, config.reservation_query_limits, labels=targets
     )
     user_api = (
         UserCommandSurface(
@@ -304,7 +306,7 @@ def build_m2_components(
     )
     publisher = modal_publisher or SlackClient(slack)
     review_presenter = ReservationReviewPresenter(
-        sessions, targets, config.gateway_limits, personal_queries, clock=clock
+        sessions, targets, config.reservation_query_limits, personal_queries, clock=clock
     )
     callbacks = (
         SlackCommandAdapter(gateway, publisher, review_presenter)
@@ -332,7 +334,7 @@ def build_m2_components(
             config.namespace,
             targets,
             ReservationOccupancyService(sessions, clock=clock),
-            config.gateway_limits,
+            config.reservation_query_limits,
             clock,
         )
         if config.reservation_home

@@ -11,11 +11,15 @@ from aris.core.access.admin_schemas import IdentityNamespace
 from aris.core.access.schemas import AccessRequest, AccessScope, UserPrincipal
 from aris.core.access.service import AccessService
 from aris.core.commands.budgets import transaction_budget
-from aris.core.commands.gateway_schemas import ExternalCommandActor, GatewayLimits
+from aris.core.commands.gateway_schemas import ExternalCommandActor
 from aris.core.commands.schemas import ActorContext
 from aris.core.contracts import DomainError
 from aris.interfaces.commands.auth import UserCommandAuthenticator
-from aris.interfaces.reservations.schemas import LabeledMinePage, OwnedReservationDetail
+from aris.interfaces.reservations.schemas import (
+    LabeledMinePage,
+    OwnedReservationDetail,
+    ReservationQueryLimits,
+)
 from aris.modules.nova.availability_schemas import AvailabilityQuery, AvailabilityResult
 from aris.modules.nova.reservation_schemas import MineQuery, MineResult
 from aris.modules.nova.reservation_service import ReservationService
@@ -43,7 +47,7 @@ class PersonalReservationQueries:
         sessions: sessionmaker[Session],
         reservations: ReservationService,
         namespace: IdentityNamespace,
-        limits: GatewayLimits,
+        limits: ReservationQueryLimits,
         labels: GpuLabels | None = None,
     ) -> None:
         self.sessions, self.reservations = sessions, reservations

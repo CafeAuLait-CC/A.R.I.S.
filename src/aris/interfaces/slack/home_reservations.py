@@ -13,9 +13,9 @@ from aris.core.access.admin_schemas import IdentityNamespace
 from aris.core.access.schemas import AccessContract, AccessRequest, AccessScope, ExternalSubject
 from aris.core.access.service import AccessService
 from aris.core.commands.budgets import transaction_budget
-from aris.core.commands.gateway_schemas import GatewayLimits
 from aris.core.contracts import DomainError
 from aris.core.time import utc
+from aris.interfaces.reservations.schemas import ReservationQueryLimits
 from aris.interfaces.slack.config import SlackSettings
 from aris.modules.nova.occupancy import ReservationOccupancyService
 from aris.modules.nova.occupancy_schemas import CurrentReservationQuery
@@ -56,7 +56,7 @@ class HomeReservationSource:
         namespace: IdentityNamespace,
         targets: VegaTargetService,
         reservations: ReservationOccupancyService,
-        limits: GatewayLimits,
+        limits: ReservationQueryLimits,
         clock: Callable[[], datetime],
     ) -> None:
         self.sessions, self.namespace, self.targets = sessions, namespace, targets
