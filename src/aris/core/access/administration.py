@@ -18,6 +18,7 @@ from aris.core.access.admin_schemas import (
     BindRole,
     BootstrapRequest,
     BootstrapResult,
+    BootstrapStatus,
     ChangeOutcome,
     DefineRole,
     DirectoryChange,
@@ -148,14 +149,36 @@ class AccessAdministrationService:
             session.flush()
             session.add(OutboxEntry(event_id=event_id, created_at=now))
 
-    def bootstrap(self, request: BootstrapRequest) -> BootstrapResult:
+    def _operator(self, proof: SecretStr) -> None:
         if self.operator_key is None:
             raise DomainError("DEPENDENCY_UNAVAILABLE", "Identity bootstrap is not configured", 503)
         if not hmac.compare_digest(
             self.operator_key.get_secret_value().encode(),
-            request.operator_proof.get_secret_value().encode(),
+            proof.get_secret_value().encode(),
         ):
             raise DomainError("PERMISSION_DENIED", "Operator authorization is invalid", 403)
+
+    def bootstrap_status(self, operator_proof: SecretStr) -> BootstrapStatus:
+        self._operator(operator_proof)
+        with self.sessions() as session, session.no_autoflush:
+            repo = AccessAdministrationRepository(session)
+            state = repo.directory_snapshot()
+            if state is not None and state[3]:
+                if state[0] is None or state[1] is None:
+                    raise DomainError(
+                        "DEPENDENCY_UNAVAILABLE", "Directory namespace is invalid", 503
+                    )
+                return BootstrapStatus(
+                    state="initialized",
+                    revision=state[2],
+                    namespace=IdentityNamespace(provider=state[0], namespace=state[1]),
+                )
+            return BootstrapStatus(
+                state="adoption_required" if repo.has_existing_directory() else "empty", revision=0
+            )
+
+    def bootstrap(self, request: BootstrapRequest) -> BootstrapResult:
+        self._operator(request.operator_proof)
         self._subject(request.subject)
         with self.sessions.begin() as session:
             repo = AccessAdministrationRepository(session)

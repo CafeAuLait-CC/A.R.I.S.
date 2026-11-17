@@ -56,6 +56,12 @@ class BootstrapResult(AccessContract):
     revision: int = Field(ge=1)
 
 
+class BootstrapStatus(AccessContract):
+    state: Literal["empty", "initialized", "adoption_required"]
+    revision: int = Field(ge=0)
+    namespace: IdentityNamespace | None = None
+
+
 class RegistrationMapping(AccessContract):
     node_id: Identifier
     os_username: Identifier
