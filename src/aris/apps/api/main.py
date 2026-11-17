@@ -25,6 +25,8 @@ from aris.core.contracts import DomainError, ErrorDetail, ErrorResponse
 from aris.core.db import SCHEMA_REVISION, build_engine, check_database, session_factory
 from aris.interfaces.commands.api import build_router as build_command_router
 from aris.interfaces.commands.service import UserCommandSurface
+from aris.interfaces.reservations.api import build_router as build_reservation_router
+from aris.interfaces.reservations.service import UserReservationSurface
 from aris.interfaces.slack.api import build_router as build_slack_router
 from aris.interfaces.slack.config import SlackSettings
 from aris.interfaces.slack.service import SlackService
@@ -56,12 +58,15 @@ def create_app(
     *,
     user_commands: UserCommandSurface | None = None,
     slack_commands: SlackCommandAdapter | None = None,
+    user_reservations: UserReservationSurface | None = None,
     m2_config: M2RuntimeConfig | None = None,
 ) -> FastAPI:
     config = settings or Settings()
     slack_config = slack_settings or SlackSettings()
     if m2_config is not None:
-        if user_commands is not None or slack_commands is not None:
+        if any(
+            surface is not None for surface in (user_commands, slack_commands, user_reservations)
+        ):
             raise ValueError("M2 configuration and explicit command surfaces cannot be combined")
         validate_m2_configuration(config, slack_config, m2_config)
     if slack_commands is not None:
@@ -72,6 +77,16 @@ def create_app(
             [
                 config.read_token,
                 *(credential.token for credential in config.agent_credentials.values()),
+            ],
+        )
+    if user_reservations is not None:
+        user_reservations.validate_configuration(
+            config.environment,
+            [
+                config.read_token,
+                *(credential.token for credential in config.agent_credentials.values()),
+                slack_config.bot_token,
+                slack_config.signing_secret,
             ],
         )
     engine = build_engine(config.database_url)
@@ -93,6 +108,7 @@ def create_app(
             engine.dispose()
             raise
         user_commands, slack_commands = components.user_api, components.slack_callbacks
+        user_reservations = components.user_reservations
     app.state.m2 = components
     vega = VegaService(sessions, config)
     app.include_router(build_router(vega, config))
@@ -105,6 +121,8 @@ def create_app(
     )
     if user_commands is not None:
         app.include_router(build_command_router(user_commands))
+    if user_reservations is not None:
+        app.include_router(build_reservation_router(user_reservations))
 
     @app.middleware("http")
     async def request_context(
@@ -116,10 +134,15 @@ def create_app(
         )
         response = await call_next(request)
         response.headers["X-Request-ID"] = request.state.request_id
-        if user_commands is not None and (
+        private_query = user_reservations is not None and (
+            request.url.path == "/internal/reservations"
+            or request.url.path.startswith("/internal/reservations/")
+        )
+        private_command = user_commands is not None and (
             request.url.path == "/internal/commands"
             or request.url.path.startswith("/internal/commands/")
-        ):
+        )
+        if private_query or private_command:
             response.headers["Cache-Control"] = "no-store"
             response.headers["Pragma"] = "no-cache"
         return response

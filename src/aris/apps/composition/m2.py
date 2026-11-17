@@ -24,6 +24,7 @@ from aris.core.relay.schemas import RelayLimits
 from aris.core.relay.service import EventRelay
 from aris.interfaces.commands.auth import BoundSubjectTokens, UserTokenBinding
 from aris.interfaces.commands.service import UserCommandSurface
+from aris.interfaces.reservations.service import UserReservationSurface
 from aris.interfaces.slack.client import ModalPublisher, SlackClient
 from aris.interfaces.slack.config import SlackSettings
 from aris.interfaces.slack.notifications import SlackNotificationTransport
@@ -146,6 +147,7 @@ def validate_m2_configuration(
 class M2Components:
     intake: CommandIntakeService
     user_api: UserCommandSurface | None
+    user_reservations: UserReservationSurface | None
     slack_callbacks: SlackCommandAdapter | None
     commands: CommandWorker
     events: EventRelay
@@ -251,10 +253,21 @@ def build_m2_components(
         else None
     )
     return M2Components(
-        intake,
-        user_api,
-        callbacks,
-        CommandWorker(intake, config.command_worker_limits),
-        relay,
-        dispatcher,
+        intake=intake,
+        user_api=user_api,
+        user_reservations=(
+            UserReservationSurface(
+                sessions,
+                reservations,
+                config.namespace,
+                user_api.authentication,
+                config.gateway_limits,
+            )
+            if user_api is not None
+            else None
+        ),
+        slack_callbacks=callbacks,
+        commands=CommandWorker(intake, config.command_worker_limits),
+        events=relay,
+        notifications=dispatcher,
     )

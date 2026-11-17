@@ -123,6 +123,10 @@ def test_composed_api_workers_process_reservation_and_preserve_disabled_delivery
         assert KEY.get_secret_value() not in repr(
             report
         ) and "Private composed fixture" not in repr(report)
+        mine = client.get("/internal/reservations/mine", headers=headers())
+        assert mine.status_code == 200
+        assert mine.json()["reservations"][0]["purpose"] == "Private composed fixture"
+        assert mine.headers["Cache-Control"] == "no-store"
     transport = FixtureTransport(sessions)
     enabled = build_m2_components(
         sessions,
@@ -140,7 +144,9 @@ def test_default_and_explicit_but_no_ingress_config_do_not_mount_user_routes(boo
     with TestClient(create_app(settings, slack(), m2_config=cfg)) as client:
         assert client.app.state.m2 is not None
         assert client.app.state.m2.user_api is None and client.app.state.m2.slack_callbacks is None
+        assert client.app.state.m2.user_reservations is None
         assert client.post("/internal/commands", json={}).status_code == 404
+        assert client.get("/internal/reservations/mine").status_code == 404
     with TestClient(create_app(settings, SlackSettings(_env_file=None))) as client:
         assert client.app.state.m2 is None
 
