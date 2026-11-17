@@ -64,12 +64,23 @@ class NotificationDispatcher:
     def _lost(claim: NotificationClaim) -> NotificationResult:
         return NotificationResult(notification_id=claim.notification_id, state="lost_claim")
 
+    def _eligible(self, record: NotificationOutbox) -> bool:
+        return (
+            record.provider == self.service.namespace.provider
+            and record.namespace == self.service.namespace.namespace
+            and record.template_id in self.service.templates
+        )
+
     def claim(self) -> NotificationClaim | NotificationResult | None:
         try:
             with self.sessions.begin() as session:
                 self._budget(session)
                 repo = NotificationRepository(session)
-                record = repo.next_notification(self.service.now())
+                record = repo.next_notification(
+                    self.service.now(),
+                    namespace=self.service.namespace,
+                    template_ids=tuple(self.service.templates),
+                )
                 if record is None:
                     return None
                 if record.state == "running":
@@ -137,7 +148,7 @@ class NotificationDispatcher:
                 self._budget(session)
                 repo = NotificationRepository(session)
                 record = repo.notification(str(claim.notification_id), lock=True)
-                if record is None or not self._owned(record, claim):
+                if record is None or not self._eligible(record) or not self._owned(record, claim):
                     return self._lost(claim)
                 attempt = repo.attempt(str(claim.attempt_id))
                 if (
@@ -193,6 +204,7 @@ class NotificationDispatcher:
                 attempt = repo.attempt(str(claim.attempt_id))
                 if (
                     record is None
+                    or not self._eligible(record)
                     or attempt is None
                     or attempt.notification_id != record.id
                     or attempt.attempt != claim.attempt

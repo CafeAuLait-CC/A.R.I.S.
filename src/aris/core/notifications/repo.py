@@ -6,6 +6,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
+from aris.core.access.admin_schemas import IdentityNamespace
 from aris.core.notifications.models import NotificationAttempt, NotificationOutbox
 
 
@@ -40,10 +41,15 @@ class NotificationRepository:
     def attempt(self, attempt_id: str) -> NotificationAttempt | None:
         return self.session.get(NotificationAttempt, attempt_id, populate_existing=True)
 
-    def next_notification(self, now: datetime) -> NotificationOutbox | None:
+    def next_notification(
+        self, now: datetime, *, namespace: IdentityNamespace, template_ids: tuple[str, ...]
+    ) -> NotificationOutbox | None:
         return self.session.scalar(
             select(NotificationOutbox)
             .where(
+                NotificationOutbox.provider == namespace.provider,
+                NotificationOutbox.namespace == namespace.namespace,
+                NotificationOutbox.template_id.in_(template_ids),
                 or_(
                     and_(
                         NotificationOutbox.state == "queued", NotificationOutbox.available_at <= now
@@ -52,7 +58,7 @@ class NotificationRepository:
                         NotificationOutbox.state == "running",
                         NotificationOutbox.lease_expires_at <= now,
                     ),
-                )
+                ),
             )
             .order_by(
                 NotificationOutbox.available_at,
