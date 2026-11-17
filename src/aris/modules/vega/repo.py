@@ -45,6 +45,17 @@ class VegaRepository:
             else None
         )
 
+    def gpu_labels(self, gpu_uuids: tuple[str, ...]) -> tuple[GpuInventoryLabel, ...]:
+        rows = self.session.execute(
+            select(GpuDevice.gpu_uuid, GpuDevice.node_id, GpuDevice.index, GpuDevice.model)
+            .where(GpuDevice.gpu_uuid.in_(gpu_uuids))
+            .order_by(GpuDevice.gpu_uuid)
+        )
+        return tuple(
+            GpuInventoryLabel(gpu_uuid=row[0], node_id=row[1], index=row[2], model=row[3])
+            for row in rows
+        )
+
     def lock_node(self, batch: AgentReport, now: datetime) -> Node | None:
         dialect = self.session.get_bind().dialect.name
         insert = sqlite_insert if dialect == "sqlite" else pg_insert

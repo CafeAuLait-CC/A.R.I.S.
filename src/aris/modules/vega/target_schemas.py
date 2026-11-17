@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import AwareDatetime, ConfigDict, Field
+from pydantic import AwareDatetime, ConfigDict, Field, model_validator
 
 from aris.core.contracts import Contract
 
@@ -15,6 +15,19 @@ class GpuInventoryLabel(Contract):
     node_id: str
     index: int = Field(ge=0)
     model: str = Field(min_length=1, max_length=256)
+
+
+class GpuLabelQuery(Contract):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    gpu_uuids: tuple[str, ...] = Field(min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def bounded_unique(self) -> "GpuLabelQuery":
+        if len(set(self.gpu_uuids)) != len(self.gpu_uuids) or any(
+            not 1 <= len(value) <= 128 for value in self.gpu_uuids
+        ):
+            raise ValueError("GPU labels require bounded unique targets")
+        return self
 
 
 class GpuTargetFact(Contract):

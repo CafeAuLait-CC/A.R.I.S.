@@ -5,6 +5,7 @@ import json
 import math
 from typing import Any, Literal
 
+from aris.interfaces.slack.home_reservations import HomeReservationSnapshot
 from aris.interfaces.slack.presentation import escape, markdown, plain, slack_time
 from aris.interfaces.slack.vram_assets import asset_name
 from aris.modules.vega.resource_schemas import NodeResourceStatus, ResourceStatus
@@ -41,15 +42,60 @@ def gpu_current(entry: NodeResourceStatus, gpu: GpuStatus) -> bool:
     )
 
 
-def state_text(entry: NodeResourceStatus, gpu: GpuStatus) -> str:
+def state_text(
+    entry: NodeResourceStatus,
+    gpu: GpuStatus,
+    reservations: HomeReservationSnapshot | None = None,
+) -> str:
+    reservation = reservations.state_for(entry.node.node_id, gpu.gpu_uuid) if reservations else None
     if not gpu_current(entry, gpu):
-        return "Not detected" if not gpu.present else "Unknown"
+        hardware = "Not detected" if not gpu.present else "Unknown"
+        return hardware + (" · Reserved" if reservation == "occupied" else "")
     if gpu.observed_state != "busy":
+        if reservation == "occupied":
+            return "Reserved"
+        if reservation == "unknown":
+            return "Reservation unknown"
         return "Available"
-    return "In use · " + owner_text(entry, gpu)
+    return (
+        "In use · " + owner_text(entry, gpu) + (" · Reserved" if reservation == "occupied" else "")
+    )
 
 
-def node_summary(entry: NodeResourceStatus) -> str:
+def node_summary(
+    entry: NodeResourceStatus, reservations: HomeReservationSnapshot | None = None
+) -> str:
+    if reservations is not None:
+        states = [
+            reservations.state_for(entry.node.node_id, gpu.gpu_uuid) for gpu in entry.node.gpus
+        ]
+        available = sum(
+            gpu_current(entry, gpu) and gpu.observed_state == "idle" and state == "unoccupied"
+            for gpu, state in zip(entry.node.gpus, states, strict=True)
+        )
+        busy = sum(
+            gpu_current(entry, gpu) and gpu.observed_state == "busy" for gpu in entry.node.gpus
+        )
+        unknown = sum(
+            not gpu_current(entry, gpu) or (gpu.observed_state == "idle" and state == "unknown")
+            for gpu, state in zip(entry.node.gpus, states, strict=True)
+        )
+        occupied, missing = states.count("occupied"), states.count("unknown")
+        reservation_text = (
+            f"{occupied} reserved" if not missing or occupied else "Reservations unknown"
+        )
+        if not entry.node.gpus:
+            reservation_text = "Reservations unknown"
+        if occupied and missing:
+            reservation_text += f" · {missing} reservation unknown"
+        if not available and not busy and (unknown or not entry.node.gpus):
+            return f"*GPU availability unknown* · {reservation_text} · " + (
+                f"{unknown} unknown" if entry.node.gpus else "inventory not reported"
+            )
+        noun = "GPU" if available == 1 else "GPUs"
+        return f"*{available} {noun} available* · {busy} in use · {reservation_text}" + (
+            f" · {unknown} unknown" if unknown else ""
+        )
     counts = {
         state: sum(
             gpu_current(entry, gpu) and gpu.observed_state == state for gpu in entry.node.gpus
@@ -179,12 +225,13 @@ def device_blocks(
     asset_base_url: str | None,
     *,
     show_title: bool = True,
+    reservations: HomeReservationSnapshot | None = None,
 ) -> list[dict[str, Any]]:
     percent = memory_percent(entry, gpu)
     blocks = [section(f"*GPU {gpu.index} · {escape(gpu.model)}*")] if show_title else []
     blocks.extend(
         [
-            context(state_text(entry, gpu)),
+            context(state_text(entry, gpu, reservations)),
             {
                 "type": "section",
                 "fields": [
@@ -224,9 +271,12 @@ def device_blocks(
 
 
 def device_layout(
-    entry: NodeResourceStatus, pair: list[GpuStatus], asset_base_url: str | None
+    entry: NodeResourceStatus,
+    pair: list[GpuStatus],
+    asset_base_url: str | None,
+    reservations: HomeReservationSnapshot | None = None,
 ) -> dict[str, Any]:
-    devices = [device_blocks(entry, gpu, asset_base_url) for gpu in pair]
+    devices = [device_blocks(entry, gpu, asset_base_url, reservations=reservations) for gpu in pair]
     return {
         "type": "layout",
         "label": (entry.node.node_id + " GPU observations")[:150],
@@ -246,7 +296,11 @@ def device_layout(
                             "title": plain(f"GPU {gpu.index} · {gpu.model}"[:150]),
                             "width": "narrow",
                             "child_blocks": device_blocks(
-                                entry, gpu, asset_base_url, show_title=False
+                                entry,
+                                gpu,
+                                asset_base_url,
+                                show_title=False,
+                                reservations=reservations,
                             ),
                         },
                     }
@@ -273,6 +327,7 @@ def home_view(
     *,
     asset_base_url: str | None = None,
     layout: HomeLayout = "two-column",
+    reservations: HomeReservationSnapshot | None = None,
 ) -> dict[str, Any]:
     if layout not in {"two-column", "single-column"}:
         raise ValueError("unsupported Home layout")
@@ -321,9 +376,15 @@ def home_view(
         node_blocks: list[dict[str, Any]] = [
             {"type": "divider"},
             node_heading(node.node_id, health[node.status]),
-            section(node_summary(entry)),
+            section(node_summary(entry, reservations)),
             context(system_text(entry)),
         ]
+        if reservations is not None and any(
+            reservations.state_for(node.node_id, gpu.gpu_uuid) == "occupied"
+            and (not gpu_current(entry, gpu) or gpu.observed_state == "busy")
+            for gpu in node.gpus
+        ):
+            node_blocks.append(context("Reserved counts are independent of hardware use."))
         if node.telemetry_status != "CURRENT":
             node_blocks.append(context(quality[node.telemetry_status]))
         if cost + len(node_blocks) + 3 > 98:
@@ -338,9 +399,9 @@ def home_view(
         for index in range(0, len(node.gpus), stride):
             pair = node.gpus[index : index + stride]
             unit = (
-                [device_layout(entry, pair, asset_base_url)]
+                [device_layout(entry, pair, asset_base_url, reservations)]
                 if layout == "two-column"
-                else device_blocks(entry, pair[0], asset_base_url)
+                else device_blocks(entry, pair[0], asset_base_url, reservations=reservations)
             )
             unit_cost = sum(block_cost(block) for block in unit)
             if cost + unit_cost > 98:
@@ -382,13 +443,17 @@ def unavailable_details_view(message: str) -> dict[str, Any]:
     return result
 
 
-def details_view(entry: NodeResourceStatus, gpu: GpuStatus) -> dict[str, Any]:
+def details_view(
+    entry: NodeResourceStatus,
+    gpu: GpuStatus,
+    reservations: HomeReservationSnapshot | None = None,
+) -> dict[str, Any]:
     percent = memory_percent(entry, gpu)
     known = percent is not None
     metric = memory_range(gpu) if known else "Unknown"
     fields = [
         ("Node", escape(entry.node.node_id)),
-        ("Status", state_text(entry, gpu)),
+        ("Status", state_text(entry, gpu, reservations)),
         ("VRAM", metric),
         ("Memory occupancy", f"{percent}%" if known else "Unknown"),
         ("GPU utilization", f"{gpu.utilization_percent}%" if known else "Unknown"),

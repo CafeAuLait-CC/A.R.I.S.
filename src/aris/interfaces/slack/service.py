@@ -11,6 +11,7 @@ from uuid import uuid4
 from pydantic import ValidationError
 from sqlalchemy.orm import Session, sessionmaker
 
+from aris.core.access.schemas import ExternalSubject
 from aris.core.audit import AuditEntry
 from aris.core.contracts import DomainError
 from aris.interfaces.slack.client import ModalPublisher, SlackClient, SlackDeliveryError
@@ -21,6 +22,7 @@ from aris.interfaces.slack.home import (
     loading_details_view,
     unavailable_details_view,
 )
+from aris.interfaces.slack.home_reservations import HomeReservationSource
 from aris.interfaces.slack.presentation import resource_text
 from aris.interfaces.slack.repo import SlackRepository
 from aris.interfaces.slack.reservation_drafts import SlackReservationDrafts
@@ -64,6 +66,7 @@ class SlackService:
         command_adapter: SlackCommandAdapter | None = None,
         reservation_queries: SlackReservationQueries | None = None,
         reservation_drafts: SlackReservationDrafts | None = None,
+        home_reservations: HomeReservationSource | None = None,
     ) -> None:
         self.sessions = sessions
         self.config = config
@@ -72,6 +75,9 @@ class SlackService:
         self.command_adapter = command_adapter
         self.reservation_queries = reservation_queries
         self.reservation_drafts = reservation_drafts
+        self.home_reservations = home_reservations
+        if home_reservations is not None:
+            home_reservations.validate_configuration(config)
         if command_adapter is not None:
             command_adapter.validate_configuration(config)
         if reservation_queries is not None:
@@ -293,7 +299,15 @@ class SlackService:
                         "No observation exists for this node or GPU. Refresh Home."
                     )
                 else:
-                    view = details_view(entry, gpu)
+                    reservations = (
+                        self.home_reservations.snapshot(
+                            ExternalSubject(provider="slack", namespace=team, external_id=user),
+                            snapshot,
+                        )
+                        if self.home_reservations is not None
+                        else None
+                    )
+                    view = details_view(entry, gpu, reservations)
             except Exception:
                 error_code = "dependency_unavailable"
                 view = unavailable_details_view(

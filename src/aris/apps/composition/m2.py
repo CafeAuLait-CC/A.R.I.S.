@@ -25,8 +25,10 @@ from aris.core.relay.service import EventRelay
 from aris.interfaces.commands.auth import BoundSubjectTokens, UserTokenBinding
 from aris.interfaces.commands.service import UserCommandSurface
 from aris.interfaces.reservations.service import PersonalReservationQueries, UserReservationSurface
-from aris.interfaces.slack.client import ModalPublisher, SlackClient
+from aris.interfaces.slack.client import HomePublisher, ModalPublisher, SlackClient
 from aris.interfaces.slack.config import SlackSettings
+from aris.interfaces.slack.dispatch import SlackDispatcher
+from aris.interfaces.slack.home_reservations import HomeReservationSource
 from aris.interfaces.slack.notifications import SlackNotificationTransport
 from aris.interfaces.slack.reservation_drafts import (
     ReservationReviewPresenter,
@@ -50,7 +52,9 @@ from aris.modules.nova.notifications import (
     ReservationNoticeTemplate,
     ReservationNotificationConsumer,
 )
+from aris.modules.nova.occupancy import ReservationOccupancyService
 from aris.modules.nova.reservation_service import ReservationService
+from aris.modules.vega.service import VegaService
 from aris.modules.vega.target_service import VegaTargetService
 
 CommandName = Literal[
@@ -61,7 +65,7 @@ CommandName = Literal[
     "reservation.cancel_any",
     "reservation.release_any",
 ]
-WorkerMode = Literal["commands", "events", "notifications", "all"]
+WorkerMode = Literal["commands", "events", "notifications", "home", "all"]
 
 
 class M2RuntimeConfig(AccessContract):
@@ -80,6 +84,7 @@ class M2RuntimeConfig(AccessContract):
     user_tokens: tuple[UserTokenBinding, ...] = Field(default=(), max_length=128, repr=False)
     slack_callbacks: bool = Field(default=False, strict=True)
     notification_delivery: bool = Field(default=False, strict=True)
+    reservation_home: bool = Field(default=False, strict=True)
 
     @model_validator(mode="after")
     def explicit_authorities(self) -> "M2RuntimeConfig":
@@ -138,7 +143,7 @@ def validate_m2_configuration(
         )
         if settings.environment == "production" and auth.development_only:
             raise ValueError("development user credentials cannot enable production commands")
-    if config.slack_callbacks and (
+    if (config.slack_callbacks or config.reservation_home) and (
         not slack.configured or slack.team_id != config.namespace.namespace
     ):
         raise ValueError("Slack callbacks require the configured identity workspace")
@@ -159,12 +164,16 @@ class M2Components:
     commands: CommandWorker
     events: EventRelay
     notifications: NotificationDispatcher | None
+    home_reservations: HomeReservationSource | None
+    home: SlackDispatcher | None
 
     def run_once(self, mode: WorkerMode) -> dict[str, JsonValue]:
-        if mode not in {"commands", "events", "notifications", "all"}:
+        if mode not in {"commands", "events", "notifications", "home", "all"}:
             raise ValueError("unsupported M2 worker mode")
         if mode == "notifications" and self.notifications is None:
             raise ValueError("notification delivery is disabled")
+        if mode == "home" and self.home is None:
+            raise ValueError("reservation Home is disabled")
         report: dict[str, JsonValue] = {"mode": "m2-" + mode}
         if mode in {"commands", "all"}:
             result = self.commands.run_once()
@@ -182,6 +191,8 @@ class M2Components:
                 report["notification"] = (
                     notification.model_dump(mode="json") if notification is not None else None
                 )
+        if mode in {"home", "all"} and self.home is not None:
+            report["home"] = self.home.run_once().model_dump(mode="json")
         return report
 
 
@@ -194,6 +205,7 @@ def build_m2_components(
     clock: Callable[[], datetime] | None = None,
     notification_transport: NotificationTransport | None = None,
     modal_publisher: ModalPublisher | None = None,
+    home_publisher: HomePublisher | None = None,
 ) -> M2Components:
     validate_m2_configuration(settings, slack, config)
     clock = clock or (lambda: datetime.now(UTC))
@@ -264,6 +276,18 @@ def build_m2_components(
         if config.notification_delivery
         else None
     )
+    home_reservations = (
+        HomeReservationSource(
+            sessions,
+            config.namespace,
+            targets,
+            ReservationOccupancyService(sessions, clock=clock),
+            config.gateway_limits,
+            clock,
+        )
+        if config.reservation_home
+        else None
+    )
     return M2Components(
         intake=intake,
         user_api=user_api,
@@ -287,4 +311,17 @@ def build_m2_components(
         commands=CommandWorker(intake, config.command_worker_limits),
         events=relay,
         notifications=dispatcher,
+        home_reservations=home_reservations,
+        home=(
+            SlackDispatcher(
+                sessions,
+                slack,
+                VegaService(sessions, settings),
+                home_publisher or SlackClient(slack),
+                reservations=home_reservations,
+                clock=clock,
+            )
+            if home_reservations is not None
+            else None
+        ),
     )

@@ -83,7 +83,7 @@ def main() -> None:
     )
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--m2-config", type=Path)
-    parser.add_argument("--m2-mode", choices=["commands", "events", "notifications", "all"])
+    parser.add_argument("--m2-mode", choices=["commands", "events", "notifications", "home", "all"])
     parser.add_argument(
         "--slack", action="store_true", help="Run durable Slack Home publishing jobs"
     )

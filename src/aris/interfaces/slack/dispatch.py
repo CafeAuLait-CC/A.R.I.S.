@@ -1,15 +1,18 @@
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import uuid4
 
 from sqlalchemy.orm import Session, sessionmaker
 
+from aris.core.access.schemas import ExternalSubject
 from aris.core.audit import AuditEntry
 from aris.core.contracts import Contract, DomainError
 from aris.core.time import utc
 from aris.interfaces.slack.client import HomePublisher, SlackDeliveryError
 from aris.interfaces.slack.config import SlackSettings
 from aris.interfaces.slack.home import home_view
+from aris.interfaces.slack.home_reservations import HomeReservationSource
 from aris.interfaces.slack.repo import SlackRepository
 from aris.interfaces.slack.schemas import HomeJobClaim
 from aris.modules.vega.service import VegaService
@@ -27,14 +30,21 @@ class SlackDispatcher:
         config: SlackSettings,
         vega: VegaService,
         publisher: HomePublisher,
+        *,
+        reservations: HomeReservationSource | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.sessions = sessions
         self.config = config
         self.vega = vega
         self.publisher = publisher
+        self.reservations = reservations
+        if reservations is not None:
+            reservations.validate_configuration(config)
+        self.clock = clock or (lambda: datetime.now(UTC))
 
     def claim(self) -> HomeJobClaim | DispatchResult | None:
-        now = datetime.now(UTC)
+        now = self.clock()
         with self.sessions.begin() as session:
             job = SlackRepository(session).next_job(now)
             if job is None:
@@ -65,7 +75,7 @@ class SlackDispatcher:
             )
 
     def finish(self, claim: HomeJobClaim, error: SlackDeliveryError | None) -> DispatchResult:
-        now = datetime.now(UTC)
+        now = self.clock()
         with self.sessions.begin() as session:
             job = SlackRepository(session).lock_job(claim.job_id)
             if (
@@ -119,12 +129,24 @@ class SlackDispatcher:
         try:
             if claim.team_id != self.config.team_id:
                 raise SlackDeliveryError("workspace_mismatch", retryable=False)
+            snapshot = self.vega.resource_status()
+            reservations = (
+                self.reservations.snapshot(
+                    ExternalSubject(
+                        provider="slack", namespace=claim.team_id, external_id=claim.user_id
+                    ),
+                    snapshot,
+                )
+                if self.reservations is not None
+                else None
+            )
             self.publisher.publish_home(
                 claim.user_id,
                 home_view(
-                    self.vega.resource_status(),
+                    snapshot,
                     asset_base_url=self.config.home_asset_base_url,
                     layout=self.config.home_layout,
+                    reservations=reservations,
                 ),
             )
         except SlackDeliveryError as exc:

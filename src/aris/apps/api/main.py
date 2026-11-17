@@ -29,6 +29,7 @@ from aris.interfaces.reservations.api import build_router as build_reservation_r
 from aris.interfaces.reservations.service import UserReservationSurface
 from aris.interfaces.slack.api import build_router as build_slack_router
 from aris.interfaces.slack.config import SlackSettings
+from aris.interfaces.slack.home_reservations import HomeReservationSource
 from aris.interfaces.slack.reservation_drafts import SlackReservationDrafts
 from aris.interfaces.slack.reservations import SlackReservationQueries
 from aris.interfaces.slack.service import SlackService
@@ -63,6 +64,7 @@ def create_app(
     user_reservations: UserReservationSurface | None = None,
     slack_reservations: SlackReservationQueries | None = None,
     slack_drafts: SlackReservationDrafts | None = None,
+    home_reservations: HomeReservationSource | None = None,
     m2_config: M2RuntimeConfig | None = None,
 ) -> FastAPI:
     config = settings or Settings()
@@ -76,6 +78,7 @@ def create_app(
                 user_reservations,
                 slack_reservations,
                 slack_drafts,
+                home_reservations,
             )
         ):
             raise ValueError("M2 configuration and explicit command surfaces cannot be combined")
@@ -86,6 +89,8 @@ def create_app(
         slack_reservations.validate_configuration(slack_config)
     if slack_drafts is not None:
         slack_drafts.validate_configuration(slack_config)
+    if home_reservations is not None:
+        home_reservations.validate_configuration(slack_config)
     if user_commands is not None:
         user_commands.validate_configuration(
             config.environment,
@@ -126,6 +131,7 @@ def create_app(
         user_reservations = components.user_reservations
         slack_reservations = components.slack_reservations
         slack_drafts = components.slack_drafts
+        home_reservations = components.home_reservations
     app.state.m2 = components
     vega = VegaService(sessions, config)
     app.include_router(build_router(vega, config))
@@ -140,6 +146,7 @@ def create_app(
                 command_adapter=slack_commands,
                 reservation_queries=slack_reservations,
                 reservation_drafts=slack_drafts,
+                home_reservations=home_reservations,
             )
         )
     )
