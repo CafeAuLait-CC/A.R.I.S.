@@ -28,6 +28,10 @@ from aris.interfaces.reservations.service import PersonalReservationQueries, Use
 from aris.interfaces.slack.client import ModalPublisher, SlackClient
 from aris.interfaces.slack.config import SlackSettings
 from aris.interfaces.slack.notifications import SlackNotificationTransport
+from aris.interfaces.slack.reservation_drafts import (
+    ReservationReviewPresenter,
+    SlackReservationDrafts,
+)
 from aris.interfaces.slack.reservations import SlackReservationQueries
 from aris.interfaces.slack.user_commands import SlackCommandAdapter
 from aris.modules.nova.administration import ReservationAdministrationService
@@ -151,6 +155,7 @@ class M2Components:
     user_reservations: UserReservationSurface | None
     slack_callbacks: SlackCommandAdapter | None
     slack_reservations: SlackReservationQueries | None
+    slack_drafts: SlackReservationDrafts | None
     commands: CommandWorker
     events: EventRelay
     notifications: NotificationDispatcher | None
@@ -234,8 +239,10 @@ def build_m2_components(
         if config.user_tokens
         else None
     )
+    publisher = modal_publisher or SlackClient(slack)
+    review_presenter = ReservationReviewPresenter(sessions, targets, config.gateway_limits)
     callbacks = (
-        SlackCommandAdapter(gateway, modal_publisher or SlackClient(slack))
+        SlackCommandAdapter(gateway, publisher, review_presenter)
         if config.slack_callbacks
         else None
     )
@@ -271,6 +278,11 @@ def build_m2_components(
         slack_callbacks=callbacks,
         slack_reservations=(
             SlackReservationQueries(personal_queries) if config.slack_callbacks else None
+        ),
+        slack_drafts=(
+            SlackReservationDrafts(gateway, publisher, review_presenter)
+            if config.slack_callbacks and "reservation.create" in config.commands
+            else None
         ),
         commands=CommandWorker(intake, config.command_worker_limits),
         events=relay,

@@ -59,7 +59,11 @@ def build_router(service: SlackService) -> APIRouter:
             x_slack_signature,
             request.state.request_id,
         )
-        return JSONResponse(reply.payload, status_code=reply.status_code)
+        return JSONResponse(
+            reply.payload,
+            status_code=reply.status_code,
+            background=BackgroundTask(reply.after_ack) if reply.after_ack else None,
+        )
 
     @router.post("/slack/events")
     async def events(

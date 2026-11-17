@@ -19,6 +19,7 @@ class SlashCommand(SlackPayload):
     user_id: str = Field(min_length=1, max_length=128, pattern=r"^\S+$")
     command: str = Field(min_length=1, max_length=128)
     text: str = Field(default="", max_length=8192)
+    trigger_id: SecretStr | None = Field(default=None, repr=False, min_length=1, max_length=256)
 
 
 class SlackEvent(SlackPayload):

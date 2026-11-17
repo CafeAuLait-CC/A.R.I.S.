@@ -3,7 +3,7 @@ import json
 import logging
 from collections.abc import Callable
 from functools import partial
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 from uuid import UUID
 
 from pydantic import Field
@@ -11,7 +11,12 @@ from pydantic import Field
 from aris.core.commands.gateway import UserCommandGateway
 from aris.core.commands.gateway_schemas import ExternalCommandActor, ExternalCommandContext
 from aris.core.commands.queue_schemas import IntakeResult, WithdrawCommand
-from aris.core.commands.schemas import CommandOutcome, ConfirmCommand
+from aris.core.commands.schemas import (
+    CommandOutcome,
+    CommandReview,
+    ConfirmCommand,
+    PendingConfirmation,
+)
 from aris.core.contracts import DomainError
 from aris.interfaces.slack.client import ModalPublisher, SlackDeliveryError
 from aris.interfaces.slack.config import SlackSettings
@@ -22,6 +27,10 @@ COMMAND_PREFIX = "aris.command."
 CONFIRM_ACTION = COMMAND_PREFIX + "confirm"
 WITHDRAW_ACTION = COMMAND_PREFIX + "withdraw"
 STATUS_ACTION = COMMAND_PREFIX + "status"
+
+
+class CommandReviewPresenter(Protocol):
+    def view(self, review: CommandReview) -> dict[str, Any]: ...
 
 
 class CommandModalSource(SlackPayload):
@@ -89,8 +98,14 @@ def status_view(
 class SlackCommandAdapter:
     """Called only after SlackService verifies raw-body signature and workspace."""
 
-    def __init__(self, gateway: UserCommandGateway, publisher: ModalPublisher) -> None:
+    def __init__(
+        self,
+        gateway: UserCommandGateway,
+        publisher: ModalPublisher,
+        review_presenter: CommandReviewPresenter | None = None,
+    ) -> None:
         self.gateway, self.publisher = gateway, publisher
+        self.review_presenter = review_presenter
 
     def validate_configuration(self, config: SlackSettings) -> None:
         namespace = self.gateway.intake.namespace
@@ -142,10 +157,21 @@ class SlackCommandAdapter:
             )
         try:
             if operation is None:
-                outcome = self.gateway.inspect(
+                review = self.gateway.review(
                     ExternalCommandActor(subject=context.subject, request_id=context.request_id),
                     command_id,
                 )
+                outcome = review.outcome
+                if self.review_presenter is not None and isinstance(outcome, PendingConfirmation):
+                    return SlackReply(
+                        {},
+                        after_ack=partial(
+                            self._review_update,
+                            ModalHandle(source.id, source.hash),
+                            review,
+                            request_id,
+                        ),
+                    )
             else:
                 result = operation()
                 outcome, error_code = result.outcome, result.error_code
@@ -156,6 +182,19 @@ class SlackCommandAdapter:
             {},
             after_ack=partial(self._update, ModalHandle(source.id, source.hash), view, request_id),
         )
+
+    def _review_update(self, handle: ModalHandle, review: CommandReview, request_id: str) -> None:
+        assert self.review_presenter is not None
+        try:
+            view = self.review_presenter.view(review)
+        except Exception as error:
+            logger.warning(
+                "request_id=%s command_review_failed failure_type=%s",
+                request_id,
+                type(error).__name__,
+            )
+            view = status_view(review.command_id, None)
+        self._update(handle, view, request_id)
 
     def _update(self, handle: ModalHandle, view: dict[str, Any], request_id: str) -> None:
         try:

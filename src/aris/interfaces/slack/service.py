@@ -23,6 +23,7 @@ from aris.interfaces.slack.home import (
 )
 from aris.interfaces.slack.presentation import resource_text
 from aris.interfaces.slack.repo import SlackRepository
+from aris.interfaces.slack.reservation_drafts import SlackReservationDrafts
 from aris.interfaces.slack.reservations import SlackReservationQueries
 from aris.interfaces.slack.schemas import (
     EventEnvelope,
@@ -62,6 +63,7 @@ class SlackService:
         *,
         command_adapter: SlackCommandAdapter | None = None,
         reservation_queries: SlackReservationQueries | None = None,
+        reservation_drafts: SlackReservationDrafts | None = None,
     ) -> None:
         self.sessions = sessions
         self.config = config
@@ -69,20 +71,31 @@ class SlackService:
         self.modal = modal_publisher or SlackClient(config)
         self.command_adapter = command_adapter
         self.reservation_queries = reservation_queries
+        self.reservation_drafts = reservation_drafts
         if command_adapter is not None:
             command_adapter.validate_configuration(config)
         if reservation_queries is not None:
             reservation_queries.validate_configuration(config)
+        if reservation_drafts is not None:
+            reservation_drafts.validate_configuration(config)
 
     def command(
         self, body: bytes, timestamp: str | None, signature: str | None, request_id: str
     ) -> SlackReply:
+        received = time.monotonic()
         verify_request(self.config, body, timestamp, signature)
         try:
             command = SlashCommand.model_validate(form_fields(body))
         except (ValueError, ValidationError) as exc:
             raise DomainError("VALIDATION_ERROR", "Invalid Slack command", 422) from exc
         require_workspace(self.config, command.team_id)
+        operation = command.text.split(maxsplit=1)
+        if command.command == "/gpu" and operation and operation[0].lower() == "reserve":
+            if self.reservation_drafts is None:
+                raise DomainError(
+                    "DEPENDENCY_UNAVAILABLE", "Reservation creation is not enabled", 503
+                )
+            return self.reservation_drafts.start(command, body, request_id, received)
         if command.command == "/gpu" and command.text.strip().lower() == "mine":
             if self.reservation_queries is None:
                 raise DomainError(
@@ -141,7 +154,15 @@ class SlackService:
                 payload = json_object(form_fields(body)["payload"])
                 interaction = Interaction.model_validate(payload)
                 require_workspace(self.config, interaction.team.id)
-                if SlackCommandAdapter.handles(interaction):
+                view = payload.get("view")
+                owned_view = isinstance(view, dict) and view.get("callback_id") in {
+                    "aris.command.confirmation",
+                    "aris.command.status",
+                    "aris.reservation.preparing",
+                }
+                if owned_view and interaction.type == "view_closed":
+                    return SlackReply({"ok": True})
+                if SlackCommandAdapter.handles(interaction) or owned_view:
                     if self.command_adapter is None:
                         raise DomainError(
                             "DEPENDENCY_UNAVAILABLE", "User command callbacks are not enabled", 503

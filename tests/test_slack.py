@@ -132,7 +132,9 @@ def test_status_is_ephemeral_and_uses_fresh_observations(slack_client):
     text = response.json()["text"]
     assert "node-a" in text and "ONLINE" in text and "观测空闲" in text
     assert "预约可用性尚未评估" in text
-    assert "尚未上线" in slash(slack_client, "reserve 30").json()["text"]
+    disabled = slash(slack_client, "reserve 30")
+    assert disabled.status_code == 503
+    assert disabled.json()["error"]["code"] == "DEPENDENCY_UNAVAILABLE"
 
 
 def test_slack_status_does_not_present_stale_metrics_as_current(slack_client):
