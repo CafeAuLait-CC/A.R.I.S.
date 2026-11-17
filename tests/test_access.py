@@ -398,6 +398,6 @@ def test_identity_migration_is_additive_empty_and_preserves_existing_facts_at_he
     assert facts() == frozen
     command.upgrade(config, "head")
     command.check(config)
-    assert client.get("/health/ready").json()["schema_revision"] == "0012"
+    assert client.get("/health/ready").json()["schema_revision"] == "0013"
     assert facts() == frozen
     assert post(client, original).json()["duplicate"] is True

@@ -3,7 +3,14 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from aris.core.access.models import User
 from aris.core.access.repo import AccessRepository
-from aris.core.access.schemas import AccessRequest, ExternalSubject, NodeUserLookup, UserPrincipal
+from aris.core.access.schemas import (
+    AccessRequest,
+    ExternalSubject,
+    ExternalUserLookup,
+    ExternalUserTarget,
+    NodeUserLookup,
+    UserPrincipal,
+)
 from aris.core.contracts import DomainError
 
 
@@ -43,6 +50,25 @@ class AccessService:
     def resolve_node_user(self, lookup: NodeUserLookup) -> UserPrincipal | None:
         with self.sessions() as session:
             return self._principal(AccessRepository(session).mapped_node_user(lookup))
+
+    def external_target_in_transaction(
+        self, session: Session, lookup: ExternalUserLookup
+    ) -> ExternalUserTarget | None:
+        with session.no_autoflush:
+            identities = AccessRepository(session).external_targets(lookup)
+        if not identities:
+            return None
+        if len(identities) != 1:
+            raise DomainError("IDENTITY_AMBIGUOUS", "External recipient is ambiguous", 503)
+        identity = identities[0]
+        return ExternalUserTarget(
+            user_id=lookup.user_id,
+            subject=ExternalSubject(
+                provider=identity.provider,
+                namespace=identity.namespace,
+                external_id=identity.external_id,
+            ),
+        )
 
     def require_permission(self, request: AccessRequest) -> UserPrincipal:
         with self.sessions() as session:

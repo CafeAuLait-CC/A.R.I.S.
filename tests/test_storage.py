@@ -87,6 +87,8 @@ def test_postgres_storage_sizes_are_scoped_to_current_test_schema_and_read_only(
         "event_publications",
         "event_deliveries",
         "event_consumer_inbox",
+        "notification_outbox",
+        "notification_attempts",
         "reservations",
         "reservation_events",
         "access_directory_state",

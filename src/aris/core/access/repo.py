@@ -1,3 +1,5 @@
+from collections.abc import Sequence
+
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
@@ -9,12 +11,31 @@ from aris.core.access.models import (
     RolePermission,
     User,
 )
-from aris.core.access.schemas import AccessRequest, ExternalSubject, NodeUserLookup
+from aris.core.access.schemas import (
+    AccessRequest,
+    ExternalSubject,
+    ExternalUserLookup,
+    NodeUserLookup,
+)
 
 
 class AccessRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
+
+    def external_targets(self, lookup: ExternalUserLookup) -> Sequence[ExternalIdentity]:
+        return self.session.scalars(
+            select(ExternalIdentity)
+            .join(User, User.id == ExternalIdentity.user_id)
+            .where(
+                User.id == str(lookup.user_id),
+                User.status == "active",
+                ExternalIdentity.provider == lookup.provider,
+                ExternalIdentity.namespace == lookup.namespace,
+            )
+            .limit(2)
+            .execution_options(populate_existing=True)
+        ).all()
 
     def external_user(self, subject: ExternalSubject) -> User | None:
         return self.session.scalar(

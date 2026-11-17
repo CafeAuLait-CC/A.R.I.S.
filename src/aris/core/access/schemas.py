@@ -22,6 +22,17 @@ class ExternalSubject(AccessContract):
     external_id: Identifier
 
 
+class ExternalUserLookup(AccessContract):
+    user_id: UUID
+    provider: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_.-]*$")
+    namespace: Identifier
+
+
+class ExternalUserTarget(AccessContract):
+    user_id: UUID
+    subject: ExternalSubject
+
+
 class AccessScope(AccessContract):
     type: Literal["global", "node", "project"]
     id: Identifier

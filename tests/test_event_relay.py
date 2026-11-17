@@ -452,8 +452,10 @@ def test_empty_relay_migration_round_trip_and_nonempty_history_guard(relay_state
     command.downgrade(config, "0011")
     command.upgrade(config, "head")
     command.check(config)
+    command.downgrade(config, "0012")
     seed(relay_state)
     relay.publish_once()
     with pytest.raises(RuntimeError, match="event relay history prevents downgrade"):
         command.downgrade(config, "0011")
+    command.upgrade(config, "head")
     command.check(config)

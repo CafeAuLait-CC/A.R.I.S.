@@ -148,4 +148,4 @@ def test_upgrade_preserves_existing_telemetry_and_replay(client):
     assert post(client, original).json()["duplicate"] is True
     assert beat(client, heartbeat(seq=2)).status_code == 200
     with client.app.state.engine.connect() as connection:
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0012"
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0013"
