@@ -1,3 +1,5 @@
+from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
 from typing import Any
 
 from aris.core.commands.gateway_schemas import ExternalCommandActor
@@ -5,6 +7,7 @@ from aris.core.contracts import DomainError
 from aris.interfaces.reservations.service import PersonalReservationQueries
 from aris.interfaces.slack.config import SlackSettings
 from aris.interfaces.slack.presentation import markdown, plain, slack_time
+from aris.interfaces.slack.reservation_changes import CHANGE_ACTION_PREFIX
 from aris.interfaces.slack.schemas import SlackReply, SlashCommand
 from aris.modules.nova.reservation_schemas import MineQuery, MineResult
 from aris.modules.vega.target_schemas import GpuInventoryLabel
@@ -13,7 +16,11 @@ SLACK_PAGE_SIZE = 5
 
 
 def personal_reservations(
-    result: MineResult, labels: tuple[GpuInventoryLabel, ...] = ()
+    result: MineResult,
+    labels: tuple[GpuInventoryLabel, ...] = (),
+    *,
+    change_commands: Sequence[str] = (),
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     if not result.reservations:
         return {
@@ -53,6 +60,26 @@ def personal_reservations(
                 },
             ]
         )
+        if (
+            now is not None
+            and reservation.status in {"confirmed", "active"}
+            and reservation.version is not None
+        ):
+            operations = ["cancel"] if now < reservation.start_at else ["release"]
+            if now < reservation.end_at:
+                operations.append("extend")
+            elements = [
+                {
+                    "type": "button",
+                    "action_id": CHANGE_ACTION_PREFIX + operation,
+                    "text": plain(operation.capitalize()),
+                    "value": str(reservation.id),
+                }
+                for operation in operations
+                if "reservation." + operation in change_commands
+            ]
+            if elements:
+                blocks.append({"type": "actions", "elements": elements})
     if result.next_cursor is not None:
         blocks.append(
             {
@@ -79,8 +106,15 @@ def personal_reservations(
 class SlackReservationQueries:
     """Only invoked after raw-body Slack signature and workspace validation."""
 
-    def __init__(self, queries: PersonalReservationQueries) -> None:
+    def __init__(
+        self,
+        queries: PersonalReservationQueries,
+        *,
+        change_commands: Sequence[str] = (),
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
         self.queries = queries
+        self.change_commands, self.clock = tuple(change_commands), clock
 
     def validate_configuration(self, config: SlackSettings) -> None:
         if (
@@ -116,4 +150,11 @@ class SlackReservationQueries:
                     "blocks": [{"type": "section", "text": plain(text)}],
                 }
             )
-        return SlackReply(personal_reservations(result.page, result.labels))
+        now = self.clock()
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("personal reservation clock requires a timezone")
+        return SlackReply(
+            personal_reservations(
+                result.page, result.labels, change_commands=self.change_commands, now=now
+            )
+        )

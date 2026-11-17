@@ -374,7 +374,9 @@ def build_m2_components(
         ),
         slack_callbacks=callbacks,
         slack_reservations=(
-            SlackReservationQueries(personal_queries) if config.slack_callbacks else None
+            SlackReservationQueries(personal_queries, change_commands=config.commands, clock=clock)
+            if config.slack_callbacks
+            else None
         ),
         slack_drafts=(
             SlackReservationDrafts(gateway, publisher, review_presenter)

@@ -25,6 +25,7 @@ from aris.interfaces.slack.home import (
 from aris.interfaces.slack.home_reservations import HomeReservationSource
 from aris.interfaces.slack.presentation import resource_text
 from aris.interfaces.slack.repo import SlackRepository
+from aris.interfaces.slack.reservation_changes import SlackReservationChanges
 from aris.interfaces.slack.reservation_drafts import SlackReservationDrafts
 from aris.interfaces.slack.reservation_forms import FORM_CALLBACK
 from aris.interfaces.slack.reservations import SlackReservationQueries
@@ -166,6 +167,17 @@ class SlackService:
                 interaction = Interaction.model_validate(payload)
                 require_workspace(self.config, interaction.team.id)
                 view = payload.get("view")
+                if SlackReservationChanges.handles(interaction, payload):
+                    if (
+                        self.reservation_drafts is None
+                        or self.reservation_drafts.change_forms is None
+                    ):
+                        raise DomainError(
+                            "DEPENDENCY_UNAVAILABLE", "Owner reservation forms are not enabled", 503
+                        )
+                    return self.reservation_drafts.change_forms.interact(
+                        body, payload, interaction, request_id, received
+                    )
                 if isinstance(view, dict) and view.get("callback_id") == FORM_CALLBACK:
                     if self.reservation_drafts is None or self.reservation_drafts.forms is None:
                         raise DomainError(

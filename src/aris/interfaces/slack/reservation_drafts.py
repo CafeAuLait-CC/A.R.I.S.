@@ -26,6 +26,7 @@ from aris.interfaces.reservations.service import PersonalReservationQueries
 from aris.interfaces.slack.client import ModalPublisher
 from aris.interfaces.slack.config import SlackSettings
 from aris.interfaces.slack.presentation import markdown, plain, slack_time
+from aris.interfaces.slack.reservation_changes import SlackReservationChanges
 from aris.interfaces.slack.reservation_forms import SlackReservationForms
 from aris.interfaces.slack.schemas import ModalHandle, SlackPayload, SlackReply, SlashCommand
 from aris.interfaces.slack.user_commands import (
@@ -358,6 +359,11 @@ class SlackReservationDrafts:
                 gateway, publisher, presenter, presenter.queries, clock=presenter.clock
             )
             if "reservation.create" in exposed
+            else None
+        )
+        self.change_forms = (
+            SlackReservationChanges(gateway, publisher, presenter, presenter.queries)
+            if (OWN_COMMANDS - {"reservation.create"}).intersection(exposed)
             else None
         )
 
