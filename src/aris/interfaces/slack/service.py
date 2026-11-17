@@ -96,10 +96,14 @@ class SlackService:
             raise DomainError("VALIDATION_ERROR", "Invalid Slack command", 422) from exc
         require_workspace(self.config, command.team_id)
         operation = command.text.split(maxsplit=1)
-        if command.command == "/gpu" and operation and operation[0].lower() == "reserve":
+        if (
+            command.command == "/gpu"
+            and operation
+            and operation[0].lower() in {"reserve", "cancel", "release", "extend"}
+        ):
             if self.reservation_drafts is None:
                 raise DomainError(
-                    "DEPENDENCY_UNAVAILABLE", "Reservation creation is not enabled", 503
+                    "DEPENDENCY_UNAVAILABLE", "Reservation changes are not enabled", 503
                 )
             return self.reservation_drafts.start(command, body, request_id, received)
         if command.command == "/gpu" and command.text.strip().lower() == "mine":

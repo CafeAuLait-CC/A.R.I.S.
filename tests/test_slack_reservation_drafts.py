@@ -95,7 +95,16 @@ def drafts(booking, settings, slack_settings):
     events = []
     modal = FakeModal(sessions, events)
     cfg = config(
-        namespace=NAMESPACE, slack_callbacks=True, maintenance=(calendar(),), user_tokens=()
+        namespace=NAMESPACE,
+        slack_callbacks=True,
+        maintenance=(calendar(),),
+        user_tokens=(),
+        commands=(
+            "reservation.create",
+            "reservation.cancel",
+            "reservation.release",
+            "reservation.extend",
+        ),
     )
     graph = build_m2_components(
         sessions, settings, slack_settings, cfg, clock=lambda: clock["now"], modal_publisher=modal
@@ -418,4 +427,5 @@ def test_composition_does_not_offer_create_when_only_reductions_are_exposed(
         maintenance=(),
     )
     graph = build_m2_components(booking[2], settings, slack_settings, cfg)
-    assert graph.slack_drafts is None and graph.slack_callbacks is not None
+    assert graph.slack_drafts is not None and graph.slack_callbacks is not None
+    assert graph.slack_drafts.gateway.allowed == {"reservation.cancel"}

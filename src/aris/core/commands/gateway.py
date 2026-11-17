@@ -29,7 +29,13 @@ from aris.core.commands.queue_schemas import (
     IntakeResult,
     WithdrawCommand,
 )
-from aris.core.commands.schemas import CommandOutcome, CommandRequest, CommandReview, ConfirmCommand
+from aris.core.commands.schemas import (
+    CommandDefinition,
+    CommandOutcome,
+    CommandRequest,
+    CommandReview,
+    ConfirmCommand,
+)
 from aris.core.contracts import DomainError
 
 
@@ -153,6 +159,34 @@ class UserCommandGateway:
             ),
             command,
         )
+
+    def definition(self, name: str) -> CommandDefinition:
+        if name not in self.allowed:
+            raise DomainError("PERMISSION_DENIED", "Command is not exposed", 403)
+        definition, _ = self.intake.commands._registration(name)
+        return definition
+
+    def recover_by_key(self, context: ExternalCommandSubmit) -> CommandReview | None:
+        """Recover the original intent before deriving parameters from mutable state."""
+        actor, _ = self._resolve(context)
+        try:
+            with self.intake.sessions.begin() as session:
+                self._budget(session)
+                record = CommandQueueRepository(session).by_key(
+                    str(actor.actor_id), context.idempotency_key
+                )
+                if record is None:
+                    return None
+                if record.command_type not in self.allowed:
+                    raise DomainError("PERMISSION_DENIED", "Command is not available", 403)
+                command_id = UUID(record.id)
+        except DBAPIError:
+            raise DomainError(
+                "GATEWAY_UNAVAILABLE", "User command context unavailable", 503
+            ) from None
+        # review rechecks current identity, permissions, definition and the
+        # original fingerprint; it never replaces the intent or its deadlines.
+        return self.intake.review(actor, command_id)
 
     def confirm(self, context: ExternalCommandContext, request: ConfirmCommand) -> IntakeResult:
         actor, _ = self._resolve(context, command_id=request.command_id)

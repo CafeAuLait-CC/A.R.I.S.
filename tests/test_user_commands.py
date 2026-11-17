@@ -13,11 +13,13 @@ from aris.core.access.models import ExternalIdentity, RoleBinding, User
 from aris.core.access.schemas import AccessScope
 from aris.core.audit import AuditEntry
 from aris.core.commands.gateway import UserCommandGateway
-from aris.core.commands.gateway_schemas import GatewayLimits
-from aris.core.commands.models import CommandRecord
+from aris.core.commands.gateway_schemas import ExternalCommandSubmit, GatewayLimits
+from aris.core.commands.models import CommandIntakeReceipt, CommandRecord
+from aris.core.commands.queue_repo import CommandQueueRepository
 from aris.core.commands.worker import CommandWorker
 from aris.core.config import AgentCredential
 from aris.core.contracts import DomainError
+from aris.core.time import utc
 from aris.interfaces.commands.auth import BoundSubjectTokens, UserTokenBinding
 from aris.interfaces.commands.service import UserCommandSurface
 from aris.interfaces.slack.config import SlackSettings
@@ -401,3 +403,104 @@ def test_ambiguous_authentication_or_intent_headers_are_rejected(user_api, ambig
     assert response.status_code == (401 if ambiguous == "authorization" else 422)
     assert response.headers["Cache-Control"] == "no-store"
     assert command_count(sessions) == 0 and action.calls == 0
+
+
+def recovery_context(**changes):
+    return ExternalCommandSubmit(
+        **{
+            "subject": subject(),
+            "request_id": "fixture-recovery",
+            "receipt_key": "recovery-does-not-admit",
+            "idempotency_key": "fixture-intent",
+            **changes,
+        }
+    )
+
+
+def test_key_recovery_preserves_canonical_intent_proof_deadlines_and_receipts(user_api):
+    client, _, sessions, _, action, _, surface = user_api
+    gateway = surface.gateway
+    assert gateway.definition("profile.rename").requires_confirmation
+    assert gateway.recover_by_key(recovery_context()) is None
+    first = submit(client).json()["outcome"]
+    with sessions() as session:
+        receipts = session.scalar(select(func.count()).select_from(CommandIntakeReceipt))
+    recovered = gateway.recover_by_key(recovery_context())
+    assert str(recovered.command_id) == first["command_id"]
+    assert recovered.request.parameters == {"name": "Renamed"}
+    assert recovered.outcome.model_dump(mode="json", exclude={"proof"}) == {
+        k: v for k, v in first.items() if k != "proof"
+    }
+    assert recovered.outcome.proof.get_secret_value() == first["proof"]
+    assert (
+        action.calls == 0
+        and gateway.recover_by_key(recovery_context(subject=subject("bob"))) is None
+    )
+    with sessions() as session:
+        assert session.scalar(select(func.count()).select_from(CommandIntakeReceipt)) == receipts
+
+
+@pytest.mark.parametrize("change", ["namespace", "revoked", "suspended", "remapped", "key"])
+def test_key_recovery_rechecks_current_identity_role_and_confirmation_material(user_api, change):
+    client, intake, sessions, ids, _, _, surface = user_api
+    submit(client)
+    context = recovery_context()
+    with sessions.begin() as session:
+        if change == "revoked":
+            session.execute(delete(RoleBinding).where(RoleBinding.user_id == ids["alice"]))
+        elif change == "suspended":
+            session.get(User, ids["alice"]).status = "suspended"
+        elif change == "remapped":
+            identity = session.scalar(
+                select(ExternalIdentity).where(ExternalIdentity.user_id == ids["alice"])
+            )
+            identity.user_id = ids["bob"]
+    if change == "namespace":
+        context = recovery_context(subject=subject().model_copy(update={"namespace": "T_OTHER"}))
+    if change == "key":
+        intake.confirmation_key_id = "rotated-fixture"
+    if change == "remapped":
+        # A new principal has no command under the old principal's key.
+        assert surface.gateway.recover_by_key(context) is None
+    else:
+        with pytest.raises(DomainError) as rejected:
+            surface.gateway.recover_by_key(context)
+        assert rejected.value.code == (
+            "CONFIRMATION_KEY_CHANGED" if change == "key" else "PERMISSION_DENIED"
+        )
+
+
+def test_key_recovery_respects_current_allowlist_and_does_not_renew_expiry(user_api):
+    client, _, sessions, _, _, clock, surface = user_api
+    submit(client)
+    review = surface.gateway.recover_by_key(recovery_context())
+    clock["now"] = review.outcome.expires_at + timedelta(seconds=1)
+    expired = surface.gateway.recover_by_key(recovery_context())
+    assert expired.outcome.state == "expired" and expired.command_id == review.command_id
+    with sessions() as session:
+        record = session.get(CommandRecord, str(expired.command_id))
+        assert utc(record.confirmation_expires_at) == utc(review.outcome.expires_at)
+    surface.gateway.allowed = frozenset()
+    with pytest.raises(DomainError) as refused:
+        surface.gateway.recover_by_key(recovery_context())
+    assert refused.value.code == "PERMISSION_DENIED"
+
+
+def test_postgres_key_recovery_has_a_bounded_lookup_and_never_creates_receipts(
+    user_api, monkeypatch
+):
+    _, _, sessions, _, action, _, surface = user_api
+    if sessions.kw["bind"].dialect.name != "postgresql":
+        pytest.skip("requires PostgreSQL recovery lookup statement budget")
+
+    def slow(repo, actor_id, key):
+        repo.session.execute(text("SELECT pg_sleep(2)"))
+
+    monkeypatch.setattr(CommandQueueRepository, "by_key", slow)
+    started = time.monotonic()
+    with pytest.raises(DomainError) as unavailable:
+        surface.gateway.recover_by_key(recovery_context())
+    assert unavailable.value.code == "GATEWAY_UNAVAILABLE"
+    assert time.monotonic() - started < 2 and action.calls == 0
+    with sessions() as session:
+        assert session.scalar(select(func.count()).select_from(CommandIntakeReceipt)) == 0

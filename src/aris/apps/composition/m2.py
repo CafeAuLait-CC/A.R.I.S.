@@ -31,6 +31,7 @@ from aris.interfaces.slack.dispatch import SlackDispatcher
 from aris.interfaces.slack.home_reservations import HomeReservationSource
 from aris.interfaces.slack.notifications import SlackNotificationTransport
 from aris.interfaces.slack.reservation_drafts import (
+    OWN_COMMANDS,
     ReservationReviewPresenter,
     SlackReservationDrafts,
 )
@@ -252,7 +253,9 @@ def build_m2_components(
         else None
     )
     publisher = modal_publisher or SlackClient(slack)
-    review_presenter = ReservationReviewPresenter(sessions, targets, config.gateway_limits)
+    review_presenter = ReservationReviewPresenter(
+        sessions, targets, config.gateway_limits, personal_queries, clock=clock
+    )
     callbacks = (
         SlackCommandAdapter(gateway, publisher, review_presenter)
         if config.slack_callbacks
@@ -305,7 +308,7 @@ def build_m2_components(
         ),
         slack_drafts=(
             SlackReservationDrafts(gateway, publisher, review_presenter)
-            if config.slack_callbacks and "reservation.create" in config.commands
+            if config.slack_callbacks and OWN_COMMANDS.intersection(config.commands)
             else None
         ),
         commands=CommandWorker(intake, config.command_worker_limits),

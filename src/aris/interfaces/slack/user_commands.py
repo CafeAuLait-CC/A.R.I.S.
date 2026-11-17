@@ -30,7 +30,7 @@ STATUS_ACTION = COMMAND_PREFIX + "status"
 
 
 class CommandReviewPresenter(Protocol):
-    def view(self, review: CommandReview) -> dict[str, Any]: ...
+    def view(self, review: CommandReview, context: ExternalCommandActor) -> dict[str, Any]: ...
 
 
 class CommandModalSource(SlackPayload):
@@ -169,6 +169,9 @@ class SlackCommandAdapter:
                             self._review_update,
                             ModalHandle(source.id, source.hash),
                             review,
+                            ExternalCommandActor(
+                                subject=context.subject, request_id=context.request_id
+                            ),
                             request_id,
                         ),
                     )
@@ -183,10 +186,16 @@ class SlackCommandAdapter:
             after_ack=partial(self._update, ModalHandle(source.id, source.hash), view, request_id),
         )
 
-    def _review_update(self, handle: ModalHandle, review: CommandReview, request_id: str) -> None:
+    def _review_update(
+        self,
+        handle: ModalHandle,
+        review: CommandReview,
+        context: ExternalCommandActor,
+        request_id: str,
+    ) -> None:
         assert self.review_presenter is not None
         try:
-            view = self.review_presenter.view(review)
+            view = self.review_presenter.view(review, context)
         except Exception as error:
             logger.warning(
                 "request_id=%s command_review_failed failure_type=%s",
