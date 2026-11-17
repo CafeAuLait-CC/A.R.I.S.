@@ -216,12 +216,18 @@ def main() -> None:
         description="Run the API; M2 requires explicit private configuration"
     )
     parser.add_argument("--m2-config", type=Path)
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
+    if not 1 <= args.port <= 65535:
+        parser.error("port must be between 1 and 65535")
+    if not args.host or any(char.isspace() for char in args.host) or "/" in args.host:
+        parser.error("host must be a bind address or hostname")
     if args.m2_config is not None:
         uvicorn.run(
             create_app(m2_config=load_m2_config(args.m2_config)),
-            host="127.0.0.1",
-            port=8000,
+            host=args.host,
+            port=args.port,
             ws_max_size=65536,
             ws_max_queue=2,
         )
@@ -229,8 +235,8 @@ def main() -> None:
     uvicorn.run(
         "aris.apps.api.main:create_app",
         factory=True,
-        host="127.0.0.1",
-        port=8000,
+        host=args.host,
+        port=args.port,
         ws_max_size=65536,
         ws_max_queue=2,
     )

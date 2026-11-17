@@ -277,6 +277,7 @@ def test_worker_private_config_once_runs_without_external_io_or_secret_output(
         timeout=10,
     )
     assert help_result.returncode == 0 and "--m2-config" in help_result.stdout
+    assert "--host" in help_result.stdout and "--port" in help_result.stdout
 
 
 def test_worker_incomplete_mode_arguments_fail_without_starting_services():
@@ -287,3 +288,33 @@ def test_worker_incomplete_mode_arguments_fail_without_starting_services():
         timeout=10,
     )
     assert result.returncode == 2 and "must be provided together" in result.stderr
+
+
+@pytest.mark.parametrize("explicit_m2", [False, True])
+def test_api_cli_custom_bind_preserves_explicit_m2_activation(tmp_path, monkeypatch, explicit_m2):
+    import uvicorn
+
+    from aris.apps.api import main as entrypoint
+
+    cfg = config()
+    target = private_file(tmp_path, cfg)
+    created, launches = [], []
+    application = object()
+
+    def build(**kwargs):
+        created.append(kwargs)
+        return application
+
+    monkeypatch.setattr(entrypoint, "create_app", build)
+    monkeypatch.setattr(uvicorn, "run", lambda *args, **kwargs: launches.append((args, kwargs)))
+    argv = ["aris-api", "--host", "127.0.0.1", "--port", "18123"]
+    if explicit_m2:
+        argv += ["--m2-config", str(target)]
+    monkeypatch.setattr(sys, "argv", argv)
+    entrypoint.main()
+    args, kwargs = launches[0]
+    assert kwargs["host"] == "127.0.0.1" and kwargs["port"] == 18123
+    if explicit_m2:
+        assert args == (application,) and created == [{"m2_config": cfg}]
+    else:
+        assert args == ("aris.apps.api.main:create_app",) and kwargs["factory"] and created == []
