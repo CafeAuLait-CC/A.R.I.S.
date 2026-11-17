@@ -6,6 +6,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from aris.core.access.admin_schemas import DirectoryProfile, IdentityNamespace
+from aris.core.access.directory_schemas import DirectoryMapping, DirectoryMember
 from aris.core.access.models import (
     AccessDirectoryState,
     ExternalIdentity,
@@ -41,6 +42,73 @@ class AccessAdministrationRepository:
         return any(
             self.session.scalar(select(func.count()).select_from(model))
             for model in (User, ExternalIdentity, Role, RoleBinding, NodeUserMapping)
+        )
+
+    def directory_snapshot(self) -> tuple[str | None, str | None, int, bool] | None:
+        row = self.session.execute(
+            select(
+                AccessDirectoryState.provider,
+                AccessDirectoryState.namespace,
+                AccessDirectoryState.revision,
+                AccessDirectoryState.completed_at,
+            ).where(AccessDirectoryState.id == "primary")
+        ).one_or_none()
+        return (row[0], row[1], row[2], row[3] is not None) if row else None
+
+    def directory_members(
+        self,
+        namespace: IdentityNamespace,
+        after: str | None,
+        limit: int,
+        external_ids: tuple[str, ...] | None = None,
+    ) -> tuple[DirectoryMember, ...]:
+        statement = (
+            select(
+                User.id, ExternalIdentity.external_id, User.display_name, User.timezone, User.status
+            )
+            .join(ExternalIdentity, ExternalIdentity.user_id == User.id)
+            .where(
+                ExternalIdentity.provider == namespace.provider,
+                ExternalIdentity.namespace == namespace.namespace,
+            )
+        )
+        if after is not None:
+            statement = statement.where(ExternalIdentity.external_id > after)
+        if external_ids is not None:
+            statement = statement.where(ExternalIdentity.external_id.in_(external_ids))
+        rows = self.session.execute(
+            statement.order_by(ExternalIdentity.external_id).limit(limit + 1)
+        )
+        return tuple(
+            DirectoryMember(
+                user_id=row[0],
+                external_id=row[1],
+                profile=DirectoryProfile(display_name=row[2], timezone=row[3]),
+                status=row[4],
+            )
+            for row in rows
+        )
+
+    def directory_mappings(
+        self, user_ids: tuple[str, ...], node_ids: tuple[str, ...]
+    ) -> tuple[DirectoryMapping, ...]:
+        rows = self.session.execute(
+            select(
+                NodeUserMapping.user_id,
+                NodeUserMapping.node_id,
+                NodeUserMapping.os_username,
+                NodeUserMapping.confidence,
+                NodeUserMapping.source,
+            )
+            .where(NodeUserMapping.user_id.in_(user_ids), NodeUserMapping.node_id.in_(node_ids))
+            .order_by(NodeUserMapping.user_id, NodeUserMapping.node_id, NodeUserMapping.os_username)
+            .limit(801)
+        )
+        return tuple(
+            DirectoryMapping(
+                user_id=row[0], node_id=row[1], os_username=row[2], confidence=row[3], source=row[4]
+            )
+            for row in rows
         )
 
     def identity(self, subject: ExternalSubject) -> ExternalIdentity | None:
