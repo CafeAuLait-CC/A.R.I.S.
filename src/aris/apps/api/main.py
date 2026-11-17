@@ -20,6 +20,7 @@ from aris.interfaces.commands.service import UserCommandSurface
 from aris.interfaces.slack.api import build_router as build_slack_router
 from aris.interfaces.slack.config import SlackSettings
 from aris.interfaces.slack.service import SlackService
+from aris.interfaces.slack.user_commands import SlackCommandAdapter
 from aris.modules.vega.api import build_router
 from aris.modules.vega.live import LiveHub
 from aris.modules.vega.live_api import build_live_router
@@ -46,8 +47,12 @@ def create_app(
     slack_settings: SlackSettings | None = None,
     *,
     user_commands: UserCommandSurface | None = None,
+    slack_commands: SlackCommandAdapter | None = None,
 ) -> FastAPI:
     config = settings or Settings()
+    slack_config = slack_settings or SlackSettings()
+    if slack_commands is not None:
+        slack_commands.validate_configuration(slack_config)
     if user_commands is not None:
         user_commands.validate_configuration(
             config.environment,
@@ -71,7 +76,9 @@ def create_app(
     app.state.live_hub = LiveHub()
     app.include_router(build_live_router(app.state.live_hub, config))
     app.include_router(
-        build_slack_router(SlackService(sessions, slack_settings or SlackSettings(), vega))
+        build_slack_router(
+            SlackService(sessions, slack_config, vega, command_adapter=slack_commands)
+        )
     )
     if user_commands is not None:
         app.include_router(build_command_router(user_commands))

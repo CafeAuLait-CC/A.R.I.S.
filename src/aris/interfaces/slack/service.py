@@ -31,6 +31,7 @@ from aris.interfaces.slack.schemas import (
     SlashCommand,
 )
 from aris.interfaces.slack.security import require_workspace, verify_request
+from aris.interfaces.slack.user_commands import SlackCommandAdapter
 from aris.modules.vega.service import VegaService
 
 logger = logging.getLogger(__name__)
@@ -57,11 +58,16 @@ class SlackService:
         config: SlackSettings,
         vega: VegaService,
         modal_publisher: ModalPublisher | None = None,
+        *,
+        command_adapter: SlackCommandAdapter | None = None,
     ) -> None:
         self.sessions = sessions
         self.config = config
         self.vega = vega
         self.modal = modal_publisher or SlackClient(config)
+        self.command_adapter = command_adapter
+        if command_adapter is not None:
+            command_adapter.validate_configuration(config)
 
     def command(self, body: bytes, timestamp: str | None, signature: str | None) -> SlackReply:
         verify_request(self.config, body, timestamp, signature)
@@ -122,6 +128,12 @@ class SlackService:
                 payload = json_object(form_fields(body)["payload"])
                 interaction = Interaction.model_validate(payload)
                 require_workspace(self.config, interaction.team.id)
+                if SlackCommandAdapter.handles(interaction):
+                    if self.command_adapter is None:
+                        raise DomainError(
+                            "DEPENDENCY_UNAVAILABLE", "User command callbacks are not enabled", 503
+                        )
+                    return self.command_adapter.interact(body, payload, interaction, request_id)
                 home_user = (
                     interaction.user.id
                     if (
