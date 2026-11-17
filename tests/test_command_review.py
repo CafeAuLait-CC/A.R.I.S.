@@ -12,6 +12,7 @@ from aris.core.commands.models import CommandIntakeReceipt, CommandJob, CommandR
 from aris.core.commands.queue_schemas import DurableActorContext
 from aris.core.commands.schemas import CommandReview
 from aris.core.commands.worker import CommandWorker
+from aris.core.time import utc
 from tests.conftest import AGENT_TOKEN, READ_TOKEN
 from tests.test_command_intake import WORKER_LIMITS, subject
 from tests.test_command_intake import command_state as command_state
@@ -186,9 +187,10 @@ def test_expiry_during_review_is_recorded_once_without_renewing_original_bounds(
     with sessions() as session:
         record = session.get(CommandRecord, pending["command_id"])
         assert record.state == "expired"
-        assert record.confirmation_expires_at.replace(
-            tzinfo=clock["now"].tzinfo
-        ) == datetime.fromisoformat(pending["expires_at"])
+        assert utc(record.confirmation_expires_at) == datetime.fromisoformat(pending["expires_at"])
+        assert utc(record.execution_not_after) == datetime.fromisoformat(
+            pending["execution_not_after"]
+        )
         assert (
             session.scalar(
                 select(func.count())
