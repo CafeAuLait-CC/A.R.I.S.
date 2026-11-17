@@ -27,7 +27,7 @@ from aris.core.relay.schemas import RelayLimits
 from aris.core.relay.service import EventRelay
 from aris.interfaces.commands.auth import BoundSubjectTokens, UserTokenBinding
 from aris.interfaces.commands.service import UserCommandSurface
-from aris.interfaces.identity.service import IdentityAdminSurface
+from aris.interfaces.identity.service import IdentityAdminSurface, IdentityQueryLimits
 from aris.interfaces.identity.slack_directory import SlackDirectoryClient, SlackDirectoryProvider
 from aris.interfaces.reservations.service import PersonalReservationQueries, UserReservationSurface
 from aris.interfaces.slack.client import HomePublisher, ModalPublisher, SlackClient
@@ -95,6 +95,7 @@ class M2RuntimeConfig(AccessContract):
     reservation_home: bool = Field(default=False, strict=True)
     identity_admin: bool = Field(default=False, strict=True)
     identity_nodes: tuple[Identifier, ...] = Field(default=(), max_length=8)
+    identity_query_limits: IdentityQueryLimits = Field(default_factory=IdentityQueryLimits)
 
     @model_validator(mode="after")
     def explicit_authorities(self) -> "M2RuntimeConfig":
@@ -325,7 +326,7 @@ def build_m2_components(
                 AccessDirectoryQueries(identities),
                 identity_directory or SlackDirectoryClient(slack, clock=clock),
                 config.identity_nodes,
-                config.gateway_limits,
+                config.identity_query_limits,
             )
             if config.identity_admin and user_api is not None
             else None

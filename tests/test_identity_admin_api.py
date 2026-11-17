@@ -3,7 +3,7 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr, ValidationError
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, event, func, select, text
 from sqlalchemy.orm import sessionmaker
 
 from aris.apps.api.main import create_app
@@ -18,6 +18,7 @@ from aris.core.access.models import (
 )
 from aris.core.commands.models import CommandRecord
 from aris.interfaces.commands.auth import UserTokenBinding
+from aris.interfaces.identity.service import IdentityQueryLimits
 from aris.interfaces.identity.slack_directory import SlackRosterMember, SlackRosterPage
 from aris.interfaces.slack.config import SlackSettings
 from tests.conftest import AGENT_TOKEN, READ_TOKEN
@@ -295,6 +296,52 @@ def test_postgres_identity_query_is_read_only_and_metadata_timeouts_do_not_fake_
     response = client.post(DIRECTORY, json={}, headers=headers())
     assert response.status_code == 503 and response.json()["error"]["code"] == "QUERY_UNAVAILABLE"
     assert response.headers["Cache-Control"] == "no-store"
+
+
+def test_postgres_identity_directory_tolerates_remote_round_trips_without_relaxing_gateway(
+    identity_api,
+):
+    import time
+
+    client, graph, _, state, _ = identity_api
+    engine = state[2]
+    if engine.dialect.name != "postgresql":
+        pytest.skip("PostgreSQL transaction timeout across remote round trips")
+    assert graph.user_api.gateway.limits.transaction_timeout_ms <= 250
+    assert graph.identity_admin.limits.transaction_timeout_ms == 3000
+    calls = []
+
+    def latency(connection, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith("SELECT"):
+            calls.append(statement)
+            time.sleep(0.04)
+
+    event.listen(engine, "after_cursor_execute", latency)
+    started = time.monotonic()
+    try:
+        response = client.post(DIRECTORY, json={}, headers=headers())
+    finally:
+        event.remove(engine, "after_cursor_execute", latency)
+    assert len(calls) >= 7 and time.monotonic() - started > 0.25
+    assert response.status_code == 200
+    assert response.json()["revision"] == 1 and len(response.json()["members"]) == 1
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"lock_timeout_ms": 0},
+        {"lock_timeout_ms": 1001},
+        {"statement_timeout_ms": 5001},
+        {"transaction_timeout_ms": 10001},
+        {"lock_timeout_ms": 1000, "statement_timeout_ms": 500},
+        {"transaction_timeout_ms": 1000},
+        {"transaction_timeout_ms": True},
+    ],
+)
+def test_identity_read_limits_are_independent_ordered_and_bounded(changes):
+    with pytest.raises(ValidationError):
+        IdentityQueryLimits(**changes)
 
 
 @pytest.mark.parametrize(

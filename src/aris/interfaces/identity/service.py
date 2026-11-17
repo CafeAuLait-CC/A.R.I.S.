@@ -1,13 +1,13 @@
 from uuid import UUID
 
-from pydantic import AwareDatetime, Field
+from pydantic import AwareDatetime, Field, model_validator
 from sqlalchemy.exc import DBAPIError
 
 from aris.core.access.directory import AccessDirectoryQueries
 from aris.core.access.directory_schemas import DirectoryMember, DirectoryPage, DirectoryQuery
 from aris.core.access.schemas import AccessContract
 from aris.core.commands.budgets import transaction_budget
-from aris.core.commands.gateway_schemas import ExternalCommandActor, GatewayLimits
+from aris.core.commands.gateway_schemas import ExternalCommandActor
 from aris.core.contracts import DomainError
 from aris.interfaces.commands.service import UserCommandSurface
 from aris.interfaces.identity.slack_directory import (
@@ -21,6 +21,18 @@ from aris.interfaces.slack.config import SlackSettings
 class DirectoryPageInput(AccessContract):
     limit: int = Field(default=20, ge=1, le=50, strict=True)
     after: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^\S+$")
+
+
+class IdentityQueryLimits(AccessContract):
+    lock_timeout_ms: int = Field(default=100, gt=0, le=1000, strict=True)
+    statement_timeout_ms: int = Field(default=1000, gt=0, le=5000, strict=True)
+    transaction_timeout_ms: int = Field(default=3000, gt=0, le=10000, strict=True)
+
+    @model_validator(mode="after")
+    def ordered_budgets(self) -> "IdentityQueryLimits":
+        if not self.lock_timeout_ms < self.statement_timeout_ms < self.transaction_timeout_ms:
+            raise ValueError("identity query budgets must increase")
+        return self
 
 
 class IdentityRosterMember(AccessContract):
@@ -44,7 +56,7 @@ class IdentityAdminSurface:
         directory: AccessDirectoryQueries,
         provider: SlackDirectoryProvider,
         node_ids: tuple[str, ...],
-        limits: GatewayLimits,
+        limits: IdentityQueryLimits,
     ) -> None:
         DirectoryQuery(node_ids=node_ids)
         if directory.administration.namespace.provider != "slack":
