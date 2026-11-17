@@ -24,10 +24,11 @@ from aris.core.relay.schemas import RelayLimits
 from aris.core.relay.service import EventRelay
 from aris.interfaces.commands.auth import BoundSubjectTokens, UserTokenBinding
 from aris.interfaces.commands.service import UserCommandSurface
-from aris.interfaces.reservations.service import UserReservationSurface
+from aris.interfaces.reservations.service import PersonalReservationQueries, UserReservationSurface
 from aris.interfaces.slack.client import ModalPublisher, SlackClient
 from aris.interfaces.slack.config import SlackSettings
 from aris.interfaces.slack.notifications import SlackNotificationTransport
+from aris.interfaces.slack.reservations import SlackReservationQueries
 from aris.interfaces.slack.user_commands import SlackCommandAdapter
 from aris.modules.nova.administration import ReservationAdministrationService
 from aris.modules.nova.availability import AvailabilityService
@@ -149,6 +150,7 @@ class M2Components:
     user_api: UserCommandSurface | None
     user_reservations: UserReservationSurface | None
     slack_callbacks: SlackCommandAdapter | None
+    slack_reservations: SlackReservationQueries | None
     commands: CommandWorker
     events: EventRelay
     notifications: NotificationDispatcher | None
@@ -219,6 +221,9 @@ def build_m2_components(
         confirmation_key_id=config.confirmation_key_id,
     )
     gateway = UserCommandGateway(intake, config.commands, config.gateway_limits)
+    personal_queries = PersonalReservationQueries(
+        sessions, reservations, config.namespace, config.gateway_limits
+    )
     user_api = (
         UserCommandSurface(
             gateway,
@@ -257,16 +262,16 @@ def build_m2_components(
         user_api=user_api,
         user_reservations=(
             UserReservationSurface(
-                sessions,
-                reservations,
-                config.namespace,
+                personal_queries,
                 user_api.authentication,
-                config.gateway_limits,
             )
             if user_api is not None
             else None
         ),
         slack_callbacks=callbacks,
+        slack_reservations=(
+            SlackReservationQueries(personal_queries) if config.slack_callbacks else None
+        ),
         commands=CommandWorker(intake, config.command_worker_limits),
         events=relay,
         notifications=dispatcher,

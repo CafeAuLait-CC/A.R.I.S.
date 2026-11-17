@@ -16,7 +16,7 @@ class SlackIdentity(SlackPayload):
 
 class SlashCommand(SlackPayload):
     team_id: str = Field(min_length=1, max_length=128)
-    user_id: str = Field(min_length=1, max_length=128)
+    user_id: str = Field(min_length=1, max_length=128, pattern=r"^\S+$")
     command: str = Field(min_length=1, max_length=128)
     text: str = Field(default="", max_length=8192)
 

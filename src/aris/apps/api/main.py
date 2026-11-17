@@ -29,6 +29,7 @@ from aris.interfaces.reservations.api import build_router as build_reservation_r
 from aris.interfaces.reservations.service import UserReservationSurface
 from aris.interfaces.slack.api import build_router as build_slack_router
 from aris.interfaces.slack.config import SlackSettings
+from aris.interfaces.slack.reservations import SlackReservationQueries
 from aris.interfaces.slack.service import SlackService
 from aris.interfaces.slack.user_commands import SlackCommandAdapter
 from aris.modules.vega.api import build_router
@@ -59,18 +60,22 @@ def create_app(
     user_commands: UserCommandSurface | None = None,
     slack_commands: SlackCommandAdapter | None = None,
     user_reservations: UserReservationSurface | None = None,
+    slack_reservations: SlackReservationQueries | None = None,
     m2_config: M2RuntimeConfig | None = None,
 ) -> FastAPI:
     config = settings or Settings()
     slack_config = slack_settings or SlackSettings()
     if m2_config is not None:
         if any(
-            surface is not None for surface in (user_commands, slack_commands, user_reservations)
+            surface is not None
+            for surface in (user_commands, slack_commands, user_reservations, slack_reservations)
         ):
             raise ValueError("M2 configuration and explicit command surfaces cannot be combined")
         validate_m2_configuration(config, slack_config, m2_config)
     if slack_commands is not None:
         slack_commands.validate_configuration(slack_config)
+    if slack_reservations is not None:
+        slack_reservations.validate_configuration(slack_config)
     if user_commands is not None:
         user_commands.validate_configuration(
             config.environment,
@@ -109,6 +114,7 @@ def create_app(
             raise
         user_commands, slack_commands = components.user_api, components.slack_callbacks
         user_reservations = components.user_reservations
+        slack_reservations = components.slack_reservations
     app.state.m2 = components
     vega = VegaService(sessions, config)
     app.include_router(build_router(vega, config))
@@ -116,7 +122,13 @@ def create_app(
     app.include_router(build_live_router(app.state.live_hub, config))
     app.include_router(
         build_slack_router(
-            SlackService(sessions, slack_config, vega, command_adapter=slack_commands)
+            SlackService(
+                sessions,
+                slack_config,
+                vega,
+                command_adapter=slack_commands,
+                reservation_queries=slack_reservations,
+            )
         )
     )
     if user_commands is not None:
@@ -142,7 +154,7 @@ def create_app(
             request.url.path == "/internal/commands"
             or request.url.path.startswith("/internal/commands/")
         )
-        if private_query or private_command:
+        if private_query or private_command or request.url.path == "/slack/commands":
             response.headers["Cache-Control"] = "no-store"
             response.headers["Pragma"] = "no-cache"
         return response

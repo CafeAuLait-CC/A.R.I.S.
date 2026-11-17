@@ -23,6 +23,7 @@ from aris.interfaces.slack.home import (
 )
 from aris.interfaces.slack.presentation import resource_text
 from aris.interfaces.slack.repo import SlackRepository
+from aris.interfaces.slack.reservations import SlackReservationQueries
 from aris.interfaces.slack.schemas import (
     EventEnvelope,
     GpuSelection,
@@ -60,22 +61,34 @@ class SlackService:
         modal_publisher: ModalPublisher | None = None,
         *,
         command_adapter: SlackCommandAdapter | None = None,
+        reservation_queries: SlackReservationQueries | None = None,
     ) -> None:
         self.sessions = sessions
         self.config = config
         self.vega = vega
         self.modal = modal_publisher or SlackClient(config)
         self.command_adapter = command_adapter
+        self.reservation_queries = reservation_queries
         if command_adapter is not None:
             command_adapter.validate_configuration(config)
+        if reservation_queries is not None:
+            reservation_queries.validate_configuration(config)
 
-    def command(self, body: bytes, timestamp: str | None, signature: str | None) -> SlackReply:
+    def command(
+        self, body: bytes, timestamp: str | None, signature: str | None, request_id: str
+    ) -> SlackReply:
         verify_request(self.config, body, timestamp, signature)
         try:
             command = SlashCommand.model_validate(form_fields(body))
         except (ValueError, ValidationError) as exc:
             raise DomainError("VALIDATION_ERROR", "Invalid Slack command", 422) from exc
         require_workspace(self.config, command.team_id)
+        if command.command == "/gpu" and command.text.strip().lower() == "mine":
+            if self.reservation_queries is None:
+                raise DomainError(
+                    "DEPENDENCY_UNAVAILABLE", "Personal reservation queries are not enabled", 503
+                )
+            return self.reservation_queries.mine(command, request_id)
         if command.command != "/gpu":
             text = "当前支持 /gpu status 查询资源观测。"
         elif command.text.strip().lower() in {"", "status", "list"}:

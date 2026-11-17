@@ -11,7 +11,7 @@ from aris.apps.api.main import create_app
 from aris.core.access.models import ExternalIdentity, RoleBinding, User
 from aris.core.access.schemas import ExternalSubject
 from aris.interfaces.commands.auth import BoundSubjectTokens, UserTokenBinding
-from aris.interfaces.reservations.service import UserReservationSurface
+from aris.interfaces.reservations.service import PersonalReservationQueries, UserReservationSurface
 from aris.interfaces.slack.config import SlackSettings
 from aris.modules.nova.reservation_schemas import MineQuery
 from aris.modules.vega.models import Node
@@ -39,7 +39,9 @@ def mine_api(booking, settings):
         ],
         reserved_tokens=[settings.read_token, SecretStr(AGENT_TOKEN)],
     )
-    surface = UserReservationSurface(sessions, reservations, NAMESPACE, auth, LIMITS)
+    surface = UserReservationSurface(
+        PersonalReservationQueries(sessions, reservations, NAMESPACE, LIMITS), auth
+    )
     with TestClient(
         create_app(settings, SlackSettings(_env_file=None), user_reservations=surface),
         raise_server_exceptions=False,
@@ -269,7 +271,7 @@ def test_personal_identity_lookup_has_a_database_time_budget(mine_api, monkeypat
         session.execute(text("SELECT pg_sleep(2)"))
         raise AssertionError("database budget did not stop the lookup")
 
-    monkeypatch.setattr(surface.access, "resolve_external_in_transaction", slow_lookup)
+    monkeypatch.setattr(surface.queries.access, "resolve_external_in_transaction", slow_lookup)
     started = time.monotonic()
     response = client.get(PATH, headers=headers())
     assert response.status_code == 503 and response.json()["error"]["code"] == "QUERY_UNAVAILABLE"
@@ -283,6 +285,8 @@ def test_query_does_not_invoke_gpu_or_notification_dependencies(mine_api, monkey
     def forbidden(*args, **kwargs):
         raise AssertionError("personal query must not fetch GPU facts")
 
-    monkeypatch.setattr(surface.reservations.availability.targets, "gpu_in_transaction", forbidden)
+    monkeypatch.setattr(
+        surface.queries.reservations.availability.targets, "gpu_in_transaction", forbidden
+    )
     assert client.get(PATH, headers=headers()).status_code == 200
     assert surface.mine("Bearer " + ALICE_TOKEN, "fixture-query", MineQuery()).reservations

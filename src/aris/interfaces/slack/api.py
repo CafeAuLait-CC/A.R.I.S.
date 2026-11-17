@@ -53,7 +53,11 @@ def build_router(service: SlackService) -> APIRouter:
     ) -> JSONResponse:
         reject_ambiguous_signatures(request)
         reply = await run_in_threadpool(
-            service.command, await read_body(request), x_slack_request_timestamp, x_slack_signature
+            service.command,
+            await read_body(request),
+            x_slack_request_timestamp,
+            x_slack_signature,
+            request.state.request_id,
         )
         return JSONResponse(reply.payload, status_code=reply.status_code)
 
