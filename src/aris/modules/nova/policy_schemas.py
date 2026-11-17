@@ -44,9 +44,60 @@ class CalendarWeek(PolicyContract):
 QuotaWindow = Annotated[RollingWeek | CalendarWeek, Field(discriminator="kind")]
 
 
-class QuotaRules(PolicyContract):
+class GlobalQuotaRules(PolicyContract):
+    scope: Literal["global"]
+    basis: Literal["actual_gpu_usage"]
     window: QuotaWindow
     default_limit: QuotaLimit
+
+
+class NodeQuotaLimit(PolicyContract):
+    node_id: str = Field(min_length=1, max_length=128, pattern=r"^\S+$")
+    limit: QuotaLimit
+
+
+class NodeQuotaRules(PolicyContract):
+    scope: Literal["per_node"]
+    basis: Literal["actual_gpu_usage"]
+    window: QuotaWindow
+    node_limits: tuple[NodeQuotaLimit, ...] = Field(min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def unique_nodes(self) -> "NodeQuotaRules":
+        if len({item.node_id for item in self.node_limits}) != len(self.node_limits):
+            raise ValueError("per-node quota limits must have unique targets")
+        return self
+
+
+QuotaRules = Annotated[GlobalQuotaRules | NodeQuotaRules, Field(discriminator="scope")]
+
+
+class GpuTimeWeight(PolicyContract):
+    numerator: int = Field(ge=1, le=1000, strict=True)
+    denominator: int = Field(ge=1, le=1000, strict=True)
+
+
+class GpuModelWeight(PolicyContract):
+    model: str = Field(min_length=1, max_length=256)
+    weight: GpuTimeWeight
+
+    @field_validator("model")
+    @classmethod
+    def exact_nonblank_model(cls, value: str) -> str:
+        if not value.strip() or value != value.strip() or any(ord(char) < 32 for char in value):
+            raise ValueError("model weight requires an exact nonblank inventory label")
+        return value
+
+
+class GpuTimeWeights(PolicyContract):
+    default_weight: GpuTimeWeight
+    model_weights: tuple[GpuModelWeight, ...] = Field(default=(), max_length=64)
+
+    @model_validator(mode="after")
+    def unique_models(self) -> "GpuTimeWeights":
+        if len({item.model for item in self.model_weights}) != len(self.model_weights):
+            raise ValueError("model weight targets must be unique")
+        return self
 
 
 class ReservationRules(PolicyContract):
@@ -101,6 +152,7 @@ IdleReclaim = Annotated[IdleReclaimDisabled | IdleReclaimRules, Field(discrimina
 class PolicySpec(PolicyContract):
     timezone: str = Field(min_length=1, max_length=128)
     quota: QuotaRules
+    gpu_time_weights: GpuTimeWeights
     reservation: ReservationRules
     idle_reclaim: IdleReclaim
     role_overrides: tuple[RoleOverride, ...] = Field(default=(), max_length=32)

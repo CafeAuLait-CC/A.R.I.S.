@@ -23,9 +23,12 @@ def policy(**spec_changes):
         "spec": {
             "timezone": "America/Vancouver",
             "quota": {
+                "scope": "global",
+                "basis": "actual_gpu_usage",
                 "window": {"kind": "calendar_week", "week_starts_on": "monday"},
                 "default_limit": {"kind": "limited", "gpu_seconds": 7200},
             },
+            "gpu_time_weights": {"default_weight": {"numerator": 1, "denominator": 1}},
             "reservation": {
                 "max_duration_seconds": 3600,
                 "min_notice_seconds": 60,
@@ -247,3 +250,91 @@ def test_source_and_compiled_tree_are_immutable_and_compiler_revalidates_uncheck
     with pytest.raises(ValidationError):
         compile_policy(unchecked)
     assert isinstance(source, GpuAllocationPolicy)
+
+
+def node_quota():
+    return {
+        "scope": "per_node",
+        "basis": "actual_gpu_usage",
+        "window": {"kind": "calendar_week", "week_starts_on": "monday"},
+        "node_limits": [
+            {"node_id": "fixture-b", "limit": {"kind": "limited", "gpu_seconds": 604800}},
+            {"node_id": "fixture-a", "limit": {"kind": "limited", "gpu_seconds": 604800}},
+        ],
+    }
+
+
+def test_per_node_quota_is_explicit_and_has_no_fallback_for_other_nodes():
+    result = compile_policy(parse(policy(quota=node_quota())))
+    assert result.source.spec.quota.scope == "per_node"
+    assert [item.node_id for item in result.source.spec.quota.node_limits] == [
+        "fixture-a",
+        "fixture-b",
+    ]
+    assert not hasattr(result.source.spec.quota, "default_limit")
+    other = node_quota()
+    other["node_limits"].reverse()
+    assert compile_policy(parse(policy(quota=other))) == result
+
+
+@pytest.mark.parametrize(
+    "mutation", ["duplicate_node", "empty", "global_default", "reservation_basis", "unknown_scope"]
+)
+def test_node_quotas_cannot_silently_merge_or_change_actual_usage_basis(mutation):
+    quota = node_quota()
+    if mutation == "duplicate_node":
+        quota["node_limits"].append(quota["node_limits"][0].copy())
+    elif mutation == "empty":
+        quota["node_limits"] = []
+    elif mutation == "global_default":
+        quota["default_limit"] = {"kind": "unlimited"}
+    elif mutation == "reservation_basis":
+        quota["basis"] = "reserved_gpu_time"
+    else:
+        quota["scope"] = "infer_from_roles"
+    with pytest.raises(DomainError):
+        parse(policy(quota=quota))
+
+
+def test_model_time_weights_use_exact_rationals_and_canonical_model_order():
+    weights = {
+        "default_weight": {"numerator": 2, "denominator": 2},
+        "model_weights": [
+            {"model": "Fixture GPU B", "weight": {"numerator": 6, "denominator": 4}},
+            {"model": "Fixture GPU A", "weight": {"numerator": 3, "denominator": 3}},
+        ],
+    }
+    result = compile_policy(parse(policy(gpu_time_weights=weights)))
+    actual = result.source.spec.gpu_time_weights
+    assert actual.default_weight.model_dump() == {"numerator": 1, "denominator": 1}
+    assert [item.model for item in actual.model_weights] == ["Fixture GPU A", "Fixture GPU B"]
+    assert actual.model_weights[1].weight.model_dump() == {"numerator": 3, "denominator": 2}
+    equivalent = copy.deepcopy(weights)
+    equivalent["default_weight"] = {"numerator": 1, "denominator": 1}
+    equivalent["model_weights"][0]["weight"] = {"numerator": 3, "denominator": 2}
+    equivalent["model_weights"].reverse()
+    assert compile_policy(parse(policy(gpu_time_weights=equivalent))) == result
+
+
+@pytest.mark.parametrize(
+    "weight",
+    [
+        {"numerator": True, "denominator": 1},
+        {"numerator": 1.5, "denominator": 1},
+        {"numerator": 0, "denominator": 1},
+        {"numerator": 1, "denominator": 0},
+        {"numerator": 1001, "denominator": 1},
+    ],
+)
+def test_time_weights_reject_coercion_zero_and_unbounded_values(weight):
+    with pytest.raises(DomainError):
+        parse(policy(gpu_time_weights={"default_weight": weight}))
+
+
+def test_model_rate_targets_must_be_unique_exact_inventory_labels():
+    item = {"model": "Fixture GPU", "weight": {"numerator": 1, "denominator": 1}}
+    for models in ([item, item], [{**item, "model": " Fixture GPU"}], [{**item, "model": " "}]):
+        with pytest.raises(DomainError):
+            parse(
+                policy(gpu_time_weights={"default_weight": item["weight"], "model_weights": models})
+            )
