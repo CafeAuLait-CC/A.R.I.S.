@@ -127,6 +127,14 @@ def test_composed_api_workers_process_reservation_and_preserve_disabled_delivery
         assert mine.status_code == 200
         assert mine.json()["reservations"][0]["purpose"] == "Private composed fixture"
         assert mine.headers["Cache-Control"] == "no-store"
+        window = client.get(
+            "/internal/reservations/availability",
+            headers=headers(),
+            params={
+                name: payload["parameters"][name] for name in ("gpu_uuid", "start_at", "end_at")
+            },
+        )
+        assert window.status_code == 200 and window.json()["code"] == "CONFLICT"
     transport = FixtureTransport(sessions)
     enabled = build_m2_components(
         sessions,
