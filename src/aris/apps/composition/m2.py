@@ -9,7 +9,10 @@ from pydantic import Field, JsonValue, SecretStr, model_validator
 from sqlalchemy.orm import Session, sessionmaker
 
 from aris.core.access.admin_schemas import IdentityNamespace
-from aris.core.access.schemas import AccessContract
+from aris.core.access.administration import AccessAdministrationService
+from aris.core.access.directory import AccessDirectoryQueries
+from aris.core.access.mapping_command import IdentityMappingCommand
+from aris.core.access.schemas import AccessContract, Identifier
 from aris.core.commands.gateway import UserCommandGateway
 from aris.core.commands.gateway_schemas import GatewayLimits
 from aris.core.commands.intake import CommandIntakeService
@@ -24,6 +27,8 @@ from aris.core.relay.schemas import RelayLimits
 from aris.core.relay.service import EventRelay
 from aris.interfaces.commands.auth import BoundSubjectTokens, UserTokenBinding
 from aris.interfaces.commands.service import UserCommandSurface
+from aris.interfaces.identity.service import IdentityAdminSurface
+from aris.interfaces.identity.slack_directory import SlackDirectoryClient, SlackDirectoryProvider
 from aris.interfaces.reservations.service import PersonalReservationQueries, UserReservationSurface
 from aris.interfaces.slack.client import HomePublisher, ModalPublisher, SlackClient
 from aris.interfaces.slack.config import SlackSettings
@@ -55,6 +60,7 @@ from aris.modules.nova.notifications import (
 )
 from aris.modules.nova.occupancy import ReservationOccupancyService
 from aris.modules.nova.reservation_service import ReservationService
+from aris.modules.vega.scope_service import VegaNodeScopes
 from aris.modules.vega.service import VegaService
 from aris.modules.vega.target_service import VegaTargetService
 
@@ -65,13 +71,14 @@ CommandName = Literal[
     "reservation.extend",
     "reservation.cancel_any",
     "reservation.release_any",
+    "identity.map_users",
 ]
 WorkerMode = Literal["commands", "events", "notifications", "home", "all"]
 
 
 class M2RuntimeConfig(AccessContract):
     namespace: IdentityNamespace
-    commands: tuple[CommandName, ...] = Field(min_length=1, max_length=6)
+    commands: tuple[CommandName, ...] = Field(min_length=1, max_length=7)
     confirmation_key: SecretStr = Field(min_length=32, max_length=512, repr=False)
     confirmation_key_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_.-]+$")
     confirmation_ttl_seconds: int = Field(ge=30, le=900, strict=True)
@@ -86,11 +93,23 @@ class M2RuntimeConfig(AccessContract):
     slack_callbacks: bool = Field(default=False, strict=True)
     notification_delivery: bool = Field(default=False, strict=True)
     reservation_home: bool = Field(default=False, strict=True)
+    identity_admin: bool = Field(default=False, strict=True)
+    identity_nodes: tuple[Identifier, ...] = Field(default=(), max_length=8)
 
     @model_validator(mode="after")
     def explicit_authorities(self) -> "M2RuntimeConfig":
         if self.namespace.provider != "slack" or len(set(self.commands)) != len(self.commands):
             raise ValueError("M2 requires an explicit Slack namespace and unique commands")
+        if len(set(self.identity_nodes)) != len(self.identity_nodes):
+            raise ValueError("identity nodes must be unique")
+        if self.identity_admin and (
+            not self.identity_nodes
+            or not self.user_tokens
+            or "identity.map_users" not in self.commands
+        ):
+            raise ValueError(
+                "identity UI requires explicit nodes, user authentication and mapping command"
+            )
         if any(name in self.commands for name in ("reservation.create", "reservation.extend")):
             if self.rules is None or not self.maintenance:
                 raise ValueError(
@@ -144,7 +163,7 @@ def validate_m2_configuration(
         )
         if settings.environment == "production" and auth.development_only:
             raise ValueError("development user credentials cannot enable production commands")
-    if (config.slack_callbacks or config.reservation_home) and (
+    if (config.slack_callbacks or config.reservation_home or config.identity_admin) and (
         not slack.configured or slack.team_id != config.namespace.namespace
     ):
         raise ValueError("Slack callbacks require the configured identity workspace")
@@ -167,6 +186,7 @@ class M2Components:
     notifications: NotificationDispatcher | None
     home_reservations: HomeReservationSource | None
     home: SlackDispatcher | None
+    identity_admin: IdentityAdminSurface | None
 
     def run_once(self, mode: WorkerMode) -> dict[str, JsonValue]:
         if mode not in {"commands", "events", "notifications", "home", "all"}:
@@ -207,6 +227,7 @@ def build_m2_components(
     notification_transport: NotificationTransport | None = None,
     modal_publisher: ModalPublisher | None = None,
     home_publisher: HomePublisher | None = None,
+    identity_directory: SlackDirectoryProvider | None = None,
 ) -> M2Components:
     validate_m2_configuration(settings, slack, config)
     clock = clock or (lambda: datetime.now(UTC))
@@ -217,6 +238,9 @@ def build_m2_components(
     reservations = ReservationService(sessions, available)
     extensions = ReservationExtensionService(sessions, available, clock=clock)
     administration = ReservationAdministrationService(sessions, clock=clock)
+    identities = AccessAdministrationService(
+        sessions, config.namespace, scopes=VegaNodeScopes(sessions), clock=clock
+    )
     available_commands: dict[str, DatabaseCommand] = {
         "reservation.create": CreateReservationCommand(reservations),
         "reservation.cancel": CancelReservationCommand(reservations),
@@ -224,6 +248,7 @@ def build_m2_components(
         "reservation.extend": ExtendReservationCommand(extensions),
         "reservation.cancel_any": CancelAnyReservationCommand(administration),
         "reservation.release_any": ReleaseAnyReservationCommand(administration),
+        "identity.map_users": IdentityMappingCommand(identities),
     }
     commands = CommandService(
         sessions,
@@ -294,6 +319,17 @@ def build_m2_components(
     return M2Components(
         intake=intake,
         user_api=user_api,
+        identity_admin=(
+            IdentityAdminSurface(
+                user_api,
+                AccessDirectoryQueries(identities),
+                identity_directory or SlackDirectoryClient(slack, clock=clock),
+                config.identity_nodes,
+                config.gateway_limits,
+            )
+            if config.identity_admin and user_api is not None
+            else None
+        ),
         user_reservations=(
             UserReservationSurface(
                 personal_queries,

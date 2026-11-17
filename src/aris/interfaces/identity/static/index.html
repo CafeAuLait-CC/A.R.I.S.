@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ARIS · Identity mapping</title>
+  <link rel="stylesheet" href="/internal/identity/ui/assets/admin.css">
+  <script type="module" src="/internal/identity/ui/assets/admin.js"></script>
+</head>
+<body>
+<main>
+  <header class="page-header">
+    <div><p class="eyebrow">ARIS · Administration</p><h1>Identity mapping</h1>
+      <p class="subtitle">Link a Slack member to their Linux username on each node.</p></div>
+    <span class="badge">Development</span>
+  </header>
+  <section class="access-panel" aria-label="Access">
+    <label for="credential">Development user credential</label>
+    <div class="access-controls"><input id="credential" type="password" autocomplete="off" spellcheck="false" placeholder="Enter your independent user credential">
+      <button id="use-credential" type="button">Use credential</button><button id="sign-out" type="button" class="quiet">Clear access</button></div>
+    <p class="muted small">The credential stays in this page's memory. Loading a directory verifies your current access.</p>
+  </section>
+  <section class="directory-panel" aria-labelledby="directory-heading">
+    <div class="section-heading"><div><h2 id="directory-heading">Members</h2><p class="muted">Identity registration grants no reservation roles.</p></div>
+      <div class="toolbar"><button id="load-slack" type="button" disabled>Load Slack members</button><button id="load-registered" type="button" class="quiet" disabled>Registered identities</button></div></div>
+    <div id="notice" class="notice" role="status" aria-live="polite">Set a user credential, then choose a directory to load.</div>
+    <div class="table-controls"><label for="filter">Filter current page<input id="filter" type="search" placeholder="Name or Member ID" autocomplete="off"></label>
+      <label for="reason">Reason for changes<input id="reason" maxlength="256" placeholder="Why are these mappings changing?" autocomplete="off"></label></div>
+    <p id="snapshot" class="muted small"></p>
+    <div class="table-scroll"><table><thead id="members-head"></thead><tbody id="members-body"></tbody></table></div>
+    <div class="page-controls"><button id="resume-request" type="button" hidden>Resume request</button><button id="next-page" type="button" class="quiet" disabled>Next page</button></div>
+  </section>
+  <p class="footnote">Slack names identify the displayed member. Linux usernames are entered explicitly and can differ between nodes. Mapping changes require a separate confirmation.</p>
+</main>
+<dialog id="review-dialog" aria-labelledby="review-title">
+  <div class="dialog-header"><h2 id="review-title">Review mapping changes</h2><button id="close-review" type="button" class="quiet">Close</button></div>
+  <div id="review-content" class="review-content"></div><p id="review-status" class="notice" role="status" aria-live="polite"></p>
+  <div class="dialog-actions"><button id="refresh-review" type="button" class="quiet">Refresh status</button><button id="withdraw-review" type="button" class="quiet" disabled>Withdraw request</button><button id="confirm-review" type="button" disabled>Confirm changes</button></div>
+</dialog>
+</body>
+</html>
