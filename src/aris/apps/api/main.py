@@ -15,6 +15,8 @@ from aris import __version__
 from aris.core.config import Settings
 from aris.core.contracts import DomainError, ErrorDetail, ErrorResponse
 from aris.core.db import SCHEMA_REVISION, build_engine, check_database, session_factory
+from aris.interfaces.commands.api import build_router as build_command_router
+from aris.interfaces.commands.service import UserCommandSurface
 from aris.interfaces.slack.api import build_router as build_slack_router
 from aris.interfaces.slack.config import SlackSettings
 from aris.interfaces.slack.service import SlackService
@@ -40,9 +42,20 @@ def error_response(request: Request, code: str, message: str, status: int) -> JS
 
 
 def create_app(
-    settings: Settings | None = None, slack_settings: SlackSettings | None = None
+    settings: Settings | None = None,
+    slack_settings: SlackSettings | None = None,
+    *,
+    user_commands: UserCommandSurface | None = None,
 ) -> FastAPI:
     config = settings or Settings()
+    if user_commands is not None:
+        user_commands.validate_configuration(
+            config.environment,
+            [
+                config.read_token,
+                *(credential.token for credential in config.agent_credentials.values()),
+            ],
+        )
     engine = build_engine(config.database_url)
 
     @asynccontextmanager
@@ -60,6 +73,8 @@ def create_app(
     app.include_router(
         build_slack_router(SlackService(sessions, slack_settings or SlackSettings(), vega))
     )
+    if user_commands is not None:
+        app.include_router(build_command_router(user_commands))
 
     @app.middleware("http")
     async def request_context(
@@ -71,6 +86,12 @@ def create_app(
         )
         response = await call_next(request)
         response.headers["X-Request-ID"] = request.state.request_id
+        if user_commands is not None and (
+            request.url.path == "/internal/commands"
+            or request.url.path.startswith("/internal/commands/")
+        ):
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["Pragma"] = "no-cache"
         return response
 
     @app.exception_handler(DomainError)
