@@ -41,6 +41,24 @@ class NotificationRepository:
     def attempt(self, attempt_id: str) -> NotificationAttempt | None:
         return self.session.get(NotificationAttempt, attempt_id, populate_existing=True)
 
+    def scoped_notification(
+        self,
+        notification_id: str,
+        *,
+        namespace: IdentityNamespace,
+        template_ids: tuple[str, ...],
+        lock: bool = False,
+    ) -> NotificationOutbox | None:
+        statement = select(NotificationOutbox).where(
+            NotificationOutbox.id == notification_id,
+            NotificationOutbox.provider == namespace.provider,
+            NotificationOutbox.namespace == namespace.namespace,
+            NotificationOutbox.template_id.in_(template_ids),
+        )
+        if lock:
+            statement = statement.with_for_update()
+        return self.session.scalar(statement.execution_options(populate_existing=True))
+
     def next_notification(
         self, now: datetime, *, namespace: IdentityNamespace, template_ids: tuple[str, ...]
     ) -> NotificationOutbox | None:

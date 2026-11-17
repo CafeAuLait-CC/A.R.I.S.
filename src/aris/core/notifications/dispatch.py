@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from aris.core.commands.budgets import transaction_budget
 from aris.core.contracts import DomainError
 from aris.core.db import commit_owned_transaction
+from aris.core.notifications.administration import MANUAL_RETRY
 from aris.core.notifications.models import NotificationAttempt, NotificationOutbox
 from aris.core.notifications.repo import NotificationRepository
 from aris.core.notifications.schemas import (
@@ -233,8 +234,40 @@ class NotificationDispatcher:
                 current = (
                     record.last_attempt_id == attempt.id
                     and record.attempts == claim.attempt
-                    and record.state in {"running", "uncertain"}
+                    and (
+                        record.state in {"running", "uncertain"}
+                        or (
+                            receipt is not None
+                            and record.state == "queued"
+                            and record.last_error_code == MANUAL_RETRY
+                            and attempt.state == "uncertain"
+                        )
+                    )
                 )
+                if (
+                    not current
+                    and record.state == "queued"
+                    and record.last_attempt_id == attempt.id
+                    and record.last_error_code == MANUAL_RETRY
+                    and attempt.state == "uncertain"
+                    and error is not None
+                ):
+                    if not error.outcome_unknown:
+                        attempt.state, attempt.finished_at, attempt.error_code = (
+                            "rejected",
+                            self.service.now(),
+                            error.code,
+                        )
+                        self.service.audit(
+                            session,
+                            record,
+                            "notification.attempt.late_rejected",
+                            error.code,
+                            attempt_id=attempt.id,
+                            attempt=attempt.attempt,
+                        )
+                        commit_owned_transaction(session)
+                    return self._lost(claim)
                 if (
                     current
                     and record.state == "uncertain"

@@ -20,6 +20,8 @@ from aris.core.commands.queue_schemas import CommandWorkerLimits, IntakeLimits
 from aris.core.commands.service import CommandService, DatabaseCommand
 from aris.core.commands.worker import CommandWorker
 from aris.core.config import Settings
+from aris.core.notifications.administration import NotificationAdministrationService
+from aris.core.notifications.commands import RetryUncertainNotificationCommand
 from aris.core.notifications.dispatch import NotificationDispatcher, NotificationTransport
 from aris.core.notifications.schemas import NotificationLimits
 from aris.core.notifications.service import NotificationService
@@ -72,13 +74,14 @@ CommandName = Literal[
     "reservation.cancel_any",
     "reservation.release_any",
     "identity.map_users",
+    "notification.retry_uncertain",
 ]
 WorkerMode = Literal["commands", "events", "notifications", "home", "all"]
 
 
 class M2RuntimeConfig(AccessContract):
     namespace: IdentityNamespace
-    commands: tuple[CommandName, ...] = Field(min_length=1, max_length=7)
+    commands: tuple[CommandName, ...] = Field(min_length=1, max_length=8)
     confirmation_key: SecretStr = Field(min_length=32, max_length=512, repr=False)
     confirmation_key_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_.-]+$")
     confirmation_ttl_seconds: int = Field(ge=30, le=900, strict=True)
@@ -242,6 +245,9 @@ def build_m2_components(
     identities = AccessAdministrationService(
         sessions, config.namespace, scopes=VegaNodeScopes(sessions), clock=clock
     )
+    notifications = NotificationService(
+        sessions, config.namespace, [ReservationNoticeTemplate()], clock=clock
+    )
     available_commands: dict[str, DatabaseCommand] = {
         "reservation.create": CreateReservationCommand(reservations),
         "reservation.cancel": CancelReservationCommand(reservations),
@@ -250,6 +256,9 @@ def build_m2_components(
         "reservation.cancel_any": CancelAnyReservationCommand(administration),
         "reservation.release_any": ReleaseAnyReservationCommand(administration),
         "identity.map_users": IdentityMappingCommand(identities),
+        "notification.retry_uncertain": RetryUncertainNotificationCommand(
+            NotificationAdministrationService(notifications, config.notification_limits)
+        ),
     }
     commands = CommandService(
         sessions,
@@ -286,9 +295,6 @@ def build_m2_components(
         SlackCommandAdapter(gateway, publisher, review_presenter)
         if config.slack_callbacks
         else None
-    )
-    notifications = NotificationService(
-        sessions, config.namespace, [ReservationNoticeTemplate()], clock=clock
     )
     relay = EventRelay(
         sessions,
