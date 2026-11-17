@@ -281,6 +281,9 @@ class NotificationDispatcher:
                     )
                 now = self.service.now()
                 if receipt is not None:
+                    cancel_manual_retry = (
+                        record.state == "queued" and record.last_error_code == MANUAL_RETRY
+                    )
                     attempt.state = "delivered" if current else "late_delivered"
                     attempt.finished_at, attempt.error_code = now, None
                     attempt.channel_ref, attempt.message_ref = (
@@ -297,7 +300,11 @@ class NotificationDispatcher:
                             attempt_id=attempt.id,
                             attempt=attempt.attempt,
                         )
-                        result = self._lost(claim)
+                        result = (
+                            self._terminal(session, record, "delivered")
+                            if cancel_manual_retry
+                            else self._lost(claim)
+                        )
                 else:
                     assert error is not None
                     attempt.state = "uncertain" if error.outcome_unknown else "rejected"

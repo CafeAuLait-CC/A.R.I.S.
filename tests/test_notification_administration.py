@@ -491,13 +491,23 @@ def test_queued_manual_retry_command_rechecks_current_permission_before_executio
     assert not transport.sent
 
 
+@pytest.mark.parametrize("earlier_attempt", [False, True])
 def test_postgres_late_success_racing_manual_approval_never_leaves_a_resend_queued(
     notification_admin,
+    earlier_attempt,
 ):
     admin, state, _ = notification_admin
     if state[2].kw["bind"].dialect.name != "postgresql":
         pytest.skip("PostgreSQL row lock across receipt and manual approval")
     handle, claim, request = uncertain(state)
+    if earlier_attempt:
+        admin.retry(operation(state), request)
+        later = state[1].claim()
+        state[1].prepare(later)
+        state[1].finish(
+            later, error=NotificationDeliveryError("FIXTURE_UNKNOWN", outcome_unknown=True)
+        )
+        request = request.model_copy(update={"expected_attempt_id": later.attempt_id})
     barrier = Barrier(2)
 
     def retry():
@@ -514,9 +524,49 @@ def test_postgres_late_success_racing_manual_approval_never_leaves_a_resend_queu
     with ThreadPoolExecutor(max_workers=2) as pool:
         retry_result = pool.submit(retry)
         receipt_result = pool.submit(receive)
-        assert retry_result.result(timeout=5) in {"queued", "CONFLICT"}
-        assert receipt_result.result(timeout=5) == "delivered"
+        decision = retry_result.result(timeout=5)
+        receipt = receipt_result.result(timeout=5)
+        assert decision in {"queued", "CONFLICT", "ALREADY_DELIVERED"}
+        assert receipt == ("lost_claim" if decision == "ALREADY_DELIVERED" else "delivered")
     assert state[1].run_once() is None and not state[5].sent
     with state[2]() as session:
         record = session.get(NotificationOutbox, str(handle.notification_id))
-        assert record.state == "delivered" and record.attempts == 1
+        assert record.state == ("uncertain" if decision == "ALREADY_DELIVERED" else "delivered")
+        assert record.attempts == (2 if earlier_attempt else 1)
+
+
+def test_earlier_known_success_blocks_retry_of_a_later_uncertain_attempt(notification_admin):
+    admin, state, _ = notification_admin
+    _, old, request = uncertain(state)
+    admin.retry(operation(state), request)
+    later = state[1].claim()
+    state[1].prepare(later)
+    state[1].finish(later, error=NotificationDeliveryError("FIXTURE_UNKNOWN", outcome_unknown=True))
+    assert state[1].finish(old, receipt=RECEIPT).state == "lost_claim"
+    before = all_rows(state[2])
+    with pytest.raises(DomainError) as rejected:
+        admin.retry(
+            operation(state), request.model_copy(update={"expected_attempt_id": later.attempt_id})
+        )
+    assert rejected.value.code == "ALREADY_DELIVERED" and all_rows(state[2]) == before
+
+
+def test_earlier_success_after_manual_approval_cancels_queue_and_preserves_latest_evidence(
+    notification_admin,
+):
+    admin, state, _ = notification_admin
+    handle, old, request = uncertain(state)
+    admin.retry(operation(state), request)
+    later = state[1].claim()
+    state[1].prepare(later)
+    state[1].finish(later, error=NotificationDeliveryError("FIXTURE_UNKNOWN", outcome_unknown=True))
+    admin.retry(
+        operation(state), request.model_copy(update={"expected_attempt_id": later.attempt_id})
+    )
+    assert state[1].finish(old, receipt=RECEIPT).state == "delivered"
+    assert state[1].run_once() is None and not state[5].sent
+    with state[2]() as session:
+        record = session.get(NotificationOutbox, str(handle.notification_id))
+        assert record.state == "delivered" and record.last_attempt_id == str(later.attempt_id)
+        assert session.get(NotificationAttempt, str(later.attempt_id)).state == "uncertain"
+        assert session.get(NotificationAttempt, str(old.attempt_id)).state == "late_delivered"

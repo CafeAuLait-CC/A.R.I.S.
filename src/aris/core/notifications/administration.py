@@ -114,6 +114,10 @@ class NotificationAdministrationService:
                 raise DomainError(
                     "RETRY_BUDGET_EXHAUSTED", "Notification attempt budget is exhausted", 409
                 )
+            if repo.has_successful_attempt(record.id):
+                raise DomainError(
+                    "ALREADY_DELIVERED", "A successful delivery is already verified", 409
+                )
             self.service.validate_snapshot(session, record)
             self._permission(session, context)
             now = self.service.now()

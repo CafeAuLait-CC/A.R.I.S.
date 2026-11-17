@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ARIS · Notification delivery</title><link rel="stylesheet" href="/internal/notifications/ui/assets/admin.css">
+<script src="/internal/notifications/ui/assets/admin.js" defer></script></head>
+<body><main>
+<header class="page-header"><div><p class="eyebrow">ARIS administration</p><h1>Notification delivery</h1>
+<p class="subtitle">Review uncertain deliveries before allowing another attempt.</p></div><span class="badge">Manual review</span></header>
+<section class="panel access-panel" aria-labelledby="access-title"><h2 id="access-title">Administrator access</h2>
+<label for="credential">Development user credential</label><div class="access-controls">
+<input id="credential" type="password" maxlength="256" autocomplete="off" spellcheck="false" placeholder="Enter your independent user credential">
+<button id="use-credential" type="button">Use credential</button><button id="clear-access" type="button" class="quiet">Clear access</button></div>
+<p class="muted small">The credential stays in this page's memory. Notification management requires its own permission.</p></section>
+<section class="panel" aria-labelledby="deliveries-title"><div class="section-heading"><div><h2 id="deliveries-title">Uncertain deliveries</h2>
+<p class="muted small">These messages may already have reached their recipients. Only registered templates in this workspace are listed.</p></div><div class="toolbar">
+<button id="load" type="button" disabled>Load uncertain</button><button id="resume" type="button" class="quiet" hidden>Resume review</button></div></div>
+<div id="notice" class="notice" role="status" aria-live="polite">Set a user credential, then load the current records.</div>
+<p id="snapshot" class="muted small snapshot"></p>
+<div class="table-scroll"><table><thead><tr><th>Created</th><th>Recipient</th><th>Template</th><th>Attempts</th><th>Latest outcome</th><th></th></tr></thead>
+<tbody id="records"></tbody></table></div><div class="page-controls"><button id="first" type="button" class="quiet" disabled>First page</button><button id="next" type="button" class="quiet" disabled>Next page</button></div></section>
+<p class="footnote">Approval allows another attempt; it does not confirm delivery. Clearing access does not cancel an accepted approval.</p>
+</main>
+<dialog id="review-dialog" aria-labelledby="review-title"><div class="dialog-header"><div><p class="eyebrow">Delivery evidence</p><h2 id="review-title">Review notification</h2></div><button id="close" type="button" class="quiet">Close</button></div>
+<div id="details" class="details"></div>
+<div id="retry-form"><label for="reason">Reason for another attempt</label><input id="reason" maxlength="256" autocomplete="off" placeholder="Explain why another attempt is appropriate">
+<label class="risk"><input id="acknowledge" type="checkbox">I understand this may send a duplicate message.</label>
+<button id="review-retry" type="button" disabled>Review retry</button></div>
+<div id="intent" class="intent"></div><div id="review-status" class="notice" role="status" aria-live="polite"></div>
+<div class="dialog-actions"><button id="new-review" type="button" class="quiet" hidden>Start new review</button><button id="refresh" type="button" class="quiet">Refresh status</button><button id="withdraw" type="button" class="quiet" disabled>Withdraw approval</button><button id="confirm" type="button" disabled>Confirm another attempt</button></div>
+</dialog></body></html>

@@ -23,6 +23,8 @@ from aris.core.config import Settings
 from aris.core.notifications.administration import NotificationAdministrationService
 from aris.core.notifications.commands import RetryUncertainNotificationCommand
 from aris.core.notifications.dispatch import NotificationDispatcher, NotificationTransport
+from aris.core.notifications.queries import NotificationOperatorQueries
+from aris.core.notifications.query_schemas import NotificationQueryLimits
 from aris.core.notifications.schemas import NotificationLimits
 from aris.core.notifications.service import NotificationService
 from aris.core.relay.schemas import RelayLimits
@@ -31,6 +33,7 @@ from aris.interfaces.commands.auth import BoundSubjectTokens, UserTokenBinding
 from aris.interfaces.commands.service import UserCommandSurface
 from aris.interfaces.identity.service import IdentityAdminSurface, IdentityQueryLimits
 from aris.interfaces.identity.slack_directory import SlackDirectoryClient, SlackDirectoryProvider
+from aris.interfaces.notifications.service import NotificationAdminSurface
 from aris.interfaces.reservations.service import PersonalReservationQueries, UserReservationSurface
 from aris.interfaces.slack.client import HomePublisher, ModalPublisher, SlackClient
 from aris.interfaces.slack.config import SlackSettings
@@ -99,6 +102,10 @@ class M2RuntimeConfig(AccessContract):
     identity_admin: bool = Field(default=False, strict=True)
     identity_nodes: tuple[Identifier, ...] = Field(default=(), max_length=8)
     identity_query_limits: IdentityQueryLimits = Field(default_factory=IdentityQueryLimits)
+    notification_admin: bool = Field(default=False, strict=True)
+    notification_query_limits: NotificationQueryLimits = Field(
+        default_factory=NotificationQueryLimits
+    )
 
     @model_validator(mode="after")
     def explicit_authorities(self) -> "M2RuntimeConfig":
@@ -114,6 +121,10 @@ class M2RuntimeConfig(AccessContract):
             raise ValueError(
                 "identity UI requires explicit nodes, user authentication and mapping command"
             )
+        if self.notification_admin and (
+            not self.user_tokens or "notification.retry_uncertain" not in self.commands
+        ):
+            raise ValueError("notification UI requires user authentication and retry command")
         if any(name in self.commands for name in ("reservation.create", "reservation.extend")):
             if self.rules is None or not self.maintenance:
                 raise ValueError(
@@ -167,9 +178,12 @@ def validate_m2_configuration(
         )
         if settings.environment == "production" and auth.development_only:
             raise ValueError("development user credentials cannot enable production commands")
-    if (config.slack_callbacks or config.reservation_home or config.identity_admin) and (
-        not slack.configured or slack.team_id != config.namespace.namespace
-    ):
+    if (
+        config.slack_callbacks
+        or config.reservation_home
+        or config.identity_admin
+        or config.notification_admin
+    ) and (not slack.configured or slack.team_id != config.namespace.namespace):
         raise ValueError("Slack callbacks require the configured identity workspace")
     if config.notification_delivery and (
         not slack.bot_token.get_secret_value() or slack.team_id != config.namespace.namespace
@@ -191,6 +205,7 @@ class M2Components:
     home_reservations: HomeReservationSource | None
     home: SlackDispatcher | None
     identity_admin: IdentityAdminSurface | None
+    notification_admin: NotificationAdminSurface | None
 
     def run_once(self, mode: WorkerMode) -> dict[str, JsonValue]:
         if mode not in {"commands", "events", "notifications", "home", "all"}:
@@ -335,6 +350,16 @@ def build_m2_components(
                 config.identity_query_limits,
             )
             if config.identity_admin and user_api is not None
+            else None
+        ),
+        notification_admin=(
+            NotificationAdminSurface(
+                user_api,
+                NotificationOperatorQueries(
+                    notifications, config.notification_limits, config.notification_query_limits
+                ),
+            )
+            if config.notification_admin and user_api is not None
             else None
         ),
         user_reservations=(

@@ -27,6 +27,8 @@ from aris.interfaces.commands.api import build_router as build_command_router
 from aris.interfaces.commands.service import UserCommandSurface
 from aris.interfaces.identity.api import build_router as build_identity_router
 from aris.interfaces.identity.service import IdentityAdminSurface
+from aris.interfaces.notifications.api import build_router as build_notification_router
+from aris.interfaces.notifications.service import NotificationAdminSurface
 from aris.interfaces.reservations.api import build_router as build_reservation_router
 from aris.interfaces.reservations.service import UserReservationSurface
 from aris.interfaces.slack.api import build_router as build_slack_router
@@ -68,6 +70,7 @@ def create_app(
     slack_drafts: SlackReservationDrafts | None = None,
     home_reservations: HomeReservationSource | None = None,
     identity_admin: IdentityAdminSurface | None = None,
+    notification_admin: NotificationAdminSurface | None = None,
     m2_config: M2RuntimeConfig | None = None,
 ) -> FastAPI:
     config = settings or Settings()
@@ -83,6 +86,7 @@ def create_app(
                 slack_drafts,
                 home_reservations,
                 identity_admin,
+                notification_admin,
             )
         ):
             raise ValueError("M2 configuration and explicit command surfaces cannot be combined")
@@ -107,6 +111,10 @@ def create_app(
                 *(credential.token for credential in config.agent_credentials.values()),
             ],
         )
+    if notification_admin is not None:
+        if user_commands is None or notification_admin.commands is not user_commands:
+            raise ValueError("notification UI requires the same authenticated command surface")
+        notification_admin.validate_workspace(slack_config)
     if user_reservations is not None:
         user_reservations.validate_configuration(
             config.environment,
@@ -141,6 +149,7 @@ def create_app(
         slack_drafts = components.slack_drafts
         home_reservations = components.home_reservations
         identity_admin = components.identity_admin
+        notification_admin = components.notification_admin
     app.state.m2 = components
     vega = VegaService(sessions, config)
     app.include_router(build_router(vega, config))
@@ -165,6 +174,8 @@ def create_app(
         app.include_router(build_reservation_router(user_reservations))
     if identity_admin is not None:
         app.include_router(build_identity_router(identity_admin))
+    if notification_admin is not None:
+        app.include_router(build_notification_router(notification_admin))
 
     @app.middleware("http")
     async def request_context(
@@ -188,10 +199,15 @@ def create_app(
             request.url.path == "/internal/identity"
             or request.url.path.startswith("/internal/identity/")
         )
+        private_notification = notification_admin is not None and (
+            request.url.path == "/internal/notifications"
+            or request.url.path.startswith("/internal/notifications/")
+        )
         if (
             private_query
             or private_command
             or private_identity
+            or private_notification
             or request.url.path == "/slack/commands"
         ):
             response.headers["Cache-Control"] = "no-store"

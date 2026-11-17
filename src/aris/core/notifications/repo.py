@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from aris.core.access.admin_schemas import IdentityNamespace
 from aris.core.notifications.models import NotificationAttempt, NotificationOutbox
+from aris.core.notifications.query_schemas import UncertainNotificationsQuery
 
 
 class NotificationRepository:
@@ -40,6 +41,63 @@ class NotificationRepository:
 
     def attempt(self, attempt_id: str) -> NotificationAttempt | None:
         return self.session.get(NotificationAttempt, attempt_id, populate_existing=True)
+
+    def has_successful_attempt(self, notification_id: str) -> bool:
+        return (
+            self.session.scalar(
+                select(NotificationAttempt.id)
+                .where(
+                    NotificationAttempt.notification_id == notification_id,
+                    NotificationAttempt.state.in_(("delivered", "late_delivered")),
+                )
+                .limit(1)
+            )
+            is not None
+        )
+
+    def uncertain_page(
+        self,
+        query: UncertainNotificationsQuery,
+        *,
+        namespace: IdentityNamespace,
+        template_ids: tuple[str, ...],
+    ) -> tuple[NotificationOutbox, ...]:
+        statement = select(NotificationOutbox).where(
+            NotificationOutbox.provider == namespace.provider,
+            NotificationOutbox.namespace == namespace.namespace,
+            NotificationOutbox.template_id.in_(template_ids),
+            NotificationOutbox.state == "uncertain",
+        )
+        if query.after is not None:
+            statement = statement.where(
+                or_(
+                    NotificationOutbox.created_at > query.after.created_at,
+                    and_(
+                        NotificationOutbox.created_at == query.after.created_at,
+                        NotificationOutbox.id > str(query.after.notification_id),
+                    ),
+                )
+            )
+        return tuple(
+            self.session.scalars(
+                statement.order_by(NotificationOutbox.created_at, NotificationOutbox.id)
+                .limit(query.limit + 1)
+                .execution_options(populate_existing=True)
+            )
+        )
+
+    def attempt_evidence(
+        self, notification_ids: tuple[str, ...]
+    ) -> tuple[NotificationAttempt, ...]:
+        return tuple(
+            self.session.scalars(
+                select(NotificationAttempt)
+                .where(NotificationAttempt.notification_id.in_(notification_ids))
+                .order_by(NotificationAttempt.notification_id, NotificationAttempt.attempt)
+                .limit(401)
+                .execution_options(populate_existing=True)
+            )
+        )
 
     def scoped_notification(
         self,
