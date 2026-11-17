@@ -1,7 +1,9 @@
+import argparse
 import logging
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
@@ -12,6 +14,12 @@ from starlette.exceptions import HTTPException
 from starlette.responses import Response
 
 from aris import __version__
+from aris.apps.composition.m2 import (
+    M2RuntimeConfig,
+    build_m2_components,
+    load_m2_config,
+    validate_m2_configuration,
+)
 from aris.core.config import Settings
 from aris.core.contracts import DomainError, ErrorDetail, ErrorResponse
 from aris.core.db import SCHEMA_REVISION, build_engine, check_database, session_factory
@@ -48,9 +56,14 @@ def create_app(
     *,
     user_commands: UserCommandSurface | None = None,
     slack_commands: SlackCommandAdapter | None = None,
+    m2_config: M2RuntimeConfig | None = None,
 ) -> FastAPI:
     config = settings or Settings()
     slack_config = slack_settings or SlackSettings()
+    if m2_config is not None:
+        if user_commands is not None or slack_commands is not None:
+            raise ValueError("M2 configuration and explicit command surfaces cannot be combined")
+        validate_m2_configuration(config, slack_config, m2_config)
     if slack_commands is not None:
         slack_commands.validate_configuration(slack_config)
     if user_commands is not None:
@@ -71,6 +84,16 @@ def create_app(
     app = FastAPI(title="A.R.I.S.", version=__version__, lifespan=lifespan)
     app.state.engine = engine
     sessions = session_factory(engine)
+    components = None
+    if m2_config is not None:
+        try:
+            check_database(engine)
+            components = build_m2_components(sessions, config, slack_config, m2_config)
+        except Exception:
+            engine.dispose()
+            raise
+        user_commands, slack_commands = components.user_api, components.slack_callbacks
+    app.state.m2 = components
     vega = VegaService(sessions, config)
     app.include_router(build_router(vega, config))
     app.state.live_hub = LiveHub()
@@ -142,6 +165,20 @@ def create_app(
 def main() -> None:
     import uvicorn
 
+    parser = argparse.ArgumentParser(
+        description="Run the API; M2 requires explicit private configuration"
+    )
+    parser.add_argument("--m2-config", type=Path)
+    args = parser.parse_args()
+    if args.m2_config is not None:
+        uvicorn.run(
+            create_app(m2_config=load_m2_config(args.m2_config)),
+            host="127.0.0.1",
+            port=8000,
+            ws_max_size=65536,
+            ws_max_queue=2,
+        )
+        return
     uvicorn.run(
         "aris.apps.api.main:create_app",
         factory=True,
