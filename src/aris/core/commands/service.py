@@ -17,6 +17,7 @@ from aris.core.commands.models import CommandRecord
 from aris.core.commands.repo import CommandRepository
 from aris.core.commands.schemas import (
     ActorContext,
+    CancelledCommand,
     CommandContext,
     CommandDefinition,
     CommandExecution,
@@ -25,7 +26,9 @@ from aris.core.commands.schemas import (
     CommandResult,
     ConfirmCommand,
     ExpiredCommand,
+    FailedCommand,
     PendingConfirmation,
+    QueuedCommand,
 )
 from aris.core.contracts import DomainError
 from aris.core.time import utc
@@ -138,13 +141,16 @@ class CommandService:
             raise DomainError("CONFIRMATION_REQUIRED", "Command requires confirmation", 409)
         if record.confirmation_expires_at is None:
             raise DomainError("CONFLICT", "Command did not request confirmation", 409)
+        fields = {
+            "command_id": record.id,
+            "actor_id": record.actor_id,
+            "fingerprint": record.fingerprint,
+            "expires_at": utc(record.confirmation_expires_at).isoformat(),
+        }
+        if record.execution_not_after is not None:
+            fields["execution_not_after"] = utc(record.execution_not_after).isoformat()
         message = json.dumps(
-            {
-                "command_id": record.id,
-                "actor_id": record.actor_id,
-                "fingerprint": record.fingerprint,
-                "expires_at": utc(record.confirmation_expires_at).isoformat(),
-            },
+            fields,
             sort_keys=True,
             separators=(",", ":"),
         ).encode()
@@ -181,6 +187,24 @@ class CommandService:
             return CommandResult(command_id=record.id, duplicate=True, result=record.result)
         if record.state == "expired":
             return ExpiredCommand(command_id=record.id)
+        if record.state == "cancelled":
+            return CancelledCommand(command_id=record.id)
+        if record.state == "failed":
+            if record.failure_code is None:
+                raise DomainError(
+                    "DEPENDENCY_UNAVAILABLE", "Command failure metadata is invalid", 503
+                )
+            try:
+                return FailedCommand(command_id=record.id, code=record.failure_code)
+            except ValidationError:
+                raise DomainError(
+                    "DEPENDENCY_UNAVAILABLE", "Command failure metadata is invalid", 503
+                ) from None
+        if record.state == "queued" and record.execution_deadline is not None:
+            deadline = utc(record.execution_deadline)
+            return QueuedCommand(
+                command_id=record.id, execute_by=deadline, deadline_elapsed=self._now() >= deadline
+            )
         if record.state == "awaiting_confirmation" and record.confirmation_expires_at is not None:
             if self._now() >= utc(record.confirmation_expires_at):
                 record.state = "expired"
@@ -190,6 +214,9 @@ class CommandService:
                 command_id=record.id,
                 expires_at=utc(record.confirmation_expires_at),
                 proof=SecretStr(self._proof(record)),
+                execution_not_after=utc(record.execution_not_after)
+                if record.execution_not_after is not None
+                else None,
             )
         raise DomainError("CONFLICT", "Command has no committed result", 409)
 
@@ -201,7 +228,11 @@ class CommandService:
         action: DatabaseCommand,
         principal: UserPrincipal,
         parameters: dict[str, JsonValue],
+        execution_deadline: datetime | None = None,
     ) -> CommandResult:
+        if execution_deadline is not None and self._now() >= execution_deadline:
+            raise DomainError("EXECUTION_EXPIRED", "Command execution deadline elapsed", 409)
+
         def reject_action_commit(active: Session) -> None:
             if not active.in_nested_transaction():
                 raise DomainError(
@@ -217,6 +248,7 @@ class CommandService:
                     actor_id=context.actor_id,
                     request_id=context.request_id,
                     scope=AccessScope(type=record.scope_type, id=record.scope_id),
+                    execution_deadline=execution_deadline,
                 ),
                 principal,
                 parameters,
@@ -224,6 +256,8 @@ class CommandService:
         finally:
             event.remove(session, "before_commit", reject_action_commit)
         bounded_json(result, 65536, result=True)
+        if execution_deadline is not None and self._now() >= execution_deadline:
+            raise DomainError("EXECUTION_EXPIRED", "Command execution deadline elapsed", 409)
         record.state, record.result, record.completed_at = "succeeded", result, self._now()
         self._audit(session, context, record, "command.succeeded")
         return CommandResult(command_id=record.id, duplicate=False, result=result)
@@ -254,6 +288,8 @@ class CommandService:
             )
             if record.fingerprint != fingerprint:
                 raise DomainError("CONFLICT", "Idempotency key has different content", 409)
+            if record.execution_not_after is not None:
+                raise DomainError("CONFLICT", "Command requires durable intake", 409)
             if not created:
                 return self._existing(session, context, record)
             if definition.requires_confirmation:
@@ -274,6 +310,8 @@ class CommandService:
             )
             if record is None:
                 raise DomainError("PERMISSION_DENIED", "Confirmation is invalid", 403)
+            if record.execution_not_after is not None:
+                raise DomainError("CONFLICT", "Command requires durable confirmation", 409)
             definition, action = self._registration(record.command_type)
             request = CommandRequest(
                 command=record.command_type,

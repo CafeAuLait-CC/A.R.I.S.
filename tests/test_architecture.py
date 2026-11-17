@@ -27,6 +27,7 @@ def private_core_component(module):
             f"aris.core.{component}.models",
             f"aris.core.{component}.repo",
             f"aris.core.{component}.admin_repo",
+            f"aris.core.{component}.queue_repo",
         }:
             return component
     return None

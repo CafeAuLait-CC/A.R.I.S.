@@ -32,6 +32,12 @@ class AccessService:
 
     def resolve_external(self, subject: ExternalSubject) -> UserPrincipal | None:
         with self.sessions() as session:
+            return self.resolve_external_in_transaction(session, subject)
+
+    def resolve_external_in_transaction(
+        self, session: Session, subject: ExternalSubject
+    ) -> UserPrincipal | None:
+        with session.no_autoflush:
             return self._principal(AccessRepository(session).external_user(subject))
 
     def resolve_node_user(self, lookup: NodeUserLookup) -> UserPrincipal | None:

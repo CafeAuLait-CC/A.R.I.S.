@@ -25,6 +25,7 @@ class CommandContext(ActorContext):
 class CommandExecution(ActorContext):
     command_id: UUID
     scope: AccessScope
+    execution_deadline: AwareDatetime | None = None
 
 
 class CommandRequest(AccessContract):
@@ -45,6 +46,7 @@ class PendingConfirmation(AccessContract):
     command_id: UUID
     expires_at: AwareDatetime
     proof: SecretStr
+    execution_not_after: AwareDatetime | None = None
 
 
 class ExpiredCommand(AccessContract):
@@ -52,9 +54,34 @@ class ExpiredCommand(AccessContract):
     command_id: UUID
 
 
+class QueuedCommand(AccessContract):
+    state: Literal["queued"] = "queued"
+    command_id: UUID
+    execute_by: AwareDatetime
+    deadline_elapsed: bool
+
+
+class CancelledCommand(AccessContract):
+    state: Literal["cancelled"] = "cancelled"
+    command_id: UUID
+
+
+class FailedCommand(AccessContract):
+    state: Literal["failed"] = "failed"
+    command_id: UUID
+    code: str = Field(max_length=64, pattern=r"^[A-Z][A-Z0-9_]+$")
+
+
 class ConfirmCommand(AccessContract):
     command_id: UUID
     proof: SecretStr = Field(min_length=64, max_length=64)
 
 
-CommandOutcome = CommandResult | PendingConfirmation | ExpiredCommand
+CommandOutcome = (
+    CommandResult
+    | PendingConfirmation
+    | ExpiredCommand
+    | QueuedCommand
+    | CancelledCommand
+    | FailedCommand
+)

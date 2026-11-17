@@ -353,7 +353,9 @@ def test_0008_downgrade_refuses_to_destroy_waiting_or_completed_confirmation_his
     command.downgrade(Config("alembic.ini"), "0008")
     for completed in (False, True):
         if completed:
+            command.upgrade(Config("alembic.ini"), "head")
             service.confirm(actor(ids), confirmation(pending))
+            command.downgrade(Config("alembic.ini"), "0008")
         with pytest.raises(RuntimeError, match="confirmation history prevents downgrade"):
             command.downgrade(Config("alembic.ini"), "0007")
         with sessions() as db:
