@@ -125,4 +125,16 @@ def build_router(service: UserCommandSurface) -> APIRouter:
         )
         return JSONResponse(outcome_json(result), headers={"Cache-Control": "no-store"})
 
+    @router.get("/{command_id}/review")
+    async def review(command_id: UUID, request: Request) -> JSONResponse:
+        result = await run_in_threadpool(
+            service.review,
+            authorization(request),
+            request.state.request_id,
+            command_id,
+        )
+        data = result.model_dump(mode="json")
+        data["outcome"] = outcome_json(result.outcome)
+        return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
     return router

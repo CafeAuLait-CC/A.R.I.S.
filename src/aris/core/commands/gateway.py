@@ -29,7 +29,7 @@ from aris.core.commands.queue_schemas import (
     IntakeResult,
     WithdrawCommand,
 )
-from aris.core.commands.schemas import CommandOutcome, CommandRequest, ConfirmCommand
+from aris.core.commands.schemas import CommandOutcome, CommandRequest, CommandReview, ConfirmCommand
 from aris.core.contracts import DomainError
 
 
@@ -169,3 +169,7 @@ class UserCommandGateway:
     def inspect(self, context: ExternalCommandActor, command_id: UUID) -> CommandOutcome:
         actor, _ = self._resolve(context, command_id=command_id)
         return self.intake.inspect(actor, command_id)
+
+    def review(self, context: ExternalCommandActor, command_id: UUID) -> CommandReview:
+        actor, _ = self._resolve(context, command_id=command_id)
+        return self.intake.review(actor, command_id)

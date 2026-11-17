@@ -38,6 +38,7 @@ from aris.core.commands.schemas import (
     CommandDefinition,
     CommandOutcome,
     CommandRequest,
+    CommandReview,
     ConfirmCommand,
     ExpiredCommand,
 )
@@ -229,6 +230,15 @@ class CommandIntakeService:
         self, session: Session, context: DurableActorContext, record: CommandRecord
     ) -> CommandOutcome:
         admission, _, _, _, _ = self.current_request(session, context, record)
+        return self._validated_outcome(session, context, record, admission)
+
+    def _validated_outcome(
+        self,
+        session: Session,
+        context: DurableActorContext,
+        record: CommandRecord,
+        admission: CommandAdmission,
+    ) -> CommandOutcome:
         if record.state == "awaiting_confirmation":
             if (
                 admission.confirmation_key_id != self.confirmation_key_id
@@ -595,6 +605,9 @@ class CommandIntakeService:
         return self._run(context, "withdraw", fingerprint, accept)
 
     def inspect(self, context: DurableActorContext, command_id: UUID) -> CommandOutcome:
+        return self.review(context, command_id).outcome
+
+    def review(self, context: DurableActorContext, command_id: UUID) -> CommandReview:
         try:
             with self.sessions.begin() as session:
                 self._budget(session)
@@ -602,7 +615,12 @@ class CommandIntakeService:
                 record = CommandQueueRepository(session).command(str(command_id), lock=True)
                 if record is None:
                     raise DomainError("PERMISSION_DENIED", "Command is not available", 403)
-                return self.outcome(session, context, record)
+                admission, _, _, _, request = self.current_request(session, context, record)
+                return CommandReview(
+                    command_id=record.id,
+                    request=request,
+                    outcome=self._validated_outcome(session, context, record, admission),
+                )
         except DBAPIError:
             raise DomainError(
                 "INTAKE_UNAVAILABLE", "Command outcome unavailable; retry later", 503

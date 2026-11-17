@@ -11,7 +11,7 @@ from aris.core.commands.gateway_schemas import (
     UserCommandInput,
 )
 from aris.core.commands.queue_schemas import IntakeResult, WithdrawCommand
-from aris.core.commands.schemas import CommandOutcome, ConfirmCommand
+from aris.core.commands.schemas import CommandOutcome, CommandReview, ConfirmCommand
 from aris.interfaces.commands.auth import UserCommandAuthenticator
 
 
@@ -65,3 +65,6 @@ class UserCommandSurface:
         self, authorization: str | None, request_id: str, command_id: UUID
     ) -> CommandOutcome:
         return self.gateway.inspect(self.actor(authorization, request_id), command_id)
+
+    def review(self, authorization: str | None, request_id: str, command_id: UUID) -> CommandReview:
+        return self.gateway.review(self.actor(authorization, request_id), command_id)

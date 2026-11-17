@@ -1,7 +1,7 @@
 from typing import Literal
 from uuid import UUID
 
-from pydantic import AwareDatetime, Field, JsonValue, SecretStr
+from pydantic import AwareDatetime, Field, JsonValue, SecretStr, model_validator
 
 from aris.core.access.schemas import AccessContract, AccessScope, PermissionName
 
@@ -85,3 +85,15 @@ CommandOutcome = (
     | CancelledCommand
     | FailedCommand
 )
+
+
+class CommandReview(AccessContract):
+    command_id: UUID
+    request: CommandRequest = Field(repr=False)
+    outcome: CommandOutcome = Field(repr=False)
+
+    @model_validator(mode="after")
+    def matching_command(self) -> "CommandReview":
+        if self.command_id != self.outcome.command_id:
+            raise ValueError("review outcome belongs to another command")
+        return self
