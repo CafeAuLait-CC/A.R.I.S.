@@ -131,6 +131,33 @@ class UsageTraceRepository:
                 raise inconsistent_trace()
         return position
 
+    def source_records(
+        self,
+        consumer_id: str,
+        *,
+        through_revision: int,
+        first_seq: int,
+        last_seq: int,
+        after_revision: int,
+    ) -> tuple[StoredTraceConsumption, ...]:
+        rows = (
+            self.session.execute(
+                select(*UsageTraceRecordRow.__table__.c)
+                .where(
+                    UsageTraceRecordRow.consumer_id == consumer_id,
+                    UsageTraceRecordRow.revision > after_revision,
+                    UsageTraceRecordRow.revision <= through_revision,
+                    UsageTraceRecordRow.after_seq >= first_seq,
+                    UsageTraceRecordRow.after_seq - UsageTraceRecordRow.source_count < last_seq,
+                )
+                .order_by(UsageTraceRecordRow.revision)
+                .limit(8)
+            )
+            .mappings()
+            .all()
+        )
+        return tuple(self._record(dict(row)) for row in rows)
+
     def append(self, record: StoredTraceConsumption) -> None:
         before, after = record.before, record.position
         self.session.add(

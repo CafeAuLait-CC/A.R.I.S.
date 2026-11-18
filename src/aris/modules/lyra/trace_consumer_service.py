@@ -11,7 +11,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, sessionmaker
 
 from aris.core.audit import AuditEntry
-from aris.core.commands.budgets import database_failure
+from aris.core.commands.budgets import database_failure, transaction_budget
 from aris.core.contracts import DomainError
 from aris.core.db import commit_owned_transaction, transaction_savepoint
 from aris.core.events import DomainEvent, OutboxEntry
@@ -225,6 +225,15 @@ class UsageTraceConsumerService:
         self, context: UsageTraceConsumeContext, request: UsageTraceConsumeRequest
     ) -> TraceConsumptionReceipt | TraceConsumptionIdle:
         with self.sessions() as session:
+            try:
+                transaction_budget(session, 1000, 1000, 10000)
+            except DBAPIError as error:
+                code = database_failure(error)
+                raise DomainError(
+                    code if code == "RETRYABLE_DATABASE_ERROR" else "DEPENDENCY_UNAVAILABLE",
+                    "Candidate processing database is unavailable",
+                    503,
+                ) from None
             result = self.consume_in_transaction(session, context, request)
             commit_owned_transaction(session)
             return result

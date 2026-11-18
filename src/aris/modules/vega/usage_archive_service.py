@@ -79,17 +79,29 @@ class VegaUsageArchive:
         self.timeout_ms = timeout_ms
 
     def page(self, query: UsageArchiveQuery) -> UsageArchivePage:
-        with self.sessions() as session:
-            return self.page_in_transaction(session, query)
+        try:
+            with self.sessions() as session:
+                transaction_budget(
+                    session, min(100, self.timeout_ms), min(1000, self.timeout_ms), self.timeout_ms
+                )
+                return self.page_in_transaction(session, query)
+        except DBAPIError as error:
+            raise self._database_failure(error) from None
+
+    @staticmethod
+    def _database_failure(error: DBAPIError) -> DomainError:
+        code = database_failure(error)
+        return DomainError(
+            code if code == "RETRYABLE_DATABASE_ERROR" else "DEPENDENCY_UNAVAILABLE",
+            "Usage archive database is unavailable",
+            503,
+        )
 
     def page_in_transaction(self, session: Session, query: UsageArchiveQuery) -> UsageArchivePage:
         query = UsageArchiveQuery.model_validate(query.model_dump(mode="json"))
         deadline = monotonic() + self.timeout_ms / 1000
         try:
             with session.no_autoflush:
-                transaction_budget(
-                    session, min(100, self.timeout_ms), min(1000, self.timeout_ms), self.timeout_ms
-                )
                 repo = VegaRepository(session)
                 binding = repo.usage_source_node(query.agent_id)
                 if binding is None:
@@ -146,12 +158,7 @@ class VegaUsageArchive:
                     )
                 return result
         except DBAPIError as error:
-            code = database_failure(error)
-            raise DomainError(
-                code if code == "RETRYABLE_DATABASE_ERROR" else "DEPENDENCY_UNAVAILABLE",
-                "Usage archive database is unavailable",
-                503,
-            ) from None
+            raise self._database_failure(error) from None
         except (ValueError, TypeError, KeyError, RecursionError):
             raise DomainError(
                 "DEPENDENCY_UNAVAILABLE", "Original usage archive source is inconsistent", 503
