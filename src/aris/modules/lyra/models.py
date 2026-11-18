@@ -162,3 +162,39 @@ class UsageLedgerState(Base):
     node_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     revision: Mapped[int] = mapped_column(BigInteger)
     fingerprint: Mapped[str] = mapped_column(String(64))
+
+
+class UsageTraceRecordRow(Base):
+    __tablename__ = "usage_trace_records"
+    __table_args__ = (
+        UniqueConstraint("consumer_id", "revision", name="uq_usage_trace_revision"),
+        CheckConstraint("revision > 0 AND after_seq > 0", name="ck_usage_trace_progress"),
+        CheckConstraint("source_count >= 1 AND source_count <= 128", name="ck_usage_trace_sources"),
+        CheckConstraint("length(fingerprint) = 64", name="ck_usage_trace_fingerprint"),
+        CheckConstraint(
+            "length(canonical_record) > 0 AND length(canonical_record) <= 262144",
+            name="ck_usage_trace_size",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    event_id: Mapped[str] = mapped_column(ForeignKey("domain_events.event_id"), unique=True)
+    consumer_id: Mapped[str] = mapped_column(String(128))
+    revision: Mapped[int] = mapped_column(BigInteger)
+    after_seq: Mapped[int] = mapped_column(BigInteger)
+    source_count: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    canonical_record: Mapped[str] = mapped_column(Text)
+
+
+class UsageTraceCursorRow(Base):
+    __tablename__ = "usage_trace_cursors"
+    __table_args__ = (
+        CheckConstraint("revision > 0 AND after_seq > 0", name="ck_usage_trace_cursor_progress"),
+        CheckConstraint("length(fingerprint) = 64", name="ck_usage_trace_cursor_fingerprint"),
+    )
+    consumer_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    record_id: Mapped[str] = mapped_column(ForeignKey("usage_trace_records.id"), unique=True)
+    revision: Mapped[int] = mapped_column(BigInteger)
+    after_seq: Mapped[int] = mapped_column(BigInteger)
+    fingerprint: Mapped[str] = mapped_column(String(64))
