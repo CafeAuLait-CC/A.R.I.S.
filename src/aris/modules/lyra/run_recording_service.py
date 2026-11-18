@@ -59,10 +59,14 @@ class ClosedRunRecordingService:
         ledger: UsageLedgerService,
         *,
         clock: Callable[[], datetime] | None = None,
+        timeout_ms: int = 30000,
     ) -> None:
+        if type(timeout_ms) is not int or not 100 <= timeout_ms <= 30000:
+            raise ValueError("closed-run recording requires a bounded internal job timeout")
         self.sessions, self.evidence, self.archive = sessions, evidence, archive
         self.derivations, self.ledger = derivations, ledger
         self.clock = clock or (lambda: datetime.now(UTC))
+        self.timeout_ms = timeout_ms
 
     def _now(self) -> datetime:
         value = self.clock()
@@ -157,7 +161,7 @@ class ClosedRunRecordingService:
     ) -> ClosedRunRecordingReceipt:
         with self.sessions() as session:
             try:
-                transaction_budget(session, 100, 1000, 10000)
+                transaction_budget(session, 100, 1000, self.timeout_ms)
                 result = self.record_in_transaction(session, context, request)
                 commit_owned_transaction(session)
                 return result
@@ -174,7 +178,7 @@ class ClosedRunRecordingService:
     ) -> ClosedRunRecordingReceipt:
         context = UsagePostingContext.model_validate(context.model_dump(mode="json"))
         request = ClosedRunRecordingRequest.model_validate(request.model_dump(mode="json"))
-        deadline = monotonic() + 10
+        deadline = monotonic() + self.timeout_ms / 1000
         with transaction_savepoint(session), session.no_autoflush:
             repo = ClosedRunRecordingRepository(session)
             repo.lock(request.id)

@@ -426,14 +426,16 @@ def test_postgresql_new_keys_same_run_share_one_measurement_and_truncate_is_refu
         session.execute(text("TRUNCATE usage_run_recordings"))
 
 
-def test_postgresql_composed_recording_tolerates_remote_round_trips_with_original_budget(closed):
+def test_postgresql_composed_recording_tolerates_remote_round_trips_with_internal_job_budget(
+    closed,
+):
     service, request, _, _ = closed
     engine = service.sessions.kw["bind"]
     if engine.dialect.name != "postgresql":
         pytest.skip("PostgreSQL remote round-trip composition")
 
     def latency(connection, cursor, statement, parameters, context, many):
-        sleep(0.055)
+        sleep(0.15)
 
     event.listen(engine, "before_cursor_execute", latency)
     try:
@@ -441,3 +443,31 @@ def test_postgresql_composed_recording_tolerates_remote_round_trips_with_origina
     finally:
         event.remove(engine, "before_cursor_execute", latency)
     assert result.ledger.effect == "recorded" and counts(closed)[:6] == (1, 2, 1, 1, 1, 1)
+
+
+def test_internal_job_timeout_is_trusted_and_bounded_without_database():
+    for value in (0, 99, 30001, True, None):
+        with pytest.raises(ValueError):
+            ClosedRunRecordingService(None, None, None, None, None, timeout_ms=value)
+
+
+def test_postgresql_short_owner_budget_rolls_back_and_original_key_can_retry(closed):
+    service, request, _, _ = closed
+    engine = service.sessions.kw["bind"]
+    if engine.dialect.name != "postgresql":
+        pytest.skip("PostgreSQL total recording timeout")
+    before = counts(closed)
+    service.timeout_ms = 100
+
+    def latency(connection, cursor, statement, parameters, context, many):
+        sleep(0.015)
+
+    event.listen(engine, "before_cursor_execute", latency)
+    try:
+        with pytest.raises(DomainError) as error:
+            service.record(POST, request)
+    finally:
+        event.remove(engine, "before_cursor_execute", latency)
+    assert error.value.code == "RETRYABLE_DATABASE_ERROR" and counts(closed) == before
+    service.timeout_ms = 30000
+    assert service.record(POST, request).ledger.effect == "recorded"
