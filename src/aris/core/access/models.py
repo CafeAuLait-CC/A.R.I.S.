@@ -1,7 +1,15 @@
 from datetime import datetime
 from typing import Literal
 
-from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, String, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from aris.core.db import Base
@@ -104,3 +112,42 @@ class AccessDirectoryState(Base):
     provider: Mapped[str | None] = mapped_column(String(64))
     namespace: Mapped[str | None] = mapped_column(String(128))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class NodeUserMappingHistory(Base):
+    __tablename__ = "node_user_mapping_history"
+    __table_args__ = (
+        UniqueConstraint("node_id", "os_username", "revision", name="uq_mapping_history_revision"),
+        CheckConstraint("revision > 0", name="ck_mapping_history_revision"),
+        CheckConstraint("length(fingerprint) = 64", name="ck_mapping_history_fingerprint"),
+        CheckConstraint(
+            "(before_user_id IS NULL AND before_confidence IS NULL AND before_source IS NULL) "
+            "OR (before_user_id IS NOT NULL AND before_confidence IN ('verified','unverified') "
+            "AND before_source IS NOT NULL)",
+            name="ck_mapping_history_before",
+        ),
+        CheckConstraint(
+            "(after_user_id IS NULL AND after_confidence IS NULL AND after_source IS NULL) "
+            "OR (after_user_id IS NOT NULL AND after_confidence IN ('verified','unverified') "
+            "AND after_source IS NOT NULL)",
+            name="ck_mapping_history_after",
+        ),
+        Index("ix_mapping_history_time", "node_id", "os_username", "effective_at", "revision"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    node_id: Mapped[str] = mapped_column(String(128))
+    os_username: Mapped[str] = mapped_column(String(128))
+    revision: Mapped[int] = mapped_column(BigInteger)
+    effective_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    event_id: Mapped[str] = mapped_column(ForeignKey("domain_events.event_id"))
+    actor_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    operation_id: Mapped[str] = mapped_column(String(36))
+    request_id: Mapped[str] = mapped_column(String(128))
+    reason: Mapped[str] = mapped_column(String(256))
+    before_user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"))
+    before_confidence: Mapped[str | None] = mapped_column(String(16))
+    before_source: Mapped[str | None] = mapped_column(String(64))
+    after_user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"))
+    after_confidence: Mapped[str | None] = mapped_column(String(16))
+    after_source: Mapped[str | None] = mapped_column(String(64))
+    fingerprint: Mapped[str] = mapped_column(String(64))

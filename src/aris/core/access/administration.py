@@ -28,6 +28,8 @@ from aris.core.access.admin_schemas import (
     RemoveNodeUser,
     UpdateUser,
 )
+from aris.core.access.history_repo import MappingHistoryRepository
+from aris.core.access.history_service import NodeUserHistoryService
 from aris.core.access.models import AccessDirectoryState
 from aris.core.access.schemas import AccessRequest, AccessScope, ExternalSubject, PermissionName
 from aris.core.access.service import AccessService
@@ -108,7 +110,7 @@ class AccessAdministrationService:
         reason: str,
         changed: bool,
         bootstrap: bool = False,
-    ) -> None:
+    ) -> tuple[str, datetime] | None:
         now = self._now()
         session.add(
             AuditEntry(
@@ -148,6 +150,8 @@ class AccessAdministrationService:
             )
             session.flush()
             session.add(OutboxEntry(event_id=event_id, created_at=now))
+            return event_id, now
+        return None
 
     def _operator(self, proof: SecretStr) -> None:
         if self.operator_key is None:
@@ -244,6 +248,16 @@ class AccessAdministrationService:
                 raise DomainError("PERMISSION_DENIED", "Identity namespace is not linked", 403)
             if batch.expected_revision is not None and batch.expected_revision != state.revision:
                 raise DomainError("CONFLICT", "Identity directory has changed", 409)
+            targets: set[tuple[str, str]] = set()
+            for item in batch.changes:
+                if isinstance(item, RegisterIdentity):
+                    targets.update(
+                        (mapping.node_id, mapping.os_username) for mapping in item.mappings
+                    )
+                elif isinstance(item, (AssignNodeUser, RemoveNodeUser)):
+                    targets.add((item.node_id, item.os_username))
+            history_repo = MappingHistoryRepository(session)
+            before = {key: history_repo.current(*key) for key in targets}
             outcomes = tuple(self._change(session, repo, item) for item in batch.changes)
             session.flush()
             if not repo.active_administrators(self.namespace):
@@ -251,7 +265,7 @@ class AccessAdministrationService:
             changed = any(item.changed for item in outcomes)
             if changed:
                 state.revision += 1
-            self._emit(
+            emitted = self._emit(
                 session,
                 actor=str(context.actor_id),
                 request_id=context.request_id,
@@ -261,6 +275,18 @@ class AccessAdministrationService:
                 reason=context.reason,
                 changed=changed,
             )
+            if emitted is not None:
+                event_id, effective_at = emitted
+                NodeUserHistoryService(
+                    self.sessions, clock=self.clock
+                )._record_changes_in_transaction(
+                    session,
+                    context,
+                    event_id=event_id,
+                    revision=state.revision,
+                    effective_at=effective_at,
+                    before=before,
+                )
             session.flush()
             return AdministrationResult(revision=state.revision, changed=changed, outcomes=outcomes)
 
