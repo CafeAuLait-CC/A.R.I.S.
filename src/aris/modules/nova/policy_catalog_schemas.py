@@ -1,9 +1,11 @@
 from typing import Literal
 from uuid import UUID
 
-from pydantic import AwareDatetime, Field, field_validator
+from pydantic import AwareDatetime, Field, field_validator, model_validator
 
+from aris.modules.nova.policy_review import PolicyCaseComparison, PolicyDifference
 from aris.modules.nova.policy_schemas import GpuAllocationPolicy, PolicyContract, PolicyName
+from aris.modules.nova.policy_simulation import PolicyScenario
 
 
 class PolicySourceReference(PolicyContract):
@@ -64,3 +66,27 @@ class PolicySourcePage(PolicyContract):
     name: PolicyName
     versions: tuple[PolicySourceSummary, ...] = Field(max_length=50)
     next_after_version: int | None = Field(default=None, ge=1, le=2147483647, strict=True)
+
+
+class PolicySourceComparisonQuery(PolicyContract):
+    before: PolicySourceReference
+    after: PolicySourceReference
+    expected_before_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    expected_after_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    scenarios: tuple[PolicyScenario, ...] = Field(default=(), max_length=100, repr=False)
+
+    @model_validator(mode="after")
+    def consistent_comparison(self) -> "PolicySourceComparisonQuery":
+        if self.before.name != self.after.name:
+            raise ValueError("stored source comparison requires one policy name")
+        if len({item.name for item in self.scenarios}) != len(self.scenarios):
+            raise ValueError("scenario names must be unique")
+        return self
+
+
+class StoredPolicyComparison(PolicyContract):
+    comparison_only: Literal[True] = True
+    before_source_id: UUID
+    after_source_id: UUID
+    difference: PolicyDifference
+    cases: tuple[PolicyCaseComparison, ...] = Field(default=(), max_length=100)

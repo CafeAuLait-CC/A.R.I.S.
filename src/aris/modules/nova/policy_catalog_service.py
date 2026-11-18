@@ -17,6 +17,7 @@ from aris.core.events import DomainEvent, OutboxEntry
 from aris.core.time import utc
 from aris.modules.nova.policy_catalog_repo import PolicyCatalogRepository, PolicySourceRecord
 from aris.modules.nova.policy_catalog_schemas import (
+    PolicySourceComparisonQuery,
     PolicySourceListQuery,
     PolicySourcePage,
     PolicySourceReference,
@@ -24,7 +25,9 @@ from aris.modules.nova.policy_catalog_schemas import (
     PolicySourceView,
     RecordedPolicyDraft,
     RecordPolicyDraft,
+    StoredPolicyComparison,
 )
+from aris.modules.nova.policy_review import compare_policy_scenarios, policy_difference
 from aris.modules.nova.policy_source import compile_policy, parse_policy_source
 
 DRAFT_PERMISSION = "policy.manage_drafts"
@@ -227,4 +230,30 @@ class PolicyCatalogService:
                 session.flush()
             return RecordedPolicyDraft(
                 id=view.id, reference=reference, fingerprint=view.fingerprint, created=created
+            )
+
+    def compare_sources(
+        self, actor: ActorContext, query: PolicySourceComparisonQuery
+    ) -> StoredPolicyComparison:
+        query = PolicySourceComparisonQuery.model_validate(query.model_dump(mode="json"))
+        with self.sessions() as session, session.no_autoflush:
+            before = self.exact_in_transaction(session, actor, query.before)
+            after = self.exact_in_transaction(session, actor, query.after)
+            if (before.fingerprint, after.fingerprint) != (
+                query.expected_before_fingerprint,
+                query.expected_after_fingerprint,
+            ):
+                raise DomainError("CONFLICT", "Stored policy source fingerprint differs", 409)
+            a, b = compile_policy(before.source), compile_policy(after.source)
+            if query.scenarios:
+                comparison = compare_policy_scenarios(a, b, query.scenarios)
+                difference, cases = comparison.difference, comparison.cases
+            else:
+                difference, cases = policy_difference(a, b), ()
+            self._authorize(session, actor)
+            return StoredPolicyComparison(
+                before_source_id=before.id,
+                after_source_id=after.id,
+                difference=difference,
+                cases=cases,
             )
