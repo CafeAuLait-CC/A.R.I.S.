@@ -51,7 +51,7 @@ class ReservationUsageLinkService:
                 initial.id != query.reservation_id
                 or str(initial.gpu_uuid) != rows[0].gpu_uuid
                 or UUID(str(rows[0].actor)) != owner
-                or initial.created_at != initial.updated_at
+                or initial.created_at > initial.updated_at
                 or initial.created_at > initial.start_at
             ):
                 raise ValueError("invalid creation metadata")

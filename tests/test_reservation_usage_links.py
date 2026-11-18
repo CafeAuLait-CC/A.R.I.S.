@@ -57,6 +57,20 @@ def test_explicit_reservation_links_only_its_owner_gpu_and_fully_covered_window(
     )
 
 
+def test_real_clock_may_advance_between_creation_and_final_confirmation(booking):
+    ticks = []
+
+    def advancing_clock():
+        ticks.append(True)
+        return NOW + timedelta(microseconds=len(ticks))
+
+    booking[0].availability.clock = advancing_clock
+    created = create(booking).result["reservation"]
+    assert created["created_at"] != created["updated_at"]
+    result = reader(booking).resolve(query(booking, created["id"]))
+    assert result.state == "matched" and len(result.evidence) == 1
+
+
 @pytest.mark.parametrize("kind", ["owner", "gpu", "before", "after", "overlap"])
 def test_explicit_reference_does_not_guess_or_partially_link_a_different_interval(booking, kind):
     created = create(booking).result["reservation"]
