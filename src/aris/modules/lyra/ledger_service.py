@@ -8,28 +8,40 @@ from uuid import UUID, uuid4
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, sessionmaker
 
+from aris.core.access.schemas import AccessRequest, AccessScope, UserPrincipal
+from aris.core.access.service import AccessService
 from aris.core.audit import AuditEntry
+from aris.core.commands.budgets import database_failure
+from aris.core.commands.schemas import CommandExecution
 from aris.core.contracts import DomainError
 from aris.core.db import commit_owned_transaction, transaction_savepoint
 from aris.core.events import DomainEvent, OutboxEntry
 from aris.core.time import utc
 from aris.modules.lyra.derivation_schemas import StoredUsageDerivation
-from aris.modules.lyra.ledger_plan import UsageMeasurementProposal, plan_usage_posting
+from aris.modules.lyra.ledger_plan import (
+    MeasuredWindow,
+    UsageMeasurementProposal,
+    plan_usage_posting,
+)
 from aris.modules.lyra.ledger_repo import UsageLedgerRepository, inconsistent
 from aris.modules.lyra.ledger_schemas import (
     MAX_LEDGER_BYTES,
     PostedMeasurement,
+    ReversedMeasurement,
     UsageLedgerEntry,
     UsageLedgerHead,
     UsageLedgerReceipt,
     UsagePostingConfiguration,
     UsagePostingContext,
     UsagePostingRequest,
+    UsageReversalRequest,
     canonical_ledger,
     ledger_fingerprint,
     make_ledger_entry,
     measurement_key,
 )
+
+ADJUST_USAGE_PERMISSION = "usage.adjust"
 
 
 class VerifiedUsageDerivations(Protocol):
@@ -48,6 +60,7 @@ class UsageLedgerService:
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.sessions, self.derivations = sessions, derivations
+        self.access = AccessService(sessions)
         self.configuration = (
             UsagePostingConfiguration.model_validate(configuration.model_dump(mode="json"))
             if configuration is not None
@@ -264,20 +277,35 @@ class UsageLedgerService:
             recorded_at=at,
             details=PostedMeasurement(measurement=candidate, configuration=configuration),
         )
+        return self._append_entry(repo, head, entry, request.id)
+
+    def _append_entry(
+        self,
+        repo: UsageLedgerRepository,
+        head: UsageLedgerHead,
+        entry: UsageLedgerEntry,
+        operation_id: UUID,
+    ) -> UsageLedgerEntry:
         session = repo.session
+        at = entry.recorded_at
+        action = (
+            "lyra.usage.measurement_recorded"
+            if isinstance(entry.details, PostedMeasurement)
+            else "lyra.usage.measurement_reversed"
+        )
         session.add(
             DomainEvent(
                 event_id=str(entry.event_id),
-                event_type="lyra.usage.measurement_recorded",
+                event_type=action,
                 event_version=1,
                 aggregate_type="usage_ledger",
                 aggregate_id=entry.node_id,
                 aggregate_version=entry.revision,
                 occurred_at=at,
                 recorded_at=at,
-                actor=context.actor,
-                correlation_id=context.request_id,
-                causation_id=str(request.id),
+                actor=entry.actor,
+                correlation_id=entry.request_id,
+                causation_id=str(operation_id),
                 payload={
                     "entry_id": str(entry.id),
                     "node_id": entry.node_id,
@@ -290,23 +318,159 @@ class UsageLedgerService:
         session.flush()
         repo.append(entry, head)
         session.flush()
-        repo.claim(entry)
+        if isinstance(entry.details, PostedMeasurement):
+            repo.claim(entry)
+        else:
+            repo.unclaim(entry.details.target_id, entry.details.measurement)
         session.add(OutboxEntry(event_id=str(entry.event_id), created_at=at))
         session.add(
             AuditEntry(
                 id=str(uuid4()),
-                actor=context.actor,
-                action="lyra.usage.measurement_recorded",
+                actor=entry.actor,
+                action=action,
                 target=str(entry.id),
-                request_id=context.request_id,
+                request_id=entry.request_id,
                 recorded_at=at,
                 changes={
                     "node_id": entry.node_id,
                     "revision": entry.revision,
                     "fingerprint": entry.fingerprint,
-                    "operation_id": str(request.id),
+                    "operation_id": str(operation_id),
                 },
             )
         )
         session.flush()
         return entry
+
+    def adjustment_scope(self, session: Session, target_id: UUID) -> AccessScope:
+        with session.no_autoflush:
+            target = UsageLedgerRepository(session).entry(target_id)
+        if target is None:
+            raise DomainError("NOT_FOUND", "Usage measurement not found", 404)
+        return AccessScope(type="node", id=target.node_id)
+
+    def _authorize_adjustment(
+        self, session: Session, execution: CommandExecution, principal: UserPrincipal, node_id: str
+    ) -> None:
+        scope = AccessScope(type="node", id=node_id)
+        if principal.user_id != execution.actor_id or execution.scope != scope:
+            raise DomainError("PERMISSION_DENIED", "Usage adjustment actor or scope differs", 403)
+        self.access.require_in_transaction(
+            session,
+            AccessRequest(
+                user_id=execution.actor_id, permission=ADJUST_USAGE_PERMISSION, scope=scope
+            ),
+        )
+        if execution.execution_deadline is not None and self._now() >= execution.execution_deadline:
+            raise DomainError("EXECUTION_EXPIRED", "Usage adjustment deadline elapsed", 409)
+
+    def reverse_in_transaction(
+        self,
+        session: Session,
+        execution: CommandExecution,
+        principal: UserPrincipal,
+        request: UsageReversalRequest,
+    ) -> UsageLedgerReceipt:
+        """Called only from a confirmed registered Core command; never commits."""
+        execution = CommandExecution.model_validate(execution.model_dump(mode="json"))
+        principal = UserPrincipal.model_validate(principal.model_dump(mode="json"))
+        request = UsageReversalRequest.model_validate(request.model_dump(mode="json"))
+        if request.id != execution.command_id:
+            raise DomainError("CONFLICT", "Usage operation differs from its command", 409)
+        fingerprint = ledger_fingerprint("request", canonical_ledger(request))
+        try:
+            with transaction_savepoint(session), session.no_autoflush:
+                repo = UsageLedgerRepository(session)
+                repo.lock("operation", str(request.id))
+                target = repo.entry(request.target_id)
+                if target is None:
+                    raise DomainError("NOT_FOUND", "Usage measurement not found", 404)
+                self._authorize_adjustment(session, execution, principal, target.node_id)
+                prior = repo.operation(request.id)
+                if prior is not None:
+                    if (
+                        prior.receipt.request_fingerprint != fingerprint
+                        or prior.receipt.actor != str(execution.actor_id)
+                    ):
+                        raise DomainError("CONFLICT", "Usage operation has different input", 409)
+                    return prior.receipt
+                repo.lock("node", target.node_id)
+                repo.lock("gpu", target.details.measurement.gpu_uuid)
+                current = repo.entry(request.target_id)
+                if current != target:
+                    raise DomainError("CONFLICT", "Usage target changed while waiting", 409)
+                self._authorize_adjustment(session, execution, principal, target.node_id)
+                if not isinstance(target.details, PostedMeasurement):
+                    raise DomainError(
+                        "VALIDATION_ERROR", "Only a measured entry can be reversed", 422
+                    )
+                if (
+                    target.fingerprint != request.expected_target_fingerprint
+                    or target.revision != request.expected_target_revision
+                ):
+                    raise DomainError(
+                        "CONFLICT", "Usage target differs from the reviewed entry", 409
+                    )
+                now = self._now()
+                head = repo.head(target.node_id)
+                window = MeasuredWindow.model_validate(
+                    target.details.measurement.model_dump(include=set(MeasuredWindow.model_fields))
+                )
+                coverage = repo.coverage(window, at=now)
+                if coverage.state != "complete":
+                    raise DomainError(
+                        "DEPENDENCY_UNAVAILABLE", "Usage projection is incomplete", 503
+                    )
+                if target.id not in {entry.id for entry in coverage.records}:
+                    raise DomainError(
+                        "USAGE_NEEDS_REVIEW", "Usage measurement is no longer active", 409
+                    )
+                entry = make_ledger_entry(
+                    id=uuid4(),
+                    event_id=uuid4(),
+                    node_id=head.node_id,
+                    revision=head.revision + 1,
+                    previous_fingerprint=head.fingerprint,
+                    actor=str(execution.actor_id),
+                    request_id=execution.request_id,
+                    recorded_at=now,
+                    details=ReversedMeasurement(
+                        measurement=window,
+                        target_id=target.id,
+                        target_fingerprint=target.fingerprint,
+                        reason=request.reason,
+                    ),
+                )
+                self._append_entry(repo, head, entry, request.id)
+                self._authorize_adjustment(session, execution, principal, target.node_id)
+                head = repo.head(target.node_id)
+                receipt = UsageLedgerReceipt(
+                    id=request.id,
+                    operation=request.operation,
+                    actor=str(execution.actor_id),
+                    duplicate=False,
+                    effect="reversed",
+                    created_at=self._now(),
+                    head=head,
+                    entries=(entry.id,),
+                    entry_fingerprints=(entry.fingerprint,),
+                    request_fingerprint=fingerprint,
+                )
+                if receipt.created_at < entry.recorded_at:
+                    raise DomainError("CONFLICT", "Usage adjustment clock moved backwards", 409)
+                repo.record_operation(request, receipt)
+                session.flush()
+                self._authorize_adjustment(session, execution, principal, target.node_id)
+                stored = repo.operation(request.id, duplicate=False)
+                if stored is None:
+                    raise inconsistent()
+                return stored.receipt
+        except DBAPIError as error:
+            code = database_failure(error)
+            raise DomainError(
+                "RETRYABLE_DATABASE_ERROR"
+                if code == "RETRYABLE_DATABASE_ERROR"
+                else "DEPENDENCY_UNAVAILABLE",
+                "Usage adjustment storage is unavailable",
+                503,
+            ) from None

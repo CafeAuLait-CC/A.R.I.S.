@@ -78,13 +78,24 @@ class UsagePostingRequest(IntervalContract):
     expected_configuration_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
-class UsageReversalRequest(IntervalContract):
-    operation: Literal["reverse_measurement"] = "reverse_measurement"
-    id: UUID
+class ReverseUsageMeasurement(IntervalContract):
     target_id: UUID
     expected_target_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
-    expected_ledger_revision: int = Field(ge=1, le=MAX_LEDGER_REVISION, strict=True)
+    expected_target_revision: int = Field(ge=1, le=MAX_LEDGER_REVISION, strict=True)
     reason: str = Field(min_length=1, max_length=256, repr=False)
+
+    @field_validator("reason")
+    @classmethod
+    def explicit_reason(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("usage adjustment requires an explicit reason")
+        return value
+
+
+class UsageReversalRequest(ReverseUsageMeasurement):
+    operation: Literal["reverse_measurement"] = "reverse_measurement"
+    id: UUID
 
 
 UsageOperationRequest = Annotated[

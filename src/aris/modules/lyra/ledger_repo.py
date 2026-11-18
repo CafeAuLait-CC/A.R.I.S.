@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import exists, select, text, update
+from sqlalchemy import delete, exists, select, text, update
 from sqlalchemy.orm import Session, aliased
 
 from aris.core.contracts import DomainError
@@ -21,6 +21,8 @@ from aris.modules.lyra.ledger_schemas import (
     UsageLedgerHead,
     UsageLedgerReceipt,
     UsageOperationRequest,
+    UsagePostingRequest,
+    UsageReversalRequest,
     canonical_ledger,
     ledger_fingerprint,
     measurement_key,
@@ -207,6 +209,42 @@ class UsageLedgerRepository:
                     or entry.recorded_at > receipt.created_at
                 ):
                     raise ValueError("receipt does not bind its original entries")
+                if isinstance(request, UsagePostingRequest):
+                    if not isinstance(entry.details, PostedMeasurement):
+                        raise ValueError("posting receipt is not a measurement")
+                    measured = entry.details.measurement
+                    if receipt.effect == "recorded" and (
+                        measured.source_derivation_id != request.derivation_id
+                        or measured.source_session_index != request.session_index
+                        or measured.source_result_fingerprint != request.expected_result_fingerprint
+                        or entry.details.configuration.fingerprint
+                        != request.expected_configuration_fingerprint
+                        or entry.actor != receipt.actor
+                    ):
+                        raise ValueError("recorded measurement differs from its original request")
+                elif isinstance(request, UsageReversalRequest):
+                    if len(receipt.entries) != 1 or not isinstance(
+                        entry.details, ReversedMeasurement
+                    ):
+                        raise ValueError("reversal receipt is not a single explicit adjustment")
+                    target = self.entry(request.target_id)
+                    if (
+                        target is None
+                        or not isinstance(target.details, PostedMeasurement)
+                        or target.fingerprint != request.expected_target_fingerprint
+                        or target.revision != request.expected_target_revision
+                        or entry.details.target_id != target.id
+                        or entry.details.target_fingerprint != target.fingerprint
+                        or entry.details.reason != request.reason
+                        or entry.actor != receipt.actor
+                        or entry.details.measurement
+                        != MeasuredWindow.model_validate(
+                            target.details.measurement.model_dump(
+                                include=set(MeasuredWindow.model_fields)
+                            )
+                        )
+                    ):
+                        raise ValueError("reversal differs from its reviewed source measurement")
             return fixed.model_copy(
                 update={"receipt": receipt.model_copy(update={"duplicate": duplicate})}
             )
@@ -375,3 +413,19 @@ class UsageLedgerRepository:
                 created_at=receipt.created_at,
             )
         )
+
+    def unclaim(self, entry_id: UUID, window: MeasuredWindow) -> None:
+        removed = self.session.execute(
+            delete(UsageLedgerClaim)
+            .where(
+                UsageLedgerClaim.entry_id == str(entry_id),
+                UsageLedgerClaim.entry_kind == "measurement",
+                UsageLedgerClaim.node_id == window.node_id,
+                UsageLedgerClaim.gpu_uuid == window.gpu_uuid,
+                UsageLedgerClaim.start_at == window.start_at,
+                UsageLedgerClaim.end_at == window.end_at,
+            )
+            .returning(UsageLedgerClaim.entry_id)
+        )
+        if removed.scalar_one_or_none() != str(entry_id):
+            raise DomainError("CONFLICT", "Usage measurement projection changed", 409)
