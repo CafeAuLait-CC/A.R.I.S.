@@ -198,3 +198,26 @@ class UsageTraceCursorRow(Base):
     revision: Mapped[int] = mapped_column(BigInteger)
     after_seq: Mapped[int] = mapped_column(BigInteger)
     fingerprint: Mapped[str] = mapped_column(String(64))
+
+
+class ClosedRunRecordingRow(Base):
+    __tablename__ = "usage_run_recordings"
+    __table_args__ = (
+        CheckConstraint("length(fingerprint) = 64", name="ck_usage_run_recording_fingerprint"),
+        CheckConstraint("length(run_id) = 64", name="ck_usage_run_recording_run"),
+        CheckConstraint(
+            "length(canonical_record) > 0 AND length(canonical_record) <= 524288",
+            name="ck_usage_run_recording_size",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    event_id: Mapped[str] = mapped_column(ForeignKey("domain_events.event_id"), unique=True)
+    derivation_id: Mapped[str] = mapped_column(ForeignKey("usage_derivations.id"), unique=True)
+    ledger_operation_id: Mapped[str] = mapped_column(
+        ForeignKey("usage_ledger_operations.id"), unique=True
+    )
+    node_id: Mapped[str] = mapped_column(String(128))
+    run_id: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    canonical_record: Mapped[str] = mapped_column(Text)
