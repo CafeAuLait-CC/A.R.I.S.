@@ -10,6 +10,8 @@ from aris.core.access.admin_schemas import AdministrationContext
 from aris.core.access.history_repo import MappingHistoryRepository
 from aris.core.access.history_schemas import (
     HistoricalMappingValue,
+    HistoricalNodeUserBatch,
+    HistoricalNodeUserBatchResult,
     HistoricalNodeUserQuery,
     HistoricalNodeUserResolution,
     MappingHistoryEntry,
@@ -82,6 +84,52 @@ class NodeUserHistoryService:
     def resolve(self, query: HistoricalNodeUserQuery) -> HistoricalNodeUserResolution:
         with self.sessions() as session:
             return self.resolve_in_transaction(session, query)
+
+    def resolve_many(self, request: HistoricalNodeUserBatch) -> HistoricalNodeUserBatchResult:
+        with self.sessions() as session:
+            return self.resolve_many_in_transaction(session, request)
+
+    def resolve_many_in_transaction(
+        self, session: Session, request: HistoricalNodeUserBatch
+    ) -> HistoricalNodeUserBatchResult:
+        request = HistoricalNodeUserBatch.model_validate(request.model_dump(mode="json"))
+        first = request.queries[0]
+        if first.as_of > self._now():
+            return HistoricalNodeUserBatchResult(
+                as_of=first.as_of,
+                answers=tuple(
+                    HistoricalNodeUserResolution(
+                        query=query, status="unknown", reason="AS_OF_NOT_REACHED"
+                    )
+                    for query in request.queries
+                ),
+            )
+        with session.no_autoflush:
+            repo = MappingHistoryRepository(session)
+            revision = repo.revision()
+            if revision is None:
+                return HistoricalNodeUserBatchResult(
+                    as_of=first.as_of,
+                    answers=tuple(
+                        HistoricalNodeUserResolution(
+                            query=query, status="unknown", reason="DIRECTORY_UNINITIALIZED"
+                        )
+                        for query in request.queries
+                    ),
+                )
+            bound = first.through_revision or revision
+            cache: dict[HistoricalNodeUserQuery, HistoricalNodeUserResolution] = {}
+            answers = []
+            for query in request.queries:
+                frozen = query.model_copy(update={"through_revision": bound})
+                if frozen not in cache:
+                    cache[frozen] = self.resolve_in_transaction(session, frozen)
+                answers.append(cache[frozen])
+            if repo.revision() != revision:
+                raise DomainError("CONFLICT", "Identity directory changed during batch lookup", 409)
+        return HistoricalNodeUserBatchResult(
+            as_of=first.as_of, directory_revision=bound, answers=tuple(answers)
+        )
 
     def resolve_in_transaction(
         self, session: Session, query: HistoricalNodeUserQuery
