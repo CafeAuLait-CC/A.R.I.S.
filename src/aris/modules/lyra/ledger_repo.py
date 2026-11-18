@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, exists, select, text, update
+from sqlalchemy import delete, exists, func, select, text, update
 from sqlalchemy.orm import Session, aliased
 
 from aris.core.contracts import DomainError
@@ -34,6 +34,7 @@ from aris.modules.lyra.models import (
     UsageLedgerOperationRow,
     UsageLedgerState,
 )
+from aris.modules.lyra.recorded_usage import MAX_REPORT_BYTES, MAX_REPORT_ENTRIES
 
 
 def inconsistent() -> DomainError:
@@ -158,6 +159,42 @@ class UsageLedgerRepository:
         return UsageLedgerHead(
             node_id=node_id, revision=last.revision, fingerprint=last.fingerprint
         )
+
+    def prefix(self, head: UsageLedgerHead) -> tuple[UsageLedgerEntry, ...]:
+        """Load a bounded immutable prefix, never today's mutable claim projection."""
+        if head.revision > MAX_REPORT_ENTRIES:
+            raise DomainError(
+                "USAGE_REPORT_TOO_LARGE", "Usage snapshot exceeds the report budget", 503
+            )
+        scope = (
+            UsageLedgerEntryRow.node_id == head.node_id,
+            UsageLedgerEntryRow.revision <= head.revision,
+        )
+        size = self.session.execute(
+            select(
+                func.count(),
+                func.coalesce(func.sum(func.length(UsageLedgerEntryRow.canonical_entry)), 0),
+            ).where(*scope)
+        ).one()
+        if size[0] != head.revision:
+            raise inconsistent()
+        if size[1] > MAX_REPORT_BYTES:
+            raise DomainError(
+                "USAGE_REPORT_TOO_LARGE", "Usage snapshot exceeds the report budget", 503
+            )
+        rows = (
+            self.session.execute(
+                select(*UsageLedgerEntryRow.__table__.c)
+                .where(*scope)
+                .order_by(UsageLedgerEntryRow.revision)
+                .limit(MAX_REPORT_ENTRIES + 1)
+            )
+            .mappings()
+            .all()
+        )
+        if len(rows) != head.revision:
+            raise inconsistent()
+        return tuple(self._entry(dict(row)) for row in rows)
 
     def operation(
         self, operation_id: UUID, *, duplicate: bool = True
