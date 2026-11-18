@@ -1,0 +1,158 @@
+"""Read-only original messages for an internal consumer; never skip a sequence gap."""
+
+import hashlib
+import json
+from collections.abc import Callable
+from datetime import UTC, datetime
+from time import monotonic
+from typing import Literal
+
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.orm import Session, sessionmaker
+
+from aris.core.commands.budgets import database_failure, transaction_budget
+from aris.core.contracts import DomainError
+from aris.core.time import utc
+from aris.modules.vega.repo import StoredUsageMessage, VegaRepository
+from aris.modules.vega.resource_schemas import ResourceTelemetryBatch
+from aris.modules.vega.schemas import Heartbeat
+from aris.modules.vega.usage_archive_schemas import (
+    MAX_ARCHIVE_SOURCE_CHARACTERS,
+    ArchivedUsageItem,
+    ArchivedUsageReference,
+    UsageArchivePage,
+    UsageArchiveQuery,
+    archive_page_fingerprint,
+)
+from aris.modules.vega.usage_service import _usage_fact
+
+
+def _archived_item(row: StoredUsageMessage, query: UsageArchiveQuery) -> ArchivedUsageItem:
+    fingerprint = hashlib.sha256(
+        json.dumps(row.payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    batch: ResourceTelemetryBatch | Heartbeat
+    if row.message_kind == "telemetry":
+        batch = ResourceTelemetryBatch.model_validate(row.payload)
+    elif row.message_kind == "heartbeat":
+        batch = Heartbeat.model_validate(row.payload)
+    else:
+        raise ValueError("unsupported archived message kind")
+    if (
+        fingerprint != row.fingerprint
+        or (row.agent_id, row.node_id) != (query.agent_id, query.node_id)
+        or (batch.agent_id, batch.node_id, str(batch.message_id), batch.seq, batch.observed_at)
+        != (row.agent_id, row.node_id, row.message_id, row.seq, utc(row.observed_at))
+    ):
+        raise ValueError("archived source differs from its original message")
+    return ArchivedUsageItem(
+        reference=ArchivedUsageReference(
+            agent_id=row.agent_id,
+            node_id=row.node_id,
+            message_id=row.message_id,
+            seq=row.seq,
+            kind=row.message_kind,
+            fingerprint=fingerprint,
+            observed_at=utc(row.observed_at),
+            received_at=utc(row.received_at),
+        ),
+        observation=(
+            _usage_fact(batch, fingerprint=fingerprint, received_at=utc(row.received_at))
+            if isinstance(batch, ResourceTelemetryBatch)
+            else None
+        ),
+    )
+
+
+class VegaUsageArchive:
+    def __init__(
+        self,
+        sessions: sessionmaker[Session],
+        *,
+        clock: Callable[[], datetime] | None = None,
+        timeout_ms: int = 3000,
+    ) -> None:
+        if type(timeout_ms) is not int or not 1 <= timeout_ms <= 10000:
+            raise ValueError("usage archive requires a bounded read timeout")
+        self.sessions = sessions
+        self.clock = clock or (lambda: datetime.now(UTC))
+        self.timeout_ms = timeout_ms
+
+    def page(self, query: UsageArchiveQuery) -> UsageArchivePage:
+        with self.sessions() as session:
+            return self.page_in_transaction(session, query)
+
+    def page_in_transaction(self, session: Session, query: UsageArchiveQuery) -> UsageArchivePage:
+        query = UsageArchiveQuery.model_validate(query.model_dump(mode="json"))
+        deadline = monotonic() + self.timeout_ms / 1000
+        try:
+            with session.no_autoflush:
+                transaction_budget(
+                    session, min(100, self.timeout_ms), min(1000, self.timeout_ms), self.timeout_ms
+                )
+                repo = VegaRepository(session)
+                binding = repo.usage_source_node(query.agent_id)
+                if binding is None:
+                    raise DomainError("NOT_FOUND", "Archived usage source is unknown", 404)
+                if binding != query.node_id:
+                    raise DomainError("CONFLICT", "Archived usage source binding differs", 409)
+                metadata = repo.usage_range_metadata(
+                    query.agent_id, query.after_seq, query.page_through_seq
+                )
+                selected = []
+                characters = 0
+                for index, (message_id, seq, size) in enumerate(metadata, start=1):
+                    if seq != query.after_seq + index:
+                        break
+                    characters += size
+                    if characters > MAX_ARCHIVE_SOURCE_CHARACTERS:
+                        raise DomainError(
+                            "USAGE_ARCHIVE_TOO_LARGE", "Archive page exceeds its source budget", 503
+                        )
+                    selected.append(message_id)
+                rows = repo.usage_messages(query.agent_id, tuple(selected)) if selected else ()
+                if len(rows) != len(selected) or tuple(row.message_id for row in rows) != tuple(
+                    selected
+                ):
+                    raise ValueError("archived source prefix changed while loading")
+                items = tuple(_archived_item(row, query) for row in rows)
+                end = query.after_seq + len(items)
+                state: Literal["range_end", "page_end", "gap"] = (
+                    "range_end"
+                    if end == query.through_seq
+                    else ("page_end" if end == query.page_through_seq else "gap")
+                )
+                now = self.clock()
+                if now.tzinfo is None or now.utcoffset() is None:
+                    raise ValueError("usage archive clock requires a timezone")
+                unchecked = UsageArchivePage.model_construct(
+                    query=query,
+                    items=items,
+                    next_after_seq=end,
+                    state=state,
+                    missing_seq=end + 1 if state == "gap" else None,
+                    read_at=utc(now),
+                    fingerprint="0" * 64,
+                )
+                result = UsageArchivePage.model_validate(
+                    {
+                        **unchecked.model_dump(mode="json"),
+                        "fingerprint": archive_page_fingerprint(unchecked),
+                    }
+                )
+                if monotonic() >= deadline:
+                    raise DomainError(
+                        "RETRYABLE_DATABASE_ERROR", "Archive page read budget exceeded", 503
+                    )
+                return result
+        except DBAPIError as error:
+            code = database_failure(error)
+            raise DomainError(
+                code if code == "RETRYABLE_DATABASE_ERROR" else "DEPENDENCY_UNAVAILABLE",
+                "Usage archive database is unavailable",
+                503,
+            ) from None
+        except (ValueError, TypeError, KeyError, RecursionError):
+            raise DomainError(
+                "DEPENDENCY_UNAVAILABLE", "Original usage archive source is inconsistent", 503
+            ) from None

@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
 
-from sqlalchemy import case, func, select
+from sqlalchemy import String, case, cast, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
@@ -13,6 +13,7 @@ from aris.modules.vega.models import AgentMessage, GpuDevice, Node, NodeResource
 from aris.modules.vega.reports import AgentReport
 from aris.modules.vega.storage_schemas import MessageStorage
 from aris.modules.vega.target_schemas import GpuInventoryLabel
+from aris.modules.vega.usage_archive_schemas import MAX_ARCHIVE_MESSAGES
 
 
 @dataclass(frozen=True)
@@ -125,6 +126,49 @@ class VegaRepository:
             ).where(AgentMessage.agent_id == agent_id, AgentMessage.message_id == message_id)
         ).one_or_none()
         return StoredUsageMessage(*row) if row is not None else None
+
+    def usage_source_node(self, agent_id: str) -> str | None:
+        return self.session.scalar(select(Node.id).where(Node.agent_id == agent_id))
+
+    def usage_range_metadata(
+        self, agent_id: str, after_seq: int, through_seq: int
+    ) -> tuple[tuple[str, int, int], ...]:
+        rows = self.session.execute(
+            select(
+                AgentMessage.message_id,
+                AgentMessage.seq,
+                func.length(cast(AgentMessage.payload, String)),
+            )
+            .where(
+                AgentMessage.agent_id == agent_id,
+                AgentMessage.seq > after_seq,
+                AgentMessage.seq <= through_seq,
+            )
+            .order_by(AgentMessage.seq)
+            .limit(MAX_ARCHIVE_MESSAGES)
+        )
+        return tuple((row[0], row[1], row[2]) for row in rows)
+
+    def usage_messages(
+        self, agent_id: str, message_ids: tuple[str, ...]
+    ) -> tuple[StoredUsageMessage, ...]:
+        rows = self.session.execute(
+            select(
+                AgentMessage.agent_id,
+                AgentMessage.node_id,
+                AgentMessage.message_id,
+                AgentMessage.seq,
+                AgentMessage.message_kind,
+                AgentMessage.observed_at,
+                AgentMessage.received_at,
+                AgentMessage.fingerprint,
+                AgentMessage.payload,
+            )
+            .where(AgentMessage.agent_id == agent_id, AgentMessage.message_id.in_(message_ids))
+            .order_by(AgentMessage.seq)
+            .limit(MAX_ARCHIVE_MESSAGES)
+        )
+        return tuple(StoredUsageMessage(*row) for row in rows)
 
     def sequence_exists(self, agent_id: str, seq: int) -> bool:
         return (
