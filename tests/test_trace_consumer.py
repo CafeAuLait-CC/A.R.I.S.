@@ -1,3 +1,4 @@
+import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from threading import Barrier, Event
@@ -16,12 +17,15 @@ from aris.core.audit import AuditEntry
 from aris.core.contracts import DomainError
 from aris.core.events import DomainEvent, OutboxEntry
 from aris.modules.lyra.models import UsageLedgerEntryRow, UsageTraceCursorRow, UsageTraceRecordRow
+from aris.modules.lyra.residency_sessions import ResidencyFormationRule
 from aris.modules.lyra.trace_consumer_repo import UsageTraceRepository
 from aris.modules.lyra.trace_consumer_schemas import (
     StoredTraceConsumption,
     UsageTraceConfiguration,
     UsageTraceConsumeContext,
     UsageTraceConsumeRequest,
+    canonical_trace,
+    trace_fingerprint,
 )
 from aris.modules.lyra.trace_consumer_service import UsageTraceConsumerService
 from aris.modules.lyra.trace_state import UsageContinuityRule
@@ -43,6 +47,7 @@ def configuration(**changes):
             "node_id": "node-a",
             "initial_after_seq": 0,
             "continuity": UsageContinuityRule(max_gap_seconds=45),
+            "formation": ResidencyFormationRule(minimum_intervals=2, minimum_duration_seconds=30),
             **changes,
         }
     )
@@ -141,13 +146,22 @@ def test_original_prefix_receipt_cursor_event_and_replay_are_one_candidate_opera
     )
     assert result.position.revision == 1 and result.position.after_seq == 6
     assert result.position.trace.last.reference.seq == 5 and result.page_state == "range_end"
+    assert result.closed_run_count == 0 and result.open_run_count == 1
+    assert result.position.residency.open_runs[0].intervals == 2
+    assert result.position.residency.open_runs[0].observed_microseconds == 30000000
     assert counts(state) == tuple(x + y for x, y in zip(before, (1, 1, 1, 1, 1, 0), strict=True))
     stored = state.service.exact(incoming.id)
     assert stored.position == result.position and stored.context == CONTEXT
-    assert (
-        "resources" not in stored.model_dump_json()
-        and "fixture-user" not in stored.model_dump_json()
-    )
+    assert "resources" not in stored.model_dump_json()
+    assert all("fixture-user" not in item.model_dump_json() for item in stored.sources)
+    assert stored.after_residency.open_runs[0].username == "fixture-user"
+    with state.sessions() as session:
+        public_event = session.get(DomainEvent, str(result.event_id))
+        audit = session.scalar(
+            select(AuditEntry).where(AuditEntry.action == "lyra.usage.trace_consumed")
+        )
+        assert "fixture-user" not in json.dumps(public_event.payload)
+        assert "fixture-user" not in json.dumps(audit.changes)
     after = counts(state)
     state.service.configuration = None
     replay = state.service.consume(
@@ -177,6 +191,7 @@ def test_restart_after_every_page_matches_one_complete_candidate_stream(consumer
         ),
     )
     assert result.position.trace == complete.position.trace
+    assert result.position.residency == complete.position.residency
     assert counts(state)[0] == 4 and counts(state)[1] == 2 and counts(state)[-1] == 0
 
 
@@ -244,6 +259,62 @@ def test_heartbeat_only_progress_never_creates_a_compute_anchor_or_usage(consume
     result = state.service.consume(CONTEXT, request(state, through_seq=3))
     assert result.recorded and result.source_count == 3 and result.telemetry_count == 0
     assert result.position.trace is None and counts(state)[-1] == 0
+    assert (
+        result.position.residency is None and result.open_run_count == result.closed_run_count == 0
+    )
+
+
+def test_idle_transition_closes_one_persisted_run_without_using_the_page_boundary(consumer):
+    state = consumer
+    seed(state)
+    for _ in range(3):
+        first = state.service.consume(CONTEXT, request(state, limit=2))
+        assert first.closed_run_count == 0
+        state.service = rebuild(state)
+    original = first.position.residency.open_runs[0]
+    idle = resource_batch(seq=7, observed_at=state.base + timedelta(seconds=55))
+    idle["resources"]["compute"].update(reported_processes=0, gpus=[])
+    assert put(state.client, idle).status_code == 200
+    assert beat(state.client, heartbeat(seq=8)).status_code == 200
+    final = state.service.consume(CONTEXT, request(state, through_seq=8))
+    assert final.closed_run_count == 1 and final.open_run_count == 0
+    saved = state.service.exact(final.id)
+    candidate = saved.closed_runs[0]
+    assert candidate.run == original and candidate.state == "stable_candidate"
+    assert candidate.boundary_reason == "USAGE_TRANSITION"
+    assert candidate.run.last.seq == 5 and counts(state)[-1] == 0
+
+
+def test_saved_record_cannot_drop_a_previously_open_run_even_with_a_new_content_hash(consumer):
+    state = consumer
+    seed(state)
+    state.service.consume(CONTEXT, request(state, through_seq=4))
+    second = state.service.consume(CONTEXT, request(state))
+    saved = state.service.exact(second.id)
+    altered = saved.model_copy(
+        update={"after_residency": saved.after_residency.model_copy(update={"open_runs": ()})}
+    )
+    raw = altered.model_dump(mode="json")
+    raw["fingerprint"] = trace_fingerprint(
+        "record", canonical_trace(altered, exclude={"fingerprint"})
+    )
+    with pytest.raises(ValidationError):
+        StoredTraceConsumption.model_validate(raw)
+
+
+def test_residency_processing_budget_refuses_a_large_batch_without_advancing_cursor(
+    consumer, monkeypatch
+):
+    state = consumer
+    seed(state)
+    before, incoming = counts(state), request(state)
+    with monkeypatch.context() as patch:
+        patch.setattr("aris.modules.lyra.trace_consumer_service.MAX_TRACE_RECORD_BYTES", 1)
+        with pytest.raises(DomainError) as error:
+            state.service.consume(CONTEXT, incoming)
+    assert error.value.code == "USAGE_PROCESSING_TOO_LARGE" and counts(state) == before
+    assert state.service.position().revision == 0
+    assert not state.service.consume(CONTEXT, incoming).duplicate
 
 
 def test_stale_revision_changed_key_input_and_reconfigured_stream_never_reset_progress(consumer):

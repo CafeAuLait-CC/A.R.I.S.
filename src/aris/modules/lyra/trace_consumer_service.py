@@ -2,6 +2,7 @@
 
 import json
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
 from uuid import UUID, uuid4
@@ -14,8 +15,15 @@ from aris.core.commands.budgets import database_failure
 from aris.core.contracts import DomainError
 from aris.core.db import commit_owned_transaction, transaction_savepoint
 from aris.core.events import DomainEvent, OutboxEntry
+from aris.modules.lyra.residency_state import (
+    ClosedResidencyCandidate,
+    ResidencyFormationCheckpoint,
+    advance_residency_formation,
+)
 from aris.modules.lyra.trace_consumer_repo import UsageTraceRepository, inconsistent_trace
 from aris.modules.lyra.trace_consumer_schemas import (
+    MAX_CLOSED_RESIDENCIES,
+    MAX_TRACE_RECORD_BYTES,
     ConsumedTraceSource,
     StoredTraceConsumption,
     TraceConsumptionIdle,
@@ -47,6 +55,15 @@ class TraceObservationReader(Protocol):
     def observation_in_transaction(
         self, session: Session, query: UsageObservationQuery
     ) -> UsageObservationFact | None: ...
+
+
+@dataclass(frozen=True)
+class _TraceEvaluation:
+    trace: UsageTraceCheckpoint | None
+    residency: ResidencyFormationCheckpoint | None
+    transitions_fingerprint: str
+    sources: tuple[ConsumedTraceSource, ...]
+    closed_runs: tuple[ClosedResidencyCandidate, ...]
 
 
 class UsageTraceConsumerService:
@@ -103,8 +120,9 @@ class UsageTraceConsumerService:
 
     def _evaluate(
         self, session: Session, before: UsageTracePosition, page: UsageArchivePage
-    ) -> tuple[UsageTraceCheckpoint | None, str, tuple[ConsumedTraceSource, ...]]:
+    ) -> _TraceEvaluation:
         checkpoint = before.trace
+        residency = before.residency
         cache: dict[UUID, UsageObservationFact] = {}
         if checkpoint is not None and any(item.observation is not None for item in page.items):
             ref = checkpoint.anchor.reference
@@ -122,7 +140,9 @@ class UsageTraceConsumerService:
                     "CONFLICT", "Original candidate trace anchor is unavailable or changed", 409
                 )
             cache[anchor.message_id] = anchor
-        sources, steps = [], []
+        sources: list[ConsumedTraceSource] = []
+        closed: list[ClosedResidencyCandidate] = []
+        transitions = trace_fingerprint("transitions", "[]")
         for item in page.items:
             fact = item.observation
             sources.append(
@@ -143,13 +163,40 @@ class UsageTraceConsumerService:
             )
             if step.requires_rebuild:
                 raise DomainError("CONFLICT", "Candidate source order requires reconstruction", 409)
-            steps.append(step.model_dump(mode="json"))
+            formed = advance_residency_formation(
+                residency,
+                step,
+                continuity=before.configuration.continuity,
+                formation=before.configuration.formation,
+            )
+            residency = formed.checkpoint
+            closed.extend(formed.closed)
+            if len(closed) > MAX_CLOSED_RESIDENCIES:
+                raise DomainError(
+                    "USAGE_PROCESSING_TOO_LARGE", "Candidate page requires a smaller batch", 503
+                )
+            transitions = trace_fingerprint(
+                "transition",
+                json.dumps(
+                    {
+                        "previous": transitions,
+                        "trace": step.model_dump(mode="json"),
+                        "residency": formed.model_dump(mode="json"),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ),
+            )
             cache[fact.message_id] = fact
             checkpoint = step.checkpoint
-        transitions = trace_fingerprint(
-            "transitions", json.dumps(steps, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        return _TraceEvaluation(
+            trace=checkpoint,
+            residency=residency,
+            transitions_fingerprint=transitions,
+            sources=tuple(sources),
+            closed_runs=tuple(closed),
         )
-        return checkpoint, transitions, tuple(sources)
 
     def _verify_sources(self, session: Session, record: StoredTraceConsumption) -> None:
         before, config = record.before, record.before.configuration
@@ -163,12 +210,14 @@ class UsageTraceConsumerService:
                 limit=len(record.sources),
             ),
         )
-        checkpoint, transitions, sources = self._evaluate(session, before, page)
+        evaluated = self._evaluate(session, before, page)
         if (
             page.state != "range_end"
-            or sources != record.sources
-            or checkpoint != record.after_trace
-            or transitions != record.transitions_fingerprint
+            or evaluated.sources != record.sources
+            or evaluated.trace != record.after_trace
+            or evaluated.residency != record.after_residency
+            or evaluated.closed_runs != record.closed_runs
+            or evaluated.transitions_fingerprint != record.transitions_fingerprint
         ):
             raise DomainError("CONFLICT", "Candidate source prefix changed during processing", 409)
 
@@ -234,7 +283,7 @@ class UsageTraceConsumerService:
                         position=before,
                         missing_seq=before.after_seq + 1,
                     )
-                checkpoint, transitions, sources = self._evaluate(session, before, page)
+                evaluated = self._evaluate(session, before, page)
                 now = self._now()
                 if before.recorded_at is not None and now < before.recorded_at:
                     raise DomainError(
@@ -245,14 +294,20 @@ class UsageTraceConsumerService:
                     context=context,
                     event_id=uuid4(),
                     before=before,
-                    sources=sources,
-                    after_trace=checkpoint,
-                    transitions_fingerprint=transitions,
+                    sources=evaluated.sources,
+                    after_trace=evaluated.trace,
+                    after_residency=evaluated.residency,
+                    closed_runs=evaluated.closed_runs,
+                    transitions_fingerprint=evaluated.transitions_fingerprint,
                     page_state=page.state,
                     missing_seq=page.missing_seq,
                     created_at=now,
                     fingerprint="0" * 64,
                 )
+                if len(canonical_trace(unchecked).encode()) > MAX_TRACE_RECORD_BYTES:
+                    raise DomainError(
+                        "USAGE_PROCESSING_TOO_LARGE", "Candidate page requires a smaller batch", 503
+                    )
                 record = StoredTraceConsumption.model_validate(
                     {
                         **unchecked.model_dump(mode="json"),

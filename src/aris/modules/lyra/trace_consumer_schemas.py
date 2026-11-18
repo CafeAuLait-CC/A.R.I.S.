@@ -8,6 +8,8 @@ from uuid import UUID
 
 from pydantic import AwareDatetime, Field, field_validator, model_validator
 
+from aris.modules.lyra.residency_sessions import ResidencyFormationRule
+from aris.modules.lyra.residency_state import ClosedResidencyCandidate, ResidencyFormationCheckpoint
 from aris.modules.lyra.trace_state import (
     ObservationStamp,
     UsageContinuityRule,
@@ -20,7 +22,8 @@ from aris.modules.vega.usage_archive_schemas import (
     ArchivedUsageReference,
 )
 
-MAX_TRACE_RECORD_BYTES = 262144
+MAX_TRACE_RECORD_BYTES = 1048576
+MAX_CLOSED_RESIDENCIES = 256
 
 
 def canonical_trace(value: IntervalContract, *, exclude: set[str] | None = None) -> str:
@@ -45,6 +48,7 @@ class UsageTraceConfiguration(IntervalContract):
     node_id: str = Field(min_length=1, max_length=128, pattern=r"^\S+$")
     initial_after_seq: int = Field(ge=0, lt=MAX_ARCHIVE_SEQ, strict=True)
     continuity: UsageContinuityRule
+    formation: ResidencyFormationRule
 
     @property
     def fingerprint(self) -> str:
@@ -71,6 +75,7 @@ class UsageTracePosition(IntervalContract):
     revision: int = Field(ge=0, le=MAX_ARCHIVE_SEQ, strict=True)
     after_seq: int = Field(ge=0, le=MAX_ARCHIVE_SEQ, strict=True)
     trace: UsageTraceCheckpoint | None = None
+    residency: ResidencyFormationCheckpoint | None = None
     record_id: UUID | None = None
     fingerprint: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     recorded_at: AwareDatetime | None = None
@@ -94,6 +99,7 @@ class UsageTracePosition(IntervalContract):
                 )
             )
             or (not initial and self.after_seq <= self.configuration.initial_after_seq)
+            or (self.trace is None) != (self.residency is None)
             or (
                 self.trace is not None
                 and (
@@ -102,6 +108,16 @@ class UsageTracePosition(IntervalContract):
                     or self.trace.anchor.reference.seq <= self.configuration.initial_after_seq
                     or (self.trace.last.reference.agent_id, self.trace.last.reference.node_id)
                     != (self.configuration.agent_id, self.configuration.node_id)
+                )
+            )
+            or (
+                self.residency is not None
+                and self.trace is not None
+                and (
+                    self.residency.continuity != self.configuration.continuity
+                    or self.residency.formation != self.configuration.formation
+                    or self.residency.last != self.trace.last
+                    or (self.trace.blocked_at is not None and bool(self.residency.open_runs))
                 )
             )
         ):
@@ -140,6 +156,10 @@ class StoredTraceConsumption(IntervalContract):
     before: UsageTracePosition
     sources: tuple[ConsumedTraceSource, ...] = Field(min_length=1, max_length=MAX_ARCHIVE_MESSAGES)
     after_trace: UsageTraceCheckpoint | None
+    after_residency: ResidencyFormationCheckpoint | None
+    closed_runs: tuple[ClosedResidencyCandidate, ...] = Field(
+        default=(), max_length=MAX_CLOSED_RESIDENCIES
+    )
     transitions_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
     page_state: Literal["range_end", "page_end", "gap"]
     missing_seq: int | None = Field(default=None, ge=1, le=MAX_ARCHIVE_SEQ, strict=True)
@@ -158,6 +178,7 @@ class StoredTraceConsumption(IntervalContract):
             revision=self.before.revision + 1,
             after_seq=self.sources[-1].reference.seq,
             trace=self.after_trace,
+            residency=self.after_residency,
             record_id=self.request.id,
             fingerprint=self.fingerprint,
             recorded_at=self.created_at,
@@ -175,6 +196,13 @@ class StoredTraceConsumption(IntervalContract):
         observations = tuple(
             item.observation for item in self.sources if item.observation is not None
         )
+        before_ids = (
+            {run.id for run in self.before.residency.open_runs} if self.before.residency else set()
+        )
+        after_ids = (
+            {run.id for run in self.after_residency.open_runs} if self.after_residency else set()
+        )
+        closed_ids = {item.run.id for item in self.closed_runs}
         if (
             request.expected_configuration_fingerprint != config.fingerprint
             or request.expected_revision != self.before.revision
@@ -191,8 +219,25 @@ class StoredTraceConsumption(IntervalContract):
                 for index, item in enumerate(self.sources, start=1)
             )
             or len({item.reference.message_id for item in self.sources}) != len(self.sources)
+            or len(closed_ids) != len(self.closed_runs)
+            or bool(after_ids & closed_ids)
+            or not before_ids <= (after_ids | closed_ids)
+            or any(
+                item.continuity != config.continuity
+                or item.formation != config.formation
+                or item.end_boundary == "trace_end"
+                or (item.run.first.agent_id, item.run.first.node_id)
+                != (config.agent_id, config.node_id)
+                or item.run.first.seq <= config.initial_after_seq
+                or item.run.last.seq > last
+                for item in self.closed_runs
+            )
             or (bool(observations) and self.after_trace is None)
             or (not observations and self.after_trace != self.before.trace)
+            or (
+                not observations
+                and (self.after_residency != self.before.residency or bool(self.closed_runs))
+            )
             or (
                 observations
                 and self.after_trace is not None
@@ -217,6 +262,8 @@ class TraceConsumptionReceipt(IntervalContract):
     position: UsageTracePosition
     source_count: int = Field(ge=1, le=MAX_ARCHIVE_MESSAGES, strict=True)
     telemetry_count: int = Field(ge=0, le=MAX_ARCHIVE_MESSAGES, strict=True)
+    closed_run_count: int = Field(ge=0, le=MAX_CLOSED_RESIDENCIES, strict=True)
+    open_run_count: int = Field(ge=0, le=128, strict=True)
     page_state: Literal["range_end", "page_end", "gap"]
     missing_seq: int | None
 
@@ -226,6 +273,8 @@ class TraceConsumptionReceipt(IntervalContract):
             self.position.record_id != self.id
             or self.position.revision == 0
             or self.telemetry_count > self.source_count
+            or self.open_run_count
+            != (len(self.position.residency.open_runs) if self.position.residency else 0)
             or (self.page_state == "gap") != (self.missing_seq is not None)
             or (self.missing_seq is not None and self.missing_seq != self.position.after_seq + 1)
         ):
@@ -259,6 +308,8 @@ def consumption_receipt(
         position=record.position,
         source_count=len(record.sources),
         telemetry_count=sum(item.observation is not None for item in record.sources),
+        closed_run_count=len(record.closed_runs),
+        open_run_count=len(record.position.residency.open_runs) if record.position.residency else 0,
         page_state=record.page_state,
         missing_seq=record.missing_seq,
     )

@@ -34,7 +34,7 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint("length(fingerprint) = 64", name="ck_usage_trace_fingerprint"),
         sa.CheckConstraint(
-            "length(canonical_record) > 0 AND length(canonical_record) <= 262144",
+            "length(canonical_record) > 0 AND length(canonical_record) <= 1048576",
             name="ck_usage_trace_size",
         ),
     )

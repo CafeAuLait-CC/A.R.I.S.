@@ -172,7 +172,7 @@ class UsageTraceRecordRow(Base):
         CheckConstraint("source_count >= 1 AND source_count <= 128", name="ck_usage_trace_sources"),
         CheckConstraint("length(fingerprint) = 64", name="ck_usage_trace_fingerprint"),
         CheckConstraint(
-            "length(canonical_record) > 0 AND length(canonical_record) <= 262144",
+            "length(canonical_record) > 0 AND length(canonical_record) <= 1048576",
             name="ck_usage_trace_size",
         ),
     )
