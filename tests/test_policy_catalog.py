@@ -256,7 +256,7 @@ def test_history_prevents_downgrade_and_remains_readable(catalog_state):
     assert catalog.exact(actor(ids), reference()) == before
     command.upgrade(Config("alembic.ini"), "head")
     with sessions() as session:
-        assert session.scalar(text("SELECT version_num FROM alembic_version")) == "0015"
+        assert session.scalar(text("SELECT version_num FROM alembic_version")) == "0016"
 
 
 @pytest.mark.parametrize("case", ["fingerprint", "canonical_bytes", "name", "version", "creator"])

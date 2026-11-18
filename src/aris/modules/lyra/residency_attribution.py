@@ -98,6 +98,26 @@ class ResidencyAttributionService:
         as_of: datetime,
         through_revision: int | None = None,
     ) -> ResidencyAttributionAnalysis:
+        with self.sessions() as session:
+            return self.analyze_in_transaction(
+                session,
+                facts,
+                continuity=continuity,
+                formation=formation,
+                as_of=as_of,
+                through_revision=through_revision,
+            )
+
+    def analyze_in_transaction(
+        self,
+        session: Session,
+        facts: Sequence[UsageObservationFact],
+        *,
+        continuity: UsageContinuityRule,
+        formation: ResidencyFormationRule,
+        as_of: datetime,
+        through_revision: int | None = None,
+    ) -> ResidencyAttributionAnalysis:
         cutoff = _KnowledgeCutoff(as_of=as_of, through_revision=through_revision)
         if not 1 <= len(facts) <= MAX_TRACE_MESSAGES:
             raise DomainError(
@@ -131,11 +151,8 @@ class ResidencyAttributionService:
                 attributions=(),
             )
         request = HistoricalNodeUserBatch(queries=queries)
-        with self.sessions() as session:
-            snapshot = self.identities.resolve_many_in_transaction(session, request)
-            snapshot = HistoricalNodeUserBatchResult.model_validate(
-                snapshot.model_dump(mode="json")
-            )
+        snapshot = self.identities.resolve_many_in_transaction(session, request)
+        snapshot = HistoricalNodeUserBatchResult.model_validate(snapshot.model_dump(mode="json"))
         return ResidencyAttributionAnalysis(
             as_of=cutoff.as_of,
             directory_revision=snapshot.directory_revision,
