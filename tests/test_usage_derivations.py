@@ -60,7 +60,7 @@ def derivations(history_state, client):
                 expected_seq=payload["seq"],
             )
         )
-    cutoff = datetime.now(UTC)
+    cutoff = max(datetime.now(UTC), NOW + timedelta(seconds=200))
     clock["now"] = cutoff + timedelta(seconds=1)
     observations = VegaUsageObservations(sessions)
     attribution = ResidencyAttributionService(sessions, identities)

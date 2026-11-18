@@ -154,6 +154,22 @@ class StoredUsageDerivation(IntervalContract):
     receipt: UsageDerivationReceipt
     artifact: UsageDerivationArtifact = Field(repr=False)
 
+    @model_validator(mode="after")
+    def receipt_binds_artifact(self) -> "StoredUsageDerivation":
+        request = self.artifact.request
+        raw_input, raw_result = canonical_derivation(request), canonical_derivation(self.artifact)
+        if (
+            self.receipt.id != request.id
+            or self.receipt.source_count != len(request.sources)
+            or self.receipt.created_at < request.as_of
+            or len(raw_input.encode()) > MAX_DERIVATION_INPUT_BYTES
+            or len(raw_result.encode()) > MAX_DERIVATION_RESULT_BYTES
+            or self.receipt.request_fingerprint != derivation_fingerprint(raw_input, result=False)
+            or self.receipt.result_fingerprint != derivation_fingerprint(raw_result, result=True)
+        ):
+            raise ValueError("derivation receipt differs from its fixed artifact")
+        return self
+
 
 def canonical_derivation(value: IntervalContract) -> str:
     return json.dumps(
