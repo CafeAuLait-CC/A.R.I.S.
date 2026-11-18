@@ -20,6 +20,25 @@ class UsageObservationQuery(UsageFactContract):
     expected_seq: int = Field(gt=0, strict=True)
 
 
+class UsageObservationBatchQuery(UsageFactContract):
+    queries: tuple[UsageObservationQuery, ...] = Field(min_length=1, max_length=1024)
+
+    @model_validator(mode="after")
+    def one_source_binding(self) -> "UsageObservationBatchQuery":
+        if len({(item.agent_id, item.node_id) for item in self.queries}) != 1:
+            raise ValueError("observation batch requires one original source binding")
+        by_id: dict[UUID, UsageObservationQuery] = {}
+        by_seq: dict[int, UUID] = {}
+        for query in self.queries:
+            if query.message_id in by_id and by_id[query.message_id] != query:
+                raise ValueError("observation batch repeats one ID with different input")
+            if query.expected_seq in by_seq and by_seq[query.expected_seq] != query.message_id:
+                raise ValueError("observation batch repeats one sequence with different IDs")
+            by_id[query.message_id] = query
+            by_seq[query.expected_seq] = query.message_id
+        return self
+
+
 class LinuxGpuOwner(UsageFactContract):
     uid: int = Field(ge=0, le=4294967295, strict=True)
     username: str | None = Field(default=None, min_length=1, max_length=128)

@@ -30,13 +30,13 @@ from aris.modules.lyra.derivation_schemas import (
 from aris.modules.lyra.models import UsageDerivation
 from aris.modules.lyra.reservation_links import ReservationLinkRequest, ResidencyReservationService
 from aris.modules.lyra.residency_attribution import ResidencyAttributionService
-from aris.modules.vega.usage_schemas import UsageObservationFact, UsageObservationQuery
+from aris.modules.vega.usage_schemas import UsageObservationBatchQuery, UsageObservationFact
 
 
 class HistoricalObservationReader(Protocol):
-    def observation_in_transaction(
-        self, session: Session, query: UsageObservationQuery
-    ) -> UsageObservationFact | None: ...
+    def observations_in_transaction(
+        self, session: Session, query: UsageObservationBatchQuery
+    ) -> tuple[UsageObservationFact | None, ...]: ...
 
 
 class UsageDerivationService:
@@ -73,8 +73,12 @@ class UsageDerivationService:
         self, session: Session, request: UsageDerivationRequest
     ) -> UsageDerivationArtifact:
         facts = []
-        for query in request.sources:
-            original = self.observations.observation_in_transaction(session, query)
+        originals = self.observations.observations_in_transaction(
+            session, UsageObservationBatchQuery(queries=request.sources)
+        )
+        if len(originals) != len(request.sources):
+            raise DomainError("DEPENDENCY_UNAVAILABLE", "Usage source batch length differs", 503)
+        for query, original in zip(request.sources, originals, strict=True):
             if original is None:
                 raise DomainError(
                     "DEPENDENCY_UNAVAILABLE", "An original usage source is unavailable", 503

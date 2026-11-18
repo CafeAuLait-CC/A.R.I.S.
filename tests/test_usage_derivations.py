@@ -172,31 +172,50 @@ def test_future_cutoff_and_changed_source_binding_fail_before_writes(derivations
 
 def test_source_contract_cannot_return_a_different_message(derivations, monkeypatch):
     service, request, state = derivations
-    original = service.observations.observation_in_transaction
+    original = service.observations.observations_in_transaction
 
     def changed(session, query):
-        return original(session, query).model_copy(update={"message_id": uuid4()})
+        facts = original(session, query)
+        return (facts[0].model_copy(update={"message_id": uuid4()}), *facts[1:])
 
-    monkeypatch.setattr(service.observations, "observation_in_transaction", changed)
+    monkeypatch.setattr(service.observations, "observations_in_transaction", changed)
     before = counts(state[1])
     with pytest.raises(DomainError, match="binding differs"):
         service.record(CONTEXT, request)
     assert counts(state[1]) == before
 
 
+def test_source_batch_cannot_silently_omit_an_original_reference(derivations, monkeypatch):
+    service, request, state = derivations
+    original = service.observations.observations_in_transaction
+    monkeypatch.setattr(
+        service.observations,
+        "observations_in_transaction",
+        lambda session, query: original(session, query)[:-1],
+    )
+    before = counts(state[1])
+    with pytest.raises(DomainError) as error:
+        service.record(CONTEXT, request)
+    assert error.value.code == "DEPENDENCY_UNAVAILABLE" and counts(state[1]) == before
+
+
 def test_final_recomputation_rejects_changed_facts_instead_of_returning_partial_result(
     derivations, monkeypatch
 ):
     service, request, state = derivations
-    original = service.observations.observation_in_transaction
+    original = service.observations.observations_in_transaction
     calls = []
 
     def changed(session, query):
-        fact = original(session, query)
+        facts = original(session, query)
         calls.append(True)
-        return fact if len(calls) <= 3 else fact.model_copy(update={"source_fingerprint": "f" * 64})
+        return (
+            facts
+            if len(calls) == 1
+            else (facts[0].model_copy(update={"source_fingerprint": "f" * 64}), *facts[1:])
+        )
 
-    monkeypatch.setattr(service.observations, "observation_in_transaction", changed)
+    monkeypatch.setattr(service.observations, "observations_in_transaction", changed)
     before = counts(state[1])
     with pytest.raises(DomainError) as error:
         service.record(CONTEXT, request)
@@ -372,14 +391,16 @@ def test_invalid_dependency_payload_is_unavailable_without_echoing_owner_data(
     derivations, monkeypatch
 ):
     service, request, state = derivations
-    original = service.observations.observation_in_transaction
+    original = service.observations.observations_in_transaction
 
     def malformed(session, query):
-        return original(session, query).model_copy(
-            update={"compute_quality": "private-fixture-must-not-be-echoed"}
+        facts = original(session, query)
+        return (
+            facts[0].model_copy(update={"compute_quality": "private-fixture-must-not-be-echoed"}),
+            *facts[1:],
         )
 
-    monkeypatch.setattr(service.observations, "observation_in_transaction", malformed)
+    monkeypatch.setattr(service.observations, "observations_in_transaction", malformed)
     with pytest.raises(DomainError) as error:
         service.record(CONTEXT, request)
     assert (

@@ -6,18 +6,24 @@ from datetime import datetime
 from typing import Literal
 
 from pydantic import ValidationError
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, sessionmaker
 
+from aris.core.commands.budgets import database_failure, transaction_budget
 from aris.core.contracts import DomainError
 from aris.core.time import utc
-from aris.modules.vega.repo import VegaRepository
+from aris.modules.vega.repo import StoredUsageMessage, VegaRepository
 from aris.modules.vega.resource_schemas import ResourceTelemetryBatch
+from aris.modules.vega.usage_archive_schemas import MAX_ARCHIVE_MESSAGES
 from aris.modules.vega.usage_schemas import (
     GpuUsageFact,
     LinuxGpuOwner,
+    UsageObservationBatchQuery,
     UsageObservationFact,
     UsageObservationQuery,
 )
+
+MAX_BATCH_SOURCE_CHARACTERS = 4 * 1024 * 1024
 
 
 def _usage_fact(
@@ -113,29 +119,76 @@ class VegaUsageObservations:
     ) -> UsageObservationFact | None:
         with session.no_autoflush:
             row = VegaRepository(session).usage_message(query.agent_id, str(query.message_id))
-            if row is None:
-                return None
-            if row.node_id != query.node_id or row.seq != query.expected_seq:
-                raise DomainError("CONFLICT", "Observation source binding differs", 409)
-            if row.message_kind != "telemetry":
-                return None
-            try:
-                fingerprint = hashlib.sha256(
-                    json.dumps(row.payload, sort_keys=True, separators=(",", ":")).encode()
-                ).hexdigest()
-                if fingerprint != row.fingerprint:
-                    raise ValueError("stored observation fingerprint differs")
-                batch = ResourceTelemetryBatch.model_validate(row.payload)
-                if (
-                    batch.agent_id,
-                    batch.node_id,
-                    str(batch.message_id),
-                    batch.seq,
-                    batch.observed_at,
-                ) != (row.agent_id, row.node_id, row.message_id, row.seq, utc(row.observed_at)):
-                    raise ValueError("stored observation identity or time differs")
-                return _usage_fact(batch, fingerprint=fingerprint, received_at=utc(row.received_at))
-            except (ValueError, TypeError, ValidationError):
-                raise DomainError(
-                    "DEPENDENCY_UNAVAILABLE", "Historical usage observation is invalid", 503
-                ) from None
+            return self._observation(row, query)
+
+    @staticmethod
+    def _observation(
+        row: StoredUsageMessage | None, query: UsageObservationQuery
+    ) -> UsageObservationFact | None:
+        if row is None:
+            return None
+        if row.node_id != query.node_id or row.seq != query.expected_seq:
+            raise DomainError("CONFLICT", "Observation source binding differs", 409)
+        if row.message_kind != "telemetry":
+            return None
+        try:
+            fingerprint = hashlib.sha256(
+                json.dumps(row.payload, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            if fingerprint != row.fingerprint:
+                raise ValueError("stored observation fingerprint differs")
+            batch = ResourceTelemetryBatch.model_validate(row.payload)
+            if (
+                batch.agent_id,
+                batch.node_id,
+                str(batch.message_id),
+                batch.seq,
+                batch.observed_at,
+            ) != (row.agent_id, row.node_id, row.message_id, row.seq, utc(row.observed_at)):
+                raise ValueError("stored observation identity or time differs")
+            return _usage_fact(batch, fingerprint=fingerprint, received_at=utc(row.received_at))
+        except (ValueError, TypeError, ValidationError):
+            raise DomainError(
+                "DEPENDENCY_UNAVAILABLE", "Historical usage observation is invalid", 503
+            ) from None
+
+    def observations(
+        self, query: UsageObservationBatchQuery
+    ) -> tuple[UsageObservationFact | None, ...]:
+        try:
+            with self.sessions() as session:
+                transaction_budget(session, 100, 1000, 10000)
+                return self.observations_in_transaction(session, query)
+        except DBAPIError as error:
+            code = database_failure(error)
+            raise DomainError(
+                code if code == "RETRYABLE_DATABASE_ERROR" else "DEPENDENCY_UNAVAILABLE",
+                "Historical usage batch database is unavailable",
+                503,
+            ) from None
+
+    def observations_in_transaction(
+        self, session: Session, query: UsageObservationBatchQuery
+    ) -> tuple[UsageObservationFact | None, ...]:
+        query = UsageObservationBatchQuery.model_validate(query.model_dump(mode="json"))
+        by_id = {str(item.message_id): item for item in query.queries}
+        keys = tuple(by_id)
+        facts: dict[str, UsageObservationFact | None] = {}
+        characters = 0
+        with session.no_autoflush:
+            repo = VegaRepository(session)
+            for offset in range(0, len(keys), MAX_ARCHIVE_MESSAGES):
+                selected = keys[offset : offset + MAX_ARCHIVE_MESSAGES]
+                metadata = repo.usage_message_metadata(query.queries[0].agent_id, selected)
+                characters += sum(row[2] for row in metadata)
+                if characters > MAX_BATCH_SOURCE_CHARACTERS:
+                    raise DomainError(
+                        "USAGE_SOURCE_TOO_LARGE",
+                        "Historical source batch exceeds its read budget",
+                        503,
+                    )
+                present = tuple(row[0] for row in metadata)
+                rows = repo.usage_messages(query.queries[0].agent_id, present) if present else ()
+                for row in rows:
+                    facts[row.message_id] = self._observation(row, by_id[row.message_id])
+            return tuple(facts.get(str(item.message_id)) for item in query.queries)

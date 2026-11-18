@@ -170,6 +170,21 @@ class VegaRepository:
         )
         return tuple(StoredUsageMessage(*row) for row in rows)
 
+    def usage_message_metadata(
+        self, agent_id: str, message_ids: tuple[str, ...]
+    ) -> tuple[tuple[str, int, int], ...]:
+        rows = self.session.execute(
+            select(
+                AgentMessage.message_id,
+                AgentMessage.seq,
+                func.length(cast(AgentMessage.payload, String)),
+            )
+            .where(AgentMessage.agent_id == agent_id, AgentMessage.message_id.in_(message_ids))
+            .order_by(AgentMessage.seq)
+            .limit(MAX_ARCHIVE_MESSAGES)
+        )
+        return tuple((row[0], row[1], row[2]) for row in rows)
+
     def sequence_exists(self, agent_id: str, seq: int) -> bool:
         return (
             self.session.scalar(
