@@ -1,4 +1,7 @@
+import gc
 import os
+import shutil
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -13,6 +16,45 @@ from aris.core.config import Settings
 
 AGENT_TOKEN = "test-agent-credential-12345"
 READ_TOKEN = "test-read-credential-12345"
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--database-only",
+        action="store_true",
+        help="Run tests whose fixture closure uses the selected application database.",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--database-only"):
+        selected, omitted = [], []
+        for item in items:
+            (selected if "database_url" in item.fixturenames else omitted).append(item)
+        items[:] = selected
+        config.hook.pytest_deselected(items=omitted)
+
+
+def pytest_runtest_call(item):
+    if (
+        str(item.funcargs.get("database_url", "")).startswith("postgresql")
+        and gc.get_count()[2] >= gc.get_threshold()[2]
+    ):
+        # Heavy migration fixtures can leave an old-generation collection due.
+        # Perform it before exercising the application's short transactions.
+        gc.collect()
+
+
+@pytest.fixture(scope="session")
+def sqlite_schema_template(tmp_path_factory):
+    # Run the real migration chain once, then copy only this closed, empty
+    # test database. Direct database_url users still receive an unmigrated DB.
+    path = tmp_path_factory.mktemp("sqlite-schema-template") / "head.db"
+    with pytest.MonkeyPatch.context() as environment:
+        environment.setenv("ARIS_DATABASE_URL", f"sqlite+pysqlite:///{path}")
+        environment.setenv("ARIS_ENVIRONMENT", "test")
+        command.upgrade(Config("alembic.ini"), "head")
+    return path
 
 
 @pytest.fixture
@@ -36,10 +78,19 @@ def database_url(tmp_path):
 
 
 @pytest.fixture
-def settings(database_url, monkeypatch):
+def settings(database_url, monkeypatch, request, tmp_path):
     monkeypatch.setenv("ARIS_DATABASE_URL", database_url)
     monkeypatch.setenv("ARIS_ENVIRONMENT", "test")
-    command.upgrade(Config("alembic.ini"), "head")
+    url = make_url(database_url)
+    target = Path(url.database) if url.get_backend_name() == "sqlite" and url.database else None
+    if (
+        target is not None
+        and target.resolve().is_relative_to(tmp_path.resolve())
+        and not target.exists()
+    ):
+        shutil.copyfile(request.getfixturevalue("sqlite_schema_template"), target)
+    else:
+        command.upgrade(Config("alembic.ini"), "head")
     return Settings(
         _env_file=None,
         environment="test",

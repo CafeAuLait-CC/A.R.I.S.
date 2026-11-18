@@ -356,6 +356,27 @@ def test_postgres_gateway_scope_timeout_never_reports_admission_or_executes_busi
     assert submit(client).status_code == 202
 
 
+def test_postgres_gateway_scope_disconnect_preserves_unavailable_and_allows_retry(user_api):
+    client, _, sessions, _, action, _, _ = user_api
+    if sessions.kw["bind"].dialect.name != "postgresql":
+        pytest.skip("PostgreSQL metadata connection termination recovery")
+    original = action.authorization_scope
+
+    def disconnected(session, parameters):
+        # Reproduce the invalidated metadata transaction deterministically,
+        # without requiring a shared runner to hit a wall-clock timeout.
+        session.connection().invalidate()
+        return AccessScope(type="global", id="*")
+
+    action.authorization_scope = disconnected
+    response = submit(client)
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "GATEWAY_UNAVAILABLE"
+    assert command_count(sessions) == 0 and action.calls == 0
+    action.authorization_scope = original
+    assert submit(client).status_code == 202
+
+
 @pytest.mark.parametrize("kind", ["read", "node", "production"])
 def test_application_refuses_reused_interface_keys_and_development_auth_in_production(
     user_api, settings, monkeypatch, kind

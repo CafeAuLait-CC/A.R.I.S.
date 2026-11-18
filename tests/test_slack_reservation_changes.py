@@ -8,11 +8,13 @@ from sqlalchemy import delete, select
 from aris.apps.composition.m2 import build_m2_components
 from aris.core.access.models import Permission, RoleBinding, RolePermission
 from aris.core.commands.models import CommandRecord
+from aris.core.contracts import DomainError
 from aris.interfaces.slack.user_commands import CONFIRM_ACTION, STATUS_ACTION
 from aris.modules.nova.models import Reservation, ReservationEvent
 from aris.modules.vega.models import GpuDevice
 from tests.test_m2_composition import config
 from tests.test_reservation_service import booking as booking
+from tests.test_reservation_service import create
 from tests.test_slack import slack_settings as slack_settings
 from tests.test_slack import slash
 from tests.test_slack_reservation_drafts import NAMESPACE, actions, click, count, reserve
@@ -36,7 +38,11 @@ def changes(drafts):
     return drafts
 
 
-def booked(state):
+def booked(state, *, through_slack=False):
+    if not through_slack:
+        # Change/privacy/form tests need a real reservation, not another
+        # repetition of the Slack reserve/confirm/worker workflow.
+        return create(state[3], purpose="Private draft purpose").result["reservation"]["id"]
     assert reserve(state).status_code == 200
     assert click(state, actions(state[2].updates[-1][1])[CONFIRM_ACTION]).status_code == 200
     assert state[1].run_once("all")["commands"]["state"] == "succeeded"
@@ -55,7 +61,7 @@ def change(state, operation, reservation_id, *, end=None, reason="Private change
 def test_changes_review_confirm_worker_and_replayed_body_preserve_original_intent(
     changes, operation
 ):
-    reservation_id = booked(changes)
+    reservation_id = booked(changes, through_slack=True)
     state = changes[3]
     end = state[4]["now"] + timedelta(hours=3) if operation == "extend" else None
     if operation == "release":
@@ -134,11 +140,24 @@ def test_missing_hardware_label_does_not_prevent_capacity_reduction(changes, ope
 
 
 @pytest.mark.parametrize("operation", ["cancel", "release", "extend"])
-def test_other_owner_cannot_read_or_prepare_private_change(changes, operation):
+def test_other_owner_cannot_read_or_prepare_private_change(changes, operation, monkeypatch):
     reservation_id = booked(changes)
+    queries = changes[1].slack_drafts.presenter.queries
+    original = queries.detail
+    denied = []
+
+    def checked(actor, target):
+        try:
+            return original(actor, target)
+        except DomainError as error:
+            denied.append(error.code)
+            raise
+
+    monkeypatch.setattr(queries, "detail", checked)
     end = changes[3][4]["now"] + timedelta(hours=3) if operation == "extend" else None
     change(changes, operation, reservation_id, end=end, user_id="U222")
     view = changes[2].updates[-1][1]
+    assert denied == ["NOT_FOUND"]
     assert "Private draft purpose" not in json.dumps(view) and CONFIRM_ACTION not in actions(view)
     assert count(changes[3][2], CommandRecord) == 1
 

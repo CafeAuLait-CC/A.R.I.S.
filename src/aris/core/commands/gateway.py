@@ -3,7 +3,7 @@ import json
 from collections.abc import Sequence
 from uuid import UUID, uuid4
 
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, PendingRollbackError
 from sqlalchemy.orm import Session
 
 from aris.core.access.schemas import AccessScope
@@ -94,7 +94,7 @@ class UserCommandGateway:
                         changes={"code": normalized_failure(error)[0]},
                     )
                 )
-        except DBAPIError:
+        except (DBAPIError, PendingRollbackError):
             # No admission started here. Preserve the original key when retrying
             # because a previous request could nevertheless have been accepted.
             raise DomainError(
@@ -139,7 +139,7 @@ class UserCommandGateway:
         except DomainError as error:
             self._denied(context, error)
             raise
-        except DBAPIError:
+        except (DBAPIError, PendingRollbackError):
             raise DomainError(
                 "GATEWAY_UNAVAILABLE", "User command context unavailable", 503
             ) from None
@@ -180,7 +180,7 @@ class UserCommandGateway:
                 if record.command_type not in self.allowed:
                     raise DomainError("PERMISSION_DENIED", "Command is not available", 403)
                 command_id = UUID(record.id)
-        except DBAPIError:
+        except (DBAPIError, PendingRollbackError):
             raise DomainError(
                 "GATEWAY_UNAVAILABLE", "User command context unavailable", 503
             ) from None
