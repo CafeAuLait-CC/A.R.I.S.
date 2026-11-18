@@ -1,7 +1,5 @@
 """Read-only original messages for an internal consumer; never skip a sequence gap."""
 
-import hashlib
-import json
 from collections.abc import Callable
 from datetime import UTC, datetime
 from time import monotonic
@@ -15,7 +13,6 @@ from aris.core.contracts import DomainError
 from aris.core.time import utc
 from aris.modules.vega.repo import StoredUsageMessage, VegaRepository
 from aris.modules.vega.resource_schemas import ResourceTelemetryBatch
-from aris.modules.vega.schemas import Heartbeat
 from aris.modules.vega.usage_archive_schemas import (
     MAX_ARCHIVE_SOURCE_CHARACTERS,
     ArchivedUsageItem,
@@ -24,27 +21,12 @@ from aris.modules.vega.usage_archive_schemas import (
     UsageArchiveQuery,
     archive_page_fingerprint,
 )
-from aris.modules.vega.usage_service import _usage_fact
+from aris.modules.vega.usage_service import _original_report, _usage_fact
 
 
 def _archived_item(row: StoredUsageMessage, query: UsageArchiveQuery) -> ArchivedUsageItem:
-    fingerprint = hashlib.sha256(
-        json.dumps(row.payload, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
-    batch: ResourceTelemetryBatch | Heartbeat
-    if row.message_kind == "telemetry":
-        batch = ResourceTelemetryBatch.model_validate(row.payload)
-    elif row.message_kind == "heartbeat":
-        batch = Heartbeat.model_validate(row.payload)
-    else:
-        raise ValueError("unsupported archived message kind")
-    if (
-        fingerprint != row.fingerprint
-        or (row.agent_id, row.node_id) != (query.agent_id, query.node_id)
-        or (batch.agent_id, batch.node_id, str(batch.message_id), batch.seq, batch.observed_at)
-        != (row.agent_id, row.node_id, row.message_id, row.seq, utc(row.observed_at))
-    ):
-        raise ValueError("archived source differs from its original message")
+    batch = _original_report(row, query.agent_id, query.node_id)
+    fingerprint = row.fingerprint
     return ArchivedUsageItem(
         reference=ArchivedUsageReference(
             agent_id=row.agent_id,

@@ -22,6 +22,12 @@ class UsageObservationQuery(UsageFactContract):
 
 class UsageObservationBatchQuery(UsageFactContract):
     queries: tuple[UsageObservationQuery, ...] = Field(min_length=1, max_length=1024)
+    contiguous_source_cutoff: AwareDatetime | None = None
+
+    @field_validator("contiguous_source_cutoff")
+    @classmethod
+    def utc_cutoff(cls, value: datetime | None) -> datetime | None:
+        return value.astimezone(UTC) if value is not None else None
 
     @model_validator(mode="after")
     def one_source_binding(self) -> "UsageObservationBatchQuery":

@@ -29,8 +29,10 @@ from aris.modules.lyra.models import (
     UsageLedgerOperationRow,
     UsageLedgerState,
 )
+from aris.modules.vega.models import AgentMessage
 from aris.modules.vega.usage_schemas import UsageObservationQuery
 from tests.test_administration import NOW, admin_state
+from tests.test_heartbeat import beat, heartbeat
 from tests.test_historical_usage_facts import owner, ownership
 from tests.test_mapping_history import history_state, remove
 from tests.test_resource_telemetry import put, resource_batch
@@ -89,6 +91,8 @@ def post_window(state, *, start, seq):
             [owner(username="linux-user")],
         )
         assert put(state[4], payload).status_code == 200
+        if index < 2:
+            assert beat(state[4], heartbeat(seq=payload["seq"] + 1)).status_code == 200
         queries.append(
             UsageObservationQuery(
                 agent_id=payload["agent_id"],
@@ -207,6 +211,16 @@ def test_recording_requires_explicit_context_but_historical_receipt_is_replayabl
     assert service.post(POST, ledger[1]).model_copy(update={"duplicate": False}) == first
     with pytest.raises(DomainError):
         service.post(POST, ledger[1].model_copy(update={"id": uuid4()}))
+
+
+def test_saved_derivation_cannot_post_after_its_original_sequence_proof_disappears(ledger):
+    sessions = ledger[2][2][1]
+    with sessions.begin() as session:
+        session.execute(delete(AgentMessage).where(AgentMessage.seq == 4))
+    before = counts(ledger)
+    with pytest.raises(DomainError, match="incomplete or invalid"):
+        ledger[0].post(POST, ledger[1])
+    assert counts(ledger) == before
 
 
 def test_recording_start_and_timing_mismatch_never_clip_or_relabel_evidence(ledger):

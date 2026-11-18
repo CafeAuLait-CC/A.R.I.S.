@@ -74,7 +74,10 @@ class UsageDerivationService:
     ) -> UsageDerivationArtifact:
         facts = []
         originals = self.observations.observations_in_transaction(
-            session, UsageObservationBatchQuery(queries=request.sources)
+            session,
+            UsageObservationBatchQuery(
+                queries=request.sources, contiguous_source_cutoff=request.as_of
+            ),
         )
         if len(originals) != len(request.sources):
             raise DomainError("DEPENDENCY_UNAVAILABLE", "Usage source batch length differs", 503)

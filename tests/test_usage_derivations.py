@@ -31,6 +31,7 @@ from aris.modules.vega.models import Node
 from aris.modules.vega.usage_schemas import UsageObservationQuery
 from aris.modules.vega.usage_service import VegaUsageObservations
 from tests.test_administration import NOW, admin_state
+from tests.test_heartbeat import beat, heartbeat
 from tests.test_historical_usage_facts import owner, ownership
 from tests.test_mapping_history import assign, history_state
 from tests.test_resource_telemetry import put, resource_batch
@@ -52,6 +53,8 @@ def derivations(history_state, client):
             [owner(username="linux-user")],
         )
         assert put(client, payload).status_code == 200
+        if index < 2:
+            assert beat(client, heartbeat(seq=payload["seq"] + 1)).status_code == 200
         queries.append(
             UsageObservationQuery(
                 agent_id=payload["agent_id"],
@@ -151,6 +154,15 @@ def test_unavailable_original_message_does_not_skip_the_point_or_store_partial_s
     before = counts(state[1])
     with pytest.raises(DomainError):
         service.record(CONTEXT, bad)
+    assert counts(state[1]) == before
+
+
+def test_derivation_cannot_cherry_pick_endpoints_and_ignore_known_middle_sample(derivations):
+    service, request, state = derivations
+    before = counts(state[1])
+    incomplete = request.model_copy(update={"sources": (request.sources[0], request.sources[-1])})
+    with pytest.raises(DomainError, match="incomplete or invalid"):
+        service.record(CONTEXT, incomplete)
     assert counts(state[1]) == before
 
 
