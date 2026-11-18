@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta, timezone
 import pytest
 from sqlalchemy import event
 
-from aris.core.db import session_factory
+from aris.core.db import Base, session_factory
 from aris.core.storage import inspect_storage
 from aris.modules.vega.service import VegaService
 from tests.test_heartbeat import beat, heartbeat
@@ -62,39 +62,8 @@ def test_postgres_storage_sizes_are_scoped_to_current_test_schema_and_read_only(
     )
     result = inspect_storage(engine)
     assert result.status == "measured"
-    assert {row.table_name for row in result.relations} == {
-        "alembic_version",
-        "nodes",
-        "gpu_devices",
-        "agent_messages",
-        "domain_events",
-        "event_outbox",
-        "audit_logs",
-        "slack_receipts",
-        "node_resources",
-        "slack_home_jobs",
-        "users",
-        "external_identities",
-        "roles",
-        "permissions",
-        "role_permissions",
-        "role_bindings",
-        "node_user_mappings",
-        "commands",
-        "command_admissions",
-        "command_intake_receipts",
-        "command_jobs",
-        "event_publications",
-        "event_deliveries",
-        "event_consumer_inbox",
-        "notification_outbox",
-        "notification_attempts",
-        "reservations",
-        "reservation_events",
-        "access_directory_state",
-        "policy_versions",
-        "node_user_mapping_history",
-        "usage_derivations",
+    assert {row.table_name for row in result.relations} == set(Base.metadata.tables) | {
+        "alembic_version"
     }
     assert result.relation_bytes == sum(row.total_bytes for row in result.relations)
     assert result.database_bytes >= result.relation_bytes > 0
