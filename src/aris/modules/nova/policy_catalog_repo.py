@@ -7,7 +7,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from aris.modules.nova.models import PolicySourceVersion
-from aris.modules.nova.policy_catalog_schemas import PolicySourceReference
+from aris.modules.nova.policy_catalog_schemas import PolicySourceListQuery, PolicySourceReference
 
 
 @dataclass(frozen=True)
@@ -21,6 +21,15 @@ class PolicySourceRecord:
     command_id: str
     request_id: str
     reason: str
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class PolicySourceSummaryRecord:
+    id: str
+    name: str
+    source_version: int
+    fingerprint: str
     created_at: datetime
 
 
@@ -60,3 +69,21 @@ class PolicyCatalogRepository:
             )
         ).one_or_none()
         return PolicySourceRecord(*row) if row is not None else None
+
+    def page(self, query: PolicySourceListQuery) -> tuple[PolicySourceSummaryRecord, ...]:
+        rows = self.session.execute(
+            select(
+                PolicySourceVersion.id,
+                PolicySourceVersion.name,
+                PolicySourceVersion.source_version,
+                PolicySourceVersion.fingerprint,
+                PolicySourceVersion.created_at,
+            )
+            .where(
+                PolicySourceVersion.name == query.name,
+                PolicySourceVersion.source_version > query.after_version,
+            )
+            .order_by(PolicySourceVersion.source_version)
+            .limit(query.limit + 1)
+        )
+        return tuple(PolicySourceSummaryRecord(*row) for row in rows)

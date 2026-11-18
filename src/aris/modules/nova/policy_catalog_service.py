@@ -17,7 +17,10 @@ from aris.core.events import DomainEvent, OutboxEntry
 from aris.core.time import utc
 from aris.modules.nova.policy_catalog_repo import PolicyCatalogRepository, PolicySourceRecord
 from aris.modules.nova.policy_catalog_schemas import (
+    PolicySourceListQuery,
+    PolicySourcePage,
     PolicySourceReference,
+    PolicySourceSummary,
     PolicySourceView,
     RecordedPolicyDraft,
     RecordPolicyDraft,
@@ -96,6 +99,44 @@ class PolicyCatalogService:
             result = self._view(record)
             self._authorize(session, actor)
             return result
+
+    def sources(self, actor: ActorContext, query: PolicySourceListQuery) -> PolicySourcePage:
+        with self.sessions() as session:
+            return self.sources_in_transaction(session, actor, query)
+
+    def sources_in_transaction(
+        self, session: Session, actor: ActorContext, query: PolicySourceListQuery
+    ) -> PolicySourcePage:
+        query = PolicySourceListQuery.model_validate(query.model_dump(mode="json"))
+        with session.no_autoflush:
+            self._authorize(session, actor)
+            records = PolicyCatalogRepository(session).page(query)
+            try:
+                versions = tuple(
+                    PolicySourceSummary(
+                        id=record.id,
+                        reference=PolicySourceReference(
+                            name=record.name, version=record.source_version
+                        ),
+                        fingerprint=record.fingerprint,
+                        created_at=utc(record.created_at),
+                    )
+                    for record in records[: query.limit]
+                )
+                if any(item.reference.name != query.name for item in versions):
+                    raise ValueError("source directory binding differs")
+            except (ValidationError, ValueError):
+                raise DomainError(
+                    "DEPENDENCY_UNAVAILABLE", "Policy source directory is inconsistent", 503
+                ) from None
+            self._authorize(session, actor)
+            return PolicySourcePage(
+                name=query.name,
+                versions=versions,
+                next_after_version=versions[-1].reference.version
+                if len(records) > query.limit
+                else None,
+            )
 
     def record_in_transaction(
         self,

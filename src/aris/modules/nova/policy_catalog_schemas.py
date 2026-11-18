@@ -43,3 +43,24 @@ class RecordedPolicyDraft(PolicyContract):
     reference: PolicySourceReference
     fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
     created: bool
+
+
+class PolicySourceListQuery(PolicyContract):
+    name: PolicyName
+    after_version: int = Field(default=0, ge=0, le=2147483647, strict=True)
+    limit: int = Field(default=20, ge=1, le=50, strict=True)
+
+
+class PolicySourceSummary(PolicyContract):
+    summary_only: Literal[True] = True
+    catalog_entry_only: Literal[True] = True
+    id: UUID
+    reference: PolicySourceReference
+    fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    created_at: AwareDatetime
+
+
+class PolicySourcePage(PolicyContract):
+    name: PolicyName
+    versions: tuple[PolicySourceSummary, ...] = Field(max_length=50)
+    next_after_version: int | None = Field(default=None, ge=1, le=2147483647, strict=True)
