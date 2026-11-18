@@ -9,6 +9,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from aris.core.audit import AuditEntry
+from aris.core.db import SCHEMA_REVISION
 from aris.core.events import DomainEvent, OutboxEntry
 from aris.modules.vega.models import AgentMessage, Node
 from tests.conftest import AGENT_TOKEN
@@ -148,4 +149,4 @@ def test_upgrade_preserves_existing_telemetry_and_replay(client):
     assert post(client, original).json()["duplicate"] is True
     assert beat(client, heartbeat(seq=2)).status_code == 200
     with client.app.state.engine.connect() as connection:
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0016"
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == SCHEMA_REVISION

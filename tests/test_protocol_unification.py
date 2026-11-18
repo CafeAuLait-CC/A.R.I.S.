@@ -7,6 +7,7 @@ from alembic.config import Config
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from aris.core.db import SCHEMA_REVISION
 from aris.modules.vega.models import AgentMessage, NodeResource
 from tests.conftest import AGENT_TOKEN
 from tests.test_resource_telemetry import put, resource_batch, resources
@@ -71,5 +72,5 @@ def test_projection_cleanup_keeps_original_history_fingerprints_and_current_fact
         assert projection.seq == seq
         expected = {k: v for k, v in prior_projection.items() if k != "schema_version"}
         assert projection.observation == expected
-    assert client.get("/health/ready").json()["schema_revision"] == "0016"
+    assert client.get("/health/ready").json()["schema_revision"] == SCHEMA_REVISION
     assert resources(client)["nodes"][0]["system_freshness"] == "CURRENT"

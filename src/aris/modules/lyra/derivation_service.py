@@ -116,9 +116,22 @@ class UsageDerivationService:
 
     def exact(self, record_id: UUID) -> StoredUsageDerivation:
         with self.sessions() as session, session.no_autoflush:
-            result = UsageDerivationRepository(session).get(record_id)
-            if result is None:
-                raise DomainError("NOT_FOUND", "Usage derivation not found", 404)
+            return self.exact_in_transaction(session, record_id)
+
+    def exact_in_transaction(self, session: Session, record_id: UUID) -> StoredUsageDerivation:
+        result = UsageDerivationRepository(session).get(record_id)
+        if result is None:
+            raise DomainError("NOT_FOUND", "Usage derivation not found", 404)
+        return result
+
+    def verified_in_transaction(self, session: Session, record_id: UUID) -> StoredUsageDerivation:
+        """Validate fixed evidence against its owning source services before consumption."""
+        with session.no_autoflush:
+            result = self.exact_in_transaction(session, record_id)
+            if result.receipt.created_at > self._now():
+                raise DomainError("DEPENDENCY_UNAVAILABLE", "Usage evidence is not reached", 503)
+            if self._compute(session, result.artifact.request) != result.artifact:
+                raise DomainError("CONFLICT", "Usage evidence sources differ", 409)
             return result
 
     def record(

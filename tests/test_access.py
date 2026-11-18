@@ -22,7 +22,7 @@ from aris.core.access.models import (
 from aris.core.access.schemas import AccessRequest, AccessScope, ExternalSubject, NodeUserLookup
 from aris.core.access.service import AccessService
 from aris.core.contracts import DomainError
-from aris.core.db import build_engine, session_factory
+from aris.core.db import SCHEMA_REVISION, build_engine, session_factory
 from tests.test_telemetry import batch, post
 
 
@@ -398,6 +398,6 @@ def test_identity_migration_is_additive_empty_and_preserves_existing_facts_at_he
     assert facts() == frozen
     command.upgrade(config, "head")
     command.check(config)
-    assert client.get("/health/ready").json()["schema_revision"] == "0016"
+    assert client.get("/health/ready").json()["schema_revision"] == SCHEMA_REVISION
     assert facts() == frozen
     assert post(client, original).json()["duplicate"] is True
