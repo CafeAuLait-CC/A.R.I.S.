@@ -4,6 +4,20 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
+from aris.core.access.history_schemas import (
+    HistoricalNodeUserQuery,
+    HistoricalNodeUserResolution,
+    MappingHistoryReference,
+)
+from aris.modules.lyra.derivation_schemas import (
+    DerivationSource,
+    StoredUsageDerivation,
+    UsageDerivationArtifact,
+    UsageDerivationReceipt,
+    UsageDerivationRequest,
+    canonical_derivation,
+    derivation_fingerprint,
+)
 from aris.modules.lyra.ledger_plan import (
     ActiveUsageMeasurement,
     LedgerCoverage,
@@ -12,19 +26,27 @@ from aris.modules.lyra.ledger_plan import (
     MeasuredWindow,
     plan_usage_posting,
 )
-from aris.modules.lyra.residency_sessions import ResidencyFormationRule
+from aris.modules.lyra.reservation_links import (
+    LinkedResidency,
+    ReservationLinkRequest,
+    ResidencyReservationAnalysis,
+)
+from aris.modules.lyra.residency_attribution import (
+    AttributedResidency,
+    ResidencyAttributionAnalysis,
+)
+from aris.modules.lyra.residency_sessions import ResidencyFormationRule, build_residency_sessions
+from aris.modules.lyra.trace_state import UsageContinuityRule
+from aris.modules.vega.usage_schemas import UsageObservationQuery
 from tests.test_administration import NOW, admin_state
 from tests.test_mapping_history import history_state, remove
+from tests.test_residency_attribution import source as observation
 from tests.test_usage_derivations import CONTEXT, counts, derivations
 
 __all__ = ["admin_state", "history_state", "derivations"]
 
 
-@pytest.fixture
-def planned(derivations):
-    service, request, state = derivations
-    service.record(CONTEXT, request)
-    source = service.exact(request.id)
+def comparison_inputs(source, at, stored=None):
     rules = LedgerPlanningRules(
         recording_start_at=NOW,
         expected_timing_fingerprint=source.artifact.analysis.request.attribution.residency.rule_fingerprint,
@@ -34,11 +56,102 @@ def planned(derivations):
         gpu_uuids=("GPU-a",),
         start_at=NOW,
         end_at=NOW + timedelta(hours=1),
-        read_at=state[5]["now"],
+        read_at=at,
         state="complete",
         records=(),
     )
-    return source, rules, coverage, state[5]["now"], derivations
+    return source, rules, coverage, at, stored
+
+
+@pytest.fixture
+def planned():
+    # Pure comparison matrices consume a fully validated synthetic contract.
+    # The stored_plan cases separately exercise real database-issued evidence.
+    facts = tuple(observation(seconds, seq) for seconds, seq in ((10, 3), (25, 5), (40, 7)))
+    cutoff = NOW + timedelta(seconds=200)
+    queries = tuple(
+        UsageObservationQuery(
+            agent_id=fact.agent_id,
+            node_id=fact.node_id,
+            message_id=fact.message_id,
+            expected_seq=fact.seq,
+        )
+        for fact in facts
+    )
+    request = UsageDerivationRequest(
+        id=uuid4(),
+        sources=queries,
+        as_of=cutoff,
+        identity_revision=1,
+        continuity=UsageContinuityRule(max_gap_seconds=45),
+        formation=ResidencyFormationRule(minimum_intervals=2, minimum_duration_seconds=30),
+    )
+    residency = build_residency_sessions(
+        facts, continuity=request.continuity, formation=request.formation
+    )
+    identity = HistoricalNodeUserResolution(
+        query=HistoricalNodeUserQuery(
+            node_id="node-a",
+            os_username="linux-user",
+            start_at=NOW + timedelta(seconds=10),
+            end_at=NOW + timedelta(seconds=40),
+            as_of=cutoff,
+            through_revision=1,
+        ),
+        status="resolved",
+        reason="VERIFIED_USER_COVERS_INTERVAL",
+        user_id=uuid4(),
+        directory_revision=1,
+        evidence=(
+            MappingHistoryReference(id=uuid4(), revision=1, effective_at=NOW, fingerprint="a" * 64),
+        ),
+    )
+    attribution = ResidencyAttributionAnalysis(
+        as_of=cutoff,
+        directory_revision=1,
+        residency=residency,
+        attributions=(
+            AttributedResidency(session_index=0, identity=identity, state="attributed_candidate"),
+        ),
+    )
+    artifact = UsageDerivationArtifact(
+        request=request,
+        sources=tuple(
+            DerivationSource(
+                query=query,
+                fingerprint=fact.source_fingerprint,
+                observed_at=fact.observed_at,
+                received_at=fact.received_at,
+                compute_observed_at=fact.compute_observed_at,
+            )
+            for query, fact in zip(queries, facts, strict=True)
+        ),
+        analysis=ResidencyReservationAnalysis(
+            request=ReservationLinkRequest(attribution=attribution),
+            links=(LinkedResidency(session_index=0, state="not_provided", reason="NO_REFERENCE"),),
+        ),
+    )
+    at = cutoff + timedelta(seconds=1)
+    source = StoredUsageDerivation(
+        artifact=artifact,
+        receipt=UsageDerivationReceipt(
+            id=request.id,
+            event_id=uuid4(),
+            duplicate=True,
+            created_at=at,
+            source_count=len(facts),
+            request_fingerprint=derivation_fingerprint(canonical_derivation(request), result=False),
+            result_fingerprint=derivation_fingerprint(canonical_derivation(artifact), result=True),
+        ),
+    )
+    return comparison_inputs(source, at)
+
+
+@pytest.fixture
+def stored_plan(derivations):
+    service, request, state = derivations
+    service.record(CONTEXT, request)
+    return comparison_inputs(service.exact(request.id), state[5]["now"], derivations)
 
 
 def plan(state, *, source=None, rules=None, coverage="default", at=None):
@@ -67,19 +180,19 @@ def cover(context, *records, **changes):
     return context[2].model_copy(update={"records": tuple(records), **changes})
 
 
-def test_known_empty_coverage_only_proposes_unweighted_original_measurement(planned):
-    before = counts(planned[4][2][1])
-    result = plan(planned)
+def test_known_empty_coverage_only_proposes_unweighted_original_measurement(stored_plan):
+    before = counts(stored_plan[4][2][1])
+    result = plan(stored_plan)
     row = result.outcomes[0]
     assert row.state == "new_candidate" and row.candidate.observed_microseconds == 30000000
     assert not row.candidate.weighted and row.candidate.end_basis == "last_source_observation"
     assert row.candidate.start_at == NOW + timedelta(seconds=10)
     assert row.candidate.end_at == NOW + timedelta(seconds=40)
-    assert row.candidate.source_result_fingerprint == planned[0].receipt.result_fingerprint
+    assert row.candidate.source_result_fingerprint == stored_plan[0].receipt.result_fingerprint
     assert (
         result.comparison_only and not result.posting_permitted and not result.quota_usage_available
     )
-    assert counts(planned[4][2][1]) == before
+    assert counts(stored_plan[4][2][1]) == before
 
 
 def test_missing_or_partial_coverage_is_unknown_instead_of_empty(planned):
@@ -256,31 +369,35 @@ def test_timezone_representation_preserves_original_measurement_identity(planned
     assert plan(planned, coverage=cover(planned, record)).outcomes[0].state == "already_recorded"
 
 
-def test_a_new_derivation_id_cannot_count_the_same_measurement_again(planned):
-    service, request, state = planned[4]
+def test_a_new_derivation_id_cannot_count_the_same_measurement_again(stored_plan):
+    service, request, state = stored_plan[4]
     other = request.model_copy(update={"id": uuid4()})
     service.record(CONTEXT, other)
     source = service.exact(other.id)
-    row = plan(planned, source=source, coverage=cover(planned, existing(planned))).outcomes[0]
+    row = plan(
+        stored_plan, source=source, coverage=cover(stored_plan, existing(stored_plan))
+    ).outcomes[0]
     assert row.state == "already_recorded" and row.candidate.source_derivation_id == other.id
-    assert row.candidate.source_result_fingerprint != planned[0].receipt.result_fingerprint
+    assert row.candidate.source_result_fingerprint != stored_plan[0].receipt.result_fingerprint
 
 
-def test_ledger_history_is_not_used_to_fill_a_missing_platform_identity(planned):
-    service, request, state = planned[4]
+def test_ledger_history_is_not_used_to_fill_a_missing_platform_identity(stored_plan):
+    service, request, state = stored_plan[4]
     current_time = state[5]["now"]
     changed = remove(state, 8)
     state[5]["now"] = current_time
     other = request.model_copy(update={"id": uuid4(), "identity_revision": changed.revision})
     service.record(CONTEXT, other)
     source = service.exact(other.id)
-    row = plan(planned, source=source, coverage=cover(planned, existing(planned))).outcomes[0]
+    row = plan(
+        stored_plan, source=source, coverage=cover(stored_plan, existing(stored_plan))
+    ).outcomes[0]
     assert row.state == "needs_review" and row.reason == "IDENTITY_UNRESOLVED"
     assert row.candidate is None
 
 
-def test_short_process_evidence_remains_reviewable_even_with_known_identity(planned):
-    service, request, state = planned[4]
+def test_short_process_evidence_remains_reviewable_even_with_known_identity(stored_plan):
+    service, request, state = stored_plan[4]
     other = request.model_copy(
         update={
             "id": uuid4(),
@@ -289,17 +406,17 @@ def test_short_process_evidence_remains_reviewable_even_with_known_identity(plan
     )
     service.record(CONTEXT, other)
     source = service.exact(other.id)
-    row = plan(planned, source=source).outcomes[0]
+    row = plan(stored_plan, source=source).outcomes[0]
     assert row.state == "needs_review" and row.reason == "INSUFFICIENT_PROCESS_EVIDENCE"
     assert row.candidate is None
 
 
-def test_empty_source_candidate_list_does_not_become_a_zero_usage_or_quota_claim(planned):
-    service, request, state = planned[4]
+def test_empty_source_candidate_list_does_not_become_a_zero_usage_or_quota_claim(stored_plan):
+    service, request, state = stored_plan[4]
     other = request.model_copy(update={"id": uuid4(), "sources": request.sources[:1]})
     service.record(CONTEXT, other)
     source = service.exact(other.id)
-    result = plan(planned, source=source, coverage=None)
+    result = plan(stored_plan, source=source, coverage=None)
     assert (
         result.outcomes == () and not result.posting_permitted and not result.quota_usage_available
     )
