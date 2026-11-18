@@ -8,6 +8,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     String,
+    Text,
     UniqueConstraint,
     text,
 )
@@ -64,3 +65,26 @@ class ReservationEvent(Base):
     actor: Mapped[str] = mapped_column(String(128))
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class PolicySourceVersion(Base):
+    __tablename__ = "policy_versions"
+    __table_args__ = (
+        UniqueConstraint("name", "source_version", name="uq_policy_source_version"),
+        CheckConstraint("source_version > 0", name="ck_policy_source_version"),
+        CheckConstraint("length(fingerprint) = 64", name="ck_policy_source_fingerprint"),
+        CheckConstraint(
+            "length(canonical_json) > 0 AND length(canonical_json) <= 65536",
+            name="ck_policy_source_size",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(64))
+    source_version: Mapped[int] = mapped_column(Integer)
+    canonical_json: Mapped[str] = mapped_column(Text)
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    command_id: Mapped[str] = mapped_column(ForeignKey("commands.id"))
+    request_id: Mapped[str] = mapped_column(String(128))
+    reason: Mapped[str] = mapped_column(String(256))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

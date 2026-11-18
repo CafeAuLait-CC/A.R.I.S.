@@ -406,15 +406,41 @@ def test_event_consumer_inbox_and_notification_enqueue_commit_together(notificat
 
 
 def test_notification_migration_round_trip_and_nonempty_history_guard(notification_state):
-    _, _, _, _, _, _, _, relay_state = notification_state
+    _, _, sessions, _, _, _, _, relay_state = notification_state
     seed(relay_state)
     config = Config("alembic.ini")
     command.downgrade(config, "0012")
     command.upgrade(config, "head")
     command.check(config)
-    enqueue(notification_state)
+    handle = enqueue(notification_state)
+    with sessions() as session:
+        original = session.execute(
+            select(
+                NotificationOutbox.id,
+                NotificationOutbox.fingerprint,
+                NotificationOutbox.state,
+                NotificationOutbox.created_at,
+            ).where(NotificationOutbox.id == str(handle.notification_id))
+        ).one()
     with pytest.raises(RuntimeError, match="notification delivery history prevents downgrade"):
         command.downgrade(config, "0012")
+    # SQLite can commit an empty later migration's DDL before the older
+    # notification guard fails. Restore those empty later structures; the
+    # protected notification row itself must remain exactly unchanged.
+    with sessions() as session:
+        assert (
+            session.execute(
+                select(
+                    NotificationOutbox.id,
+                    NotificationOutbox.fingerprint,
+                    NotificationOutbox.state,
+                    NotificationOutbox.created_at,
+                ).where(NotificationOutbox.id == str(handle.notification_id))
+            ).one()
+            == original
+        )
+    assert counts(sessions) == (1, 0)
+    command.upgrade(config, "head")
     command.check(config)
 
 
