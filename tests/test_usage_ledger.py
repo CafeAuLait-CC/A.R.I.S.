@@ -492,6 +492,69 @@ def test_postgresql_waiting_writer_rechecks_changed_recording_configuration(ledg
     assert error.value.code == "USAGE_NOT_CONFIGURED" and counts(ledger)[:4] == (0, 0, 0, 0)
 
 
+def test_postgresql_node_lock_timeout_preserves_the_operation_key_for_retry(ledger):
+    sessions = postgres(ledger)
+    with sessions.begin() as holder:
+        UsageLedgerRepository(holder).lock("node", "node-a")
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pending = pool.submit(ledger[0].post, POST, ledger[1])
+            try:
+                with pytest.raises(DomainError) as error:
+                    pending.result(timeout=4)
+            finally:
+                holder.rollback()
+    assert error.value.code == "DEPENDENCY_UNAVAILABLE" and counts(ledger)[:4] == (0, 0, 0, 0)
+    assert ledger[0].post(POST, ledger[1]).effect == "recorded"
+
+
+@pytest.mark.parametrize("invalid", ["target_kind", "previous_fingerprint"])
+def test_nullable_sql_fields_cannot_bypass_reversal_or_chain_constraints(ledger, invalid):
+    first = ledger[0].post(POST, ledger[1])
+    sessions = ledger[2][2][1]
+    with sessions() as session:
+        raw = dict(session.execute(select(*UsageLedgerEntryRow.__table__.c)).mappings().one())
+    raw.update(
+        id=str(uuid4()),
+        event_id=str(uuid4()),
+        revision=2,
+        previous_fingerprint=first.head.fingerprint,
+        measurement_key="f" * 64,
+    )
+    if invalid == "target_kind":
+        raw.update(
+            kind="reversal", target_id=str(first.entries[0]), target_kind=None, measurement_key=None
+        )
+        expected = "ck_usage_ledger_kind"
+    else:
+        raw["previous_fingerprint"] = None
+        expected = "ck_usage_ledger_previous"
+    before = counts(ledger)
+    with pytest.raises(DBAPIError) as failure, sessions.begin() as session:
+        session.add(
+            DomainEvent(
+                event_id=raw["event_id"],
+                event_type="fixture.invalid-ledger",
+                event_version=1,
+                aggregate_type="usage_ledger",
+                aggregate_id="node-a",
+                aggregate_version=2,
+                occurred_at=raw["recorded_at"],
+                recorded_at=raw["recorded_at"],
+                actor=POST.actor,
+                correlation_id=POST.request_id,
+                causation_id=raw["id"],
+                payload={},
+            )
+        )
+        session.flush()
+        session.execute(UsageLedgerEntryRow.__table__.insert().values(**raw))
+    if sessions.kw["bind"].dialect.name == "postgresql":
+        assert failure.value.orig.diag.constraint_name == expected
+    else:
+        assert expected in str(failure.value.orig)
+    assert counts(ledger) == before
+
+
 def test_postgresql_receipt_reads_are_read_only_and_history_cannot_be_truncated(ledger):
     sessions = postgres(ledger)
     first = ledger[0].post(POST, ledger[1])
