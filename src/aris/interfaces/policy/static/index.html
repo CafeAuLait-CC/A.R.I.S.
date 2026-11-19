@@ -1,0 +1,29 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>策略草稿 · ARIS</title><link rel="stylesheet" href="/internal/policy/ui/assets/policy.css"><script src="/internal/policy/ui/assets/policy.js" defer></script></head>
+<body><main>
+  <header><div><p class="eyebrow">ARIS / POLICY</p><h1>策略草稿</h1><p class="subtitle">查看已保存的规则，比较版本之间的变化。</p></div><span id="identity" class="muted">本地只读查询</span></header>
+  <section id="connect-panel" class="panel connect"><div><h2>连接策略目录</h2><p>需要策略草稿读取权限。访问凭据仅保留在当前页面内存中。</p></div><form id="connect-form"><label for="credential" class="sr-only">开发访问凭据</label><input id="credential" type="password" autocomplete="off" placeholder="开发访问凭据" required><button>连接</button></form></section>
+  <p id="message" role="status" aria-live="polite" hidden></p>
+  <section id="workspace" hidden>
+    <div class="panel toolbar"><label>策略名称<select id="policy-name"></select></label><button id="refresh" class="secondary">刷新目录</button><span class="badge">只读</span><button id="disconnect" class="text-button">断开连接</button></div>
+    <p class="context-note">这里展示已保存的草稿来源，不表示当前生效策略。查看和比较不会改变预约规则。</p>
+    <div class="layout">
+      <aside class="panel versions"><div class="section-head"><h2>版本目录</h2><span id="version-count" class="muted"></span></div><div id="versions"></div><p id="no-versions" class="empty" hidden>这个策略还没有保存的版本。</p><button id="more" class="secondary" hidden>加载更多版本</button></aside>
+      <div>
+        <section id="detail" class="panel detail" hidden>
+          <div class="section-head"><div><p id="detail-name" class="eyebrow"></p><h2 id="detail-title"></h2></div><span class="badge">已保存来源</span></div>
+          <p id="source-date" class="muted"></p><p id="source-reason" class="reason"></p>
+          <div class="section-head rule-head"><h3>使用额度</h3><span id="quota-window" class="muted"></span></div><div id="quota-limits" class="quota-limits"></div><p class="muted">以实际 GPU 使用时长为依据，不预扣预约时长。</p>
+          <h3 class="rule-head">预约限制</h3><dl id="reservation" class="rules-grid"></dl>
+          <div class="extra-grid"><section><h3>GPU 计时权重</h3><div id="weights"></div></section><section><h3>空闲处理规则</h3><p id="idle"></p></section></div>
+          <section id="roles-section" hidden><h3 class="rule-head">角色覆盖</h3><div id="roles"></div></section>
+          <details class="source"><summary>查看原始规则与来源指纹</summary><p id="fingerprint"></p><pre id="source-json"></pre></details>
+        </section>
+        <section id="comparison" class="panel comparison" hidden>
+          <h2>比较版本</h2><p class="muted">比较保存内容的语义变化，结果不构成批准或发布。</p>
+          <div class="compare-controls"><label>之前<select id="before"></select></label><span aria-hidden="true">→</span><label>之后<select id="after"></select></label><button id="compare">比较</button></div>
+          <p id="comparison-note" class="muted"></p><div id="changes" class="table-scroll"></div>
+        </section>
+      </div>
+    </div>
+  </section>
+</main></body></html>

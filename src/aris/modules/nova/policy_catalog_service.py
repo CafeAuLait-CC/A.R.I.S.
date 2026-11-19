@@ -235,8 +235,14 @@ class PolicyCatalogService:
     def compare_sources(
         self, actor: ActorContext, query: PolicySourceComparisonQuery
     ) -> StoredPolicyComparison:
+        with self.sessions() as session:
+            return self.compare_sources_in_transaction(session, actor, query)
+
+    def compare_sources_in_transaction(
+        self, session: Session, actor: ActorContext, query: PolicySourceComparisonQuery
+    ) -> StoredPolicyComparison:
         query = PolicySourceComparisonQuery.model_validate(query.model_dump(mode="json"))
-        with self.sessions() as session, session.no_autoflush:
+        with session.no_autoflush:
             before = self.exact_in_transaction(session, actor, query.before)
             after = self.exact_in_transaction(session, actor, query.after)
             if (before.fingerprint, after.fingerprint) != (

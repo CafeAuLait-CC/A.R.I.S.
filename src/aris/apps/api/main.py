@@ -29,6 +29,8 @@ from aris.interfaces.identity.api import build_router as build_identity_router
 from aris.interfaces.identity.service import IdentityAdminSurface
 from aris.interfaces.notifications.api import build_router as build_notification_router
 from aris.interfaces.notifications.service import NotificationAdminSurface
+from aris.interfaces.policy.api import build_router as build_policy_router
+from aris.interfaces.policy.service import PolicyReadSurface
 from aris.interfaces.reservations.api import build_router as build_reservation_router
 from aris.interfaces.reservations.service import UserReservationSurface
 from aris.interfaces.slack.api import build_router as build_slack_router
@@ -74,6 +76,7 @@ def create_app(
     identity_admin: IdentityAdminSurface | None = None,
     notification_admin: NotificationAdminSurface | None = None,
     usage_history: UsageHistorySurface | None = None,
+    policy_sources: PolicyReadSurface | None = None,
     m2_config: M2RuntimeConfig | None = None,
 ) -> FastAPI:
     config = settings or Settings()
@@ -82,6 +85,17 @@ def create_app(
         if config.environment not in {"development", "test"}:
             raise ValueError("bound usage credentials are development-only")
         usage_history.authenticator.ensure_distinct_credentials(
+            [
+                config.read_token,
+                slack_config.bot_token,
+                slack_config.signing_secret,
+                *(credential.token for credential in config.agent_credentials.values()),
+            ]
+        )
+    if policy_sources is not None:
+        if config.environment not in {"development", "test"}:
+            raise ValueError("bound policy credentials are development-only")
+        policy_sources.authenticator.ensure_distinct_credentials(
             [
                 config.read_token,
                 slack_config.bot_token,
@@ -192,6 +206,8 @@ def create_app(
         app.include_router(build_notification_router(notification_admin))
     if usage_history is not None:
         app.include_router(build_usage_router(usage_history))
+    if policy_sources is not None:
+        app.include_router(build_policy_router(policy_sources))
 
     @app.middleware("http")
     async def request_context(
