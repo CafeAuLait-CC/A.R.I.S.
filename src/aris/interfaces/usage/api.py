@@ -213,6 +213,7 @@ def build_router(service: UsageHistorySurface) -> APIRouter:
             "usage-group.js",
             "usage.css",
             "usage-activity.js",
+            "usage-hardware.js",
         ],
     ) -> Response:
         return Response(

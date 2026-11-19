@@ -26,6 +26,7 @@ from aris.modules.lyra.usage_history_service import UsageHistoryService
 from aris.modules.lyra.weekly_report_service import WeeklyReportReader
 from aris.modules.lyra.window_reader import UsageWindowReader
 from aris.modules.nova.weekly_plan_reader import WeeklyPlanReader
+from aris.modules.vega.gpu_hardware_service import VegaGpuHardwareObservations
 from aris.modules.vega.usage_archive_service import VegaUsageArchive
 
 
@@ -115,7 +116,13 @@ def main(argv: list[str] | None = None) -> int:
             if config.weekly_reports
             else None,
             activity=ActivityPreviewAccess(
-                ActivityPreviewService(sessions, VegaUsageArchive(sessions)),
+                ActivityPreviewService(
+                    sessions,
+                    VegaUsageArchive(sessions),
+                    hardware_source=VegaGpuHardwareObservations(sessions)
+                    if config.activity_preview.hardware_metrics
+                    else None,
+                ),
                 config.activity_preview,
             )
             if config.activity_preview is not None

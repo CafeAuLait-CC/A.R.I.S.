@@ -18,6 +18,9 @@ from aris.modules.lyra.activity_preview import (
     ActivityPreviewRule,
     group_compute_observations,
 )
+from aris.modules.lyra.hardware_preview import ActivityHardwarePreview, summarize_gpu_samples
+from aris.modules.vega.gpu_hardware_schemas import GpuHardwareBatch, GpuHardwareBatchQuery
+from aris.modules.vega.gpu_hardware_service import VegaGpuHardwareObservations
 from aris.modules.vega.usage_archive_schemas import (
     MAX_ARCHIVE_SOURCE_CHARACTERS,
     UsageArchiveHeadQuery,
@@ -29,21 +32,22 @@ from aris.modules.vega.usage_archive_service import VegaUsageArchive
 
 class ActivityPreviewService:
     def __init__(
-        self, sessions: sessionmaker[Session], source: VegaUsageArchive, *, timeout_ms: int = 4000
+        self,
+        sessions: sessionmaker[Session],
+        source: VegaUsageArchive,
+        *,
+        timeout_ms: int = 4000,
+        hardware_source: VegaGpuHardwareObservations | None = None,
     ) -> None:
         if source.sessions is not sessions:
             raise ValueError("activity diagnostics require one source database session factory")
         if type(timeout_ms) is not int or not 1000 <= timeout_ms <= 10000:
             raise ValueError("activity diagnostics require a bounded explicit read timeout")
         self.sessions, self.source, self.timeout_ms = sessions, source, timeout_ms
+        if hardware_source is not None and hardware_source.sessions is not sessions:
+            raise ValueError("hardware preview requires the same source database")
+        self.hardware_source = hardware_source
         self.access = AccessService(sessions)
-
-    def _current(self, request: AccessRequest) -> None:
-        with self.sessions() as session, session.no_autoflush:
-            if session.get_bind().dialect.name == "postgresql":
-                session.execute(text("SET TRANSACTION READ ONLY"))
-            transaction_budget(session, 100, 750, min(1500, self.timeout_ms))
-            self.access.require_in_transaction(session, request)
 
     def recent(
         self,
@@ -53,6 +57,40 @@ class ActivityPreviewService:
         *,
         max_messages: int,
     ) -> ActivityPreview:
+        value = self._recent(actor, source, rule, max_messages=max_messages, hardware=False)
+        assert isinstance(value, ActivityPreview)
+        return value
+
+    def recent_with_hardware(
+        self,
+        actor: ActorContext,
+        source: UsageArchiveHeadQuery,
+        rule: ActivityPreviewRule,
+        *,
+        max_messages: int,
+    ) -> ActivityHardwarePreview:
+        value = self._recent(actor, source, rule, max_messages=max_messages, hardware=True)
+        assert isinstance(value, ActivityHardwarePreview)
+        return value
+
+    def _current(self, request: AccessRequest) -> None:
+        with self.sessions() as session, session.no_autoflush:
+            if session.get_bind().dialect.name == "postgresql":
+                session.execute(text("SET TRANSACTION READ ONLY"))
+            transaction_budget(session, 100, 750, min(1500, self.timeout_ms))
+            self.access.require_in_transaction(session, request)
+
+    def _recent(
+        self,
+        actor: ActorContext,
+        source: UsageArchiveHeadQuery,
+        rule: ActivityPreviewRule,
+        *,
+        max_messages: int,
+        hardware: bool,
+    ) -> ActivityPreview | ActivityHardwarePreview:
+        if hardware and self.hardware_source is None:
+            raise DomainError("USAGE_NOT_CONFIGURED", "GPU hardware preview is not configured", 503)
         actor = ActorContext.model_validate(actor.model_dump(mode="json"))
         source = UsageArchiveHeadQuery.model_validate(source.model_dump(mode="json"))
         rule = ActivityPreviewRule.model_validate(rule.model_dump(mode="json"))
@@ -76,6 +114,7 @@ class ActivityPreviewService:
                 ceiling = self.source.head_in_transaction(session, source)
                 cursor = max(0, ceiling.highest_committed_seq - max_messages)
                 pages: list[UsageArchivePage] = []
+                hardware_batches: list[GpuHardwareBatch] = []
                 characters = 0
                 while cursor < ceiling.highest_committed_seq:
                     if len(pages) >= 8 or characters >= MAX_PREVIEW_CHARACTERS:
@@ -100,12 +139,32 @@ class ActivityPreviewService:
                     )
                     page = self.source.page_in_transaction(session, query)
                     pages.append(page)
+                    references = tuple(
+                        item.reference for item in page.items if item.observation is not None
+                    )
+                    if hardware and references:
+                        assert self.hardware_source is not None
+                        hardware_batches.append(
+                            self.hardware_source.batch_in_transaction(
+                                session, GpuHardwareBatchQuery(references=references)
+                            )
+                        )
                     characters += page.source_characters
                     cursor = page.next_after_seq
                     if page.state == "gap":
                         break
-                result = group_compute_observations(
+                preview = group_compute_observations(
                     ceiling, tuple(pages), rule, max_messages=max_messages
+                )
+                result: ActivityPreview | ActivityHardwarePreview = (
+                    ActivityHardwarePreview(
+                        preview=preview,
+                        hardware=summarize_gpu_samples(
+                            preview, tuple(pages), tuple(hardware_batches)
+                        ),
+                    )
+                    if hardware
+                    else preview
                 )
             # Source repeatability is independent of current authorization.
             # This fresh transaction observes revocation after the source snapshot.

@@ -13,6 +13,7 @@ from aris.core.commands.schemas import ActorContext
 from aris.core.contracts import DomainError
 from aris.modules.lyra.activity_preview import ActivityPreview, ActivityPreviewRule, ActivityState
 from aris.modules.lyra.activity_preview_service import ActivityPreviewService
+from aris.modules.lyra.hardware_preview import GpuHardwareSummary, SampleStatistic
 from aris.modules.vega.usage_archive_schemas import ArchivedUsageReference, UsageArchiveHeadQuery
 
 if TYPE_CHECKING:
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
 class ActivityPreviewConfig(AccessContract):
     sources: tuple[UsageArchiveHeadQuery, ...] = Field(min_length=1, max_length=32)
     rule: ActivityPreviewRule
+    hardware_metrics: bool = False
 
     @model_validator(mode="after")
     def unique_sources(self) -> "ActivityPreviewConfig":
@@ -36,6 +38,8 @@ class ActivityPreviewAccess:
     def __init__(self, reader: ActivityPreviewService, config: ActivityPreviewConfig) -> None:
         self.reader = reader
         self.config = ActivityPreviewConfig.model_validate(config.model_dump(mode="json"))
+        if self.config.hardware_metrics and reader.hardware_source is None:
+            raise ValueError("configured hardware metrics require an explicit source reader")
         self.node_ids = tuple(source.node_id for source in self.config.sources)
 
 
@@ -80,6 +84,54 @@ class ActivityGapView(AccessContract):
     after: ActivityReferenceView
 
 
+class SampleStatisticView(AccessContract):
+    samples: int
+    sum: str
+    minimum: str | None
+    maximum: str | None
+    mean_numerator: str | None
+    mean_denominator: str | None
+
+
+class GpuSampleSeriesView(AccessContract):
+    gpu_uuid: str
+    index: int
+    model: str
+    memory_total_mib: str
+    reported_envelopes: int
+    independent_samples: int
+    cached_envelopes: int
+    rejected_envelopes: int
+    missing_temperature_samples: int
+    first_source: ActivityReferenceView | None
+    last_source: ActivityReferenceView | None
+    first_gpu_observed_at: AwareDatetime | None
+    last_gpu_observed_at: AwareDatetime | None
+    utilization_percent: SampleStatisticView
+    memory_used_mib: SampleStatisticView
+    temperature_c: SampleStatisticView
+
+
+class GpuHardwareSummaryView(AccessContract):
+    assessment_scope: Literal["reported_gpu_sample_statistics"]
+    aggregation: Literal["independent_sample_weighted"]
+    time_weighted: Literal[False]
+    continuous_usage_established: Literal[False]
+    quota_usage_available: Literal[False]
+    source_preview_fingerprint: str
+    source_batch_fingerprints: tuple[str, ...]
+    source_characters: int
+    telemetry_frames: int
+    independent_frames: int
+    cached_frames: int
+    rejected_frames: int
+    no_target_frames: int
+    rejection_reasons: dict[str, int]
+    gpu_quality_frames: dict[str, int]
+    series: tuple[GpuSampleSeriesView, ...]
+    fingerprint: str
+
+
 class ActivityPreviewView(AccessContract):
     assessment_scope: Literal["reported_compute_observation_groups"]
     continuous_usage_established: Literal[False]
@@ -112,6 +164,45 @@ class ActivityPreviewView(AccessContract):
     gaps: tuple[ActivityGapView, ...]
     read_at: AwareDatetime
     source_result_fingerprint: str
+    hardware: GpuHardwareSummaryView | None = None
+
+
+def statistic_view(value: SampleStatistic) -> SampleStatisticView:
+    return SampleStatisticView(
+        samples=value.samples,
+        sum=str(value.sum),
+        minimum=str(value.minimum) if value.minimum is not None else None,
+        maximum=str(value.maximum) if value.maximum is not None else None,
+        mean_numerator=str(value.sum) if value.samples else None,
+        mean_denominator=str(value.samples) if value.samples else None,
+    )
+
+
+def hardware_view(value: GpuHardwareSummary) -> GpuHardwareSummaryView:
+    return GpuHardwareSummaryView(
+        **value.model_dump(exclude={"series"}),
+        series=tuple(
+            GpuSampleSeriesView(
+                **series.model_dump(
+                    exclude={
+                        "memory_total_mib",
+                        "first_source",
+                        "last_source",
+                        "utilization_percent",
+                        "memory_used_mib",
+                        "temperature_c",
+                    }
+                ),
+                memory_total_mib=str(series.memory_total_mib),
+                first_source=reference_view(series.first_source) if series.first_source else None,
+                last_source=reference_view(series.last_source) if series.last_source else None,
+                utilization_percent=statistic_view(series.utilization_percent),
+                memory_used_mib=statistic_view(series.memory_used_mib),
+                temperature_c=statistic_view(series.temperature_c),
+            )
+            for series in value.series
+        ),
+    )
 
 
 def reference_view(value: ArchivedUsageReference) -> ActivityReferenceView:
@@ -197,13 +288,20 @@ def activity_usage(
     try:
         user = _current_subject(surface, subject, query.node_id)
         source = next(item for item in access.config.sources if item.node_id == query.node_id)
-        value = access.reader.recent(
-            ActorContext(actor_id=user, request_id=request_id),
-            source,
-            access.config.rule,
-            max_messages=query.max_messages,
-        )
-        result = activity_view(value)
+        actor = ActorContext(actor_id=user, request_id=request_id)
+        if access.config.hardware_metrics:
+            combined = access.reader.recent_with_hardware(
+                actor, source, access.config.rule, max_messages=query.max_messages
+            )
+            result = activity_view(combined.preview).model_copy(
+                update={"hardware": hardware_view(combined.hardware)}
+            )
+        else:
+            result = activity_view(
+                access.reader.recent(
+                    actor, source, access.config.rule, max_messages=query.max_messages
+                )
+            )
         if _current_subject(surface, subject, query.node_id) != user:
             raise DomainError("PERMISSION_DENIED", "Current identity differs", 403)
         return result

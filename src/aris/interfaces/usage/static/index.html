@@ -7,6 +7,7 @@
   <script src="/internal/usage/ui/assets/usage-saved.js" defer></script>
   <script src="/internal/usage/ui/assets/usage-weekly.js" defer></script>
   <script src="/internal/usage/ui/assets/usage-group.js" defer></script>
+  <script src="/internal/usage/ui/assets/usage-hardware.js" defer></script>
   <script src="/internal/usage/ui/assets/usage-activity.js" defer></script>
   <script src="/internal/usage/ui/assets/usage.js" defer></script>
 </head>
@@ -119,6 +120,13 @@
           <section class="panel metric"><p>独立计算采样帧</p><strong id="activity-frames">—</strong><span id="activity-cache-note"></span></section>
           <section class="panel metric"><p>GPU 观测分组</p><strong id="activity-groups">—</strong><span>状态、归属或质量变化时断组</span></section>
         </div>
+        <details id="activity-hardware" class="panel hardware-panel" hidden>
+          <summary>GPU 硬件样本统计 <span id="hardware-counts"></span></summary>
+          <p id="hardware-quality" class="muted"></p>
+          <div class="table-scroll"><table><thead><tr><th>GPU</th><th>利用率</th><th>已用显存</th><th>温度</th><th>原采样</th></tr></thead><tbody id="hardware-rows"></tbody></table></div>
+          <p id="hardware-empty" class="empty" hidden>这次范围没有报告 GPU 硬件样本，不能解释为 0 利用率。</p>
+          <div class="pagination"><span id="hardware-page-note"></span><div><button id="hardware-previous" class="secondary" type="button">上一组统计</button><button id="hardware-next" class="secondary" type="button">下一组统计</button></div></div>
+        </details>
         <section class="panel records-panel activity-panel">
           <div class="section-head"><div><h2 id="activity-title"></h2><p id="activity-range" class="muted"></p></div><span id="activity-coverage" class="coverage-badge"></span></div>
           <p id="activity-quality" class="activity-quality"></p>
