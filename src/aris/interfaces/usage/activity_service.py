@@ -110,6 +110,16 @@ class GpuSampleSeriesView(AccessContract):
     utilization_percent: SampleStatisticView
     memory_used_mib: SampleStatisticView
     temperature_c: SampleStatisticView
+    points: tuple["GpuMetricSamplePointView", ...]
+
+
+class GpuMetricSamplePointView(AccessContract):
+    seq: str
+    gpu_observed_at: AwareDatetime
+    utilization_percent: int
+    memory_used_mib: str
+    temperature_c: int | None
+    break_before: bool
 
 
 class GpuHardwareSummaryView(AccessContract):
@@ -191,6 +201,7 @@ def hardware_view(value: GpuHardwareSummary) -> GpuHardwareSummaryView:
                         "utilization_percent",
                         "memory_used_mib",
                         "temperature_c",
+                        "points",
                     }
                 ),
                 memory_total_mib=str(series.memory_total_mib),
@@ -199,6 +210,17 @@ def hardware_view(value: GpuHardwareSummary) -> GpuHardwareSummaryView:
                 utilization_percent=statistic_view(series.utilization_percent),
                 memory_used_mib=statistic_view(series.memory_used_mib),
                 temperature_c=statistic_view(series.temperature_c),
+                points=tuple(
+                    GpuMetricSamplePointView(
+                        seq=str(point.seq),
+                        gpu_observed_at=point.gpu_observed_at,
+                        utilization_percent=point.utilization_percent,
+                        memory_used_mib=str(point.memory_used_mib),
+                        temperature_c=point.temperature_c,
+                        break_before=point.break_before,
+                    )
+                    for point in series.points
+                ),
             )
             for series in value.series
         ),

@@ -41,6 +41,15 @@ class SampleStatistic(IntervalContract):
         return self
 
 
+class GpuMetricSamplePoint(IntervalContract):
+    seq: int = Field(ge=1, le=9223372036854775807, strict=True)
+    gpu_observed_at: AwareDatetime
+    utilization_percent: int = Field(ge=0, le=100)
+    memory_used_mib: int = Field(ge=0)
+    temperature_c: int | None = Field(ge=-50, le=150)
+    break_before: bool
+
+
 class GpuSampleSeries(IntervalContract):
     gpu_uuid: str
     index: int
@@ -58,6 +67,7 @@ class GpuSampleSeries(IntervalContract):
     utilization_percent: SampleStatistic
     memory_used_mib: SampleStatistic
     temperature_c: SampleStatistic
+    points: tuple[GpuMetricSamplePoint, ...] = Field(max_length=1024)
 
     @model_validator(mode="after")
     def sample_counts(self) -> "GpuSampleSeries":
@@ -68,6 +78,13 @@ class GpuSampleSeries(IntervalContract):
             or self.memory_used_mib.samples != self.independent_samples
             or self.temperature_c.samples + self.missing_temperature_samples
             != self.independent_samples
+            or len(self.points) != self.independent_samples
+            or (bool(self.points) and not self.points[0].break_before)
+            or any(point.memory_used_mib > self.memory_total_mib for point in self.points)
+            or any(
+                left.seq >= right.seq or left.gpu_observed_at >= right.gpu_observed_at
+                for left, right in zip(self.points, self.points[1:], strict=False)
+            )
             or (
                 self.independent_samples == 0
                 and any(
@@ -94,6 +111,22 @@ class GpuSampleSeries(IntervalContract):
             )
         ):
             raise ValueError("GPU series differs from its independent source samples")
+        if self.points and (
+            self.first_source is None
+            or self.last_source is None
+            or self.first_source.seq != self.points[0].seq
+            or self.last_source.seq != self.points[-1].seq
+            or self.first_gpu_observed_at != self.points[0].gpu_observed_at
+            or self.last_gpu_observed_at != self.points[-1].gpu_observed_at
+            or self.utilization_percent
+            != _stat([point.utilization_percent for point in self.points])
+            or self.memory_used_mib != _stat([point.memory_used_mib for point in self.points])
+            or self.temperature_c
+            != _stat(
+                [point.temperature_c for point in self.points if point.temperature_c is not None]
+            )
+        ):
+            raise ValueError("GPU summary and original chart points differ")
         return self
 
 
@@ -249,20 +282,54 @@ def summarize_gpu_samples(
         raise DomainError("CONFLICT", "Hardware samples differ from the fixed archive preview", 409)
     states = _classify(values, timedelta(seconds=preview.rule.max_gap_seconds))
     series: dict[
-        tuple[str, int, str, int], list[tuple[GpuSample, GpuHardwareObservation, str]]
+        tuple[str, int, str, int], list[tuple[GpuSample, GpuHardwareObservation, str, bool]]
     ] = {}
+    last_keys: dict[str, tuple[str, int, str, int]] = {}
+    barriers: dict[str, bool] = {}
     for value, state in zip(values, states, strict=True):
+        present = {gpu.gpu_uuid for gpu in value.gpus}
+        for known in last_keys:
+            if known not in present or state not in ("independent", "cached"):
+                barriers[known] = True
         for gpu in value.gpus:
             key = (gpu.gpu_uuid, gpu.index, gpu.model, gpu.memory_total_mib)
-            series.setdefault(key, []).append((gpu, value, state))
+            changed = last_keys.get(gpu.gpu_uuid) != key
+            series.setdefault(key, []).append(
+                (gpu, value, state, changed or barriers.get(gpu.gpu_uuid, True))
+            )
+            last_keys[gpu.gpu_uuid] = key
+            if state == "independent":
+                barriers[gpu.gpu_uuid] = False
+            elif state != "cached":
+                barriers[gpu.gpu_uuid] = True
             if len(series) > MAX_PREVIEW_GROUPS:
                 raise DomainError(
                     "ACTIVITY_PREVIEW_TOO_LARGE", "GPU sample series exceed preview budget", 503
                 )
     output = []
     for key, samples in sorted(series.items()):
-        accepted = [(gpu, value) for gpu, value, state in samples if state == "independent"]
-        temperatures = [gpu.temperature_c for gpu, _ in accepted if gpu.temperature_c is not None]
+        accepted = [
+            (gpu, value, broken) for gpu, value, state, broken in samples if state == "independent"
+        ]
+        temperatures = [
+            gpu.temperature_c for gpu, _, _ in accepted if gpu.temperature_c is not None
+        ]
+        points = tuple(
+            GpuMetricSamplePoint(
+                seq=value.reference.seq,
+                gpu_observed_at=value.gpu_observed_at,
+                utilization_percent=gpu.utilization_percent,
+                memory_used_mib=gpu.memory_used_mib,
+                temperature_c=gpu.temperature_c,
+                break_before=index == 0
+                or broken
+                or (
+                    value.gpu_observed_at - accepted[index - 1][1].gpu_observed_at
+                    > timedelta(seconds=preview.rule.max_gap_seconds)
+                ),
+            )
+            for index, (gpu, value, broken) in enumerate(accepted)
+        )
         output.append(
             GpuSampleSeries(
                 gpu_uuid=key[0],
@@ -271,18 +338,19 @@ def summarize_gpu_samples(
                 memory_total_mib=key[3],
                 reported_envelopes=len(samples),
                 independent_samples=len(accepted),
-                cached_envelopes=sum(state == "cached" for _, _, state in samples),
+                cached_envelopes=sum(state == "cached" for _, _, state, _ in samples),
                 rejected_envelopes=sum(
-                    state not in ("independent", "cached") for _, _, state in samples
+                    state not in ("independent", "cached") for _, _, state, _ in samples
                 ),
                 missing_temperature_samples=len(accepted) - len(temperatures),
                 first_source=accepted[0][1].reference if accepted else None,
                 last_source=accepted[-1][1].reference if accepted else None,
                 first_gpu_observed_at=accepted[0][1].gpu_observed_at if accepted else None,
                 last_gpu_observed_at=accepted[-1][1].gpu_observed_at if accepted else None,
-                utilization_percent=_stat([gpu.utilization_percent for gpu, _ in accepted]),
-                memory_used_mib=_stat([gpu.memory_used_mib for gpu, _ in accepted]),
+                utilization_percent=_stat([gpu.utilization_percent for gpu, _, _ in accepted]),
+                memory_used_mib=_stat([gpu.memory_used_mib for gpu, _, _ in accepted]),
                 temperature_c=_stat(temperatures),
+                points=points,
             )
         )
     rejected = Counter(state for state in states if state not in ("independent", "cached"))

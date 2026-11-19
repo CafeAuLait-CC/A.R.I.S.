@@ -7,6 +7,7 @@
   <script src="/internal/usage/ui/assets/usage-saved.js" defer></script>
   <script src="/internal/usage/ui/assets/usage-weekly.js" defer></script>
   <script src="/internal/usage/ui/assets/usage-group.js" defer></script>
+  <script src="/internal/usage/ui/assets/usage-hardware-chart.js" defer></script>
   <script src="/internal/usage/ui/assets/usage-hardware.js" defer></script>
   <script src="/internal/usage/ui/assets/usage-activity.js" defer></script>
   <script src="/internal/usage/ui/assets/usage.js" defer></script>
@@ -123,6 +124,15 @@
         <details id="activity-hardware" class="panel hardware-panel" hidden>
           <summary>GPU 硬件样本统计 <span id="hardware-counts"></span></summary>
           <p id="hardware-quality" class="muted"></p>
+          <section id="hardware-charts" hidden aria-label="原硬件采样趋势">
+            <label class="hardware-series-picker">趋势系列<select id="hardware-series"></select></label>
+            <p id="hardware-chart-note" class="muted"></p>
+            <div class="hardware-chart-grid">
+              <div><h3>GPU 利用率 <small>%</small></h3><div id="hardware-chart-utilization" class="hardware-chart"></div></div>
+              <div><h3>已用显存 <small>GB</small></h3><div id="hardware-chart-memory" class="hardware-chart"></div></div>
+              <div><h3>温度 <small>°C</small></h3><div id="hardware-chart-temperature" class="hardware-chart"></div></div>
+            </div>
+          </section>
           <div class="table-scroll"><table><thead><tr><th>GPU</th><th>利用率</th><th>已用显存</th><th>温度</th><th>原采样</th></tr></thead><tbody id="hardware-rows"></tbody></table></div>
           <p id="hardware-empty" class="empty" hidden>这次范围没有报告 GPU 硬件样本，不能解释为 0 利用率。</p>
           <div class="pagination"><span id="hardware-page-note"></span><div><button id="hardware-previous" class="secondary" type="button">上一组统计</button><button id="hardware-next" class="secondary" type="button">下一组统计</button></div></div>

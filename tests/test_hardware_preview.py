@@ -116,6 +116,9 @@ def test_independent_hardware_samples_exclude_cache_and_keep_missing_temperature
         and empty_temperature.minimum is None
         and empty_temperature.maximum is None
     )
+    assert [point.seq for point in series.points] == [1, 3]
+    assert [point.break_before for point in series.points] == [True, False]
+    assert series.points[0].temperature_c is None
     assert not value.time_weighted and not value.quota_usage_available
 
 
@@ -136,11 +139,15 @@ def test_same_time_hardware_conflict_removes_prior_sample_and_clock_recovery_use
         "SOURCE_CLOCK_REGRESSION": 2,
     }
     assert value.series[0].utilization_percent.sum == 90
+    assert [point.seq for point in value.series[0].points] == [3, 6]
+    assert all(point.break_before for point in value.series[0].points)
     specifications = [{} for _ in range(130)]
     specifications[128] = {"gpu_seconds": 0}
     paged = summary(specifications)
     assert paged.rejection_reasons == {"SOURCE_CLOCK_REGRESSION": 1}
     assert paged.independent_frames == 129
+    assert paged.series[0].points[-1].seq == 130
+    assert paged.series[0].points[-1].break_before
 
 
 def test_stale_quality_empty_and_changed_capacity_are_distinct_from_zero_statistics():
@@ -171,6 +178,8 @@ def test_summary_binds_original_sources_and_preserves_large_numbers():
     assert output["series"][0]["memory_used_mib"]["sum"] == str((1 << 54) + 3)
     assert output["series"][0]["memory_used_mib"]["mean_denominator"] == "1"
     assert output["series"][0]["memory_total_mib"] == str((1 << 55) + 1)
+    assert output["series"][0]["points"][0]["seq"] == "1"
+    assert output["series"][0]["points"][0]["memory_used_mib"] == str((1 << 54) + 3)
     assert "username" not in value.model_dump_json()
     _, _, other = inputs([{}])
     with pytest.raises(DomainError) as error:
@@ -263,6 +272,8 @@ def test_optional_hardware_http_view_uses_exact_sample_statistics_and_current_id
         assert hardware["series"][0]["temperature_c"]["mean_numerator"] is None
         assert hardware["series"][0]["first_source"]["seq"] == "3"
         assert client.get("/internal/usage/ui/assets/usage-hardware.js").status_code == 200
+        assert client.get("/internal/usage/ui/assets/usage-hardware-chart.js").status_code == 200
+        assert len(hardware["series"][0]["points"]) == 3
         original = reader.recent_with_hardware
 
         def revoke(*args, **kwargs):
@@ -276,3 +287,21 @@ def test_optional_hardware_http_view_uses_exact_sample_statistics_and_current_id
         monkeypatch.setattr(reader, "recent_with_hardware", revoke)
         response = client.post("/internal/usage/activity/query", headers=HEADERS, json=QUERY)
         assert response.status_code == 403 and "telemetry_frames" not in response.text
+
+
+def test_chart_points_break_on_gaps_missing_gpu_and_returning_hardware_series():
+    value = summary(
+        [
+            {},
+            {"no_gpu": True},
+            {},
+            {},
+            {"seconds": 120},
+            {"seconds": 135, "model": "replacement", "total": 65536},
+            {"seconds": 150},
+        ]
+    )
+    original = next(series for series in value.series if series.model == "fixture GPU")
+    assert [point.seq for point in original.points] == [1, 3, 4, 5, 7]
+    assert [point.break_before for point in original.points] == [True, True, False, True, True]
+    assert original.independent_samples == 5
