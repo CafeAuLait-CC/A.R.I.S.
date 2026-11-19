@@ -130,6 +130,18 @@ class VegaRepository:
     def usage_source_node(self, agent_id: str) -> str | None:
         return self.session.scalar(select(Node.id).where(Node.agent_id == agent_id))
 
+    def usage_source_ceiling(self, agent_id: str) -> tuple[str, int, int | None] | None:
+        archived = (
+            select(func.max(AgentMessage.seq))
+            .where(AgentMessage.agent_id == Node.agent_id)
+            .correlate(Node)
+            .scalar_subquery()
+        )
+        row = self.session.execute(
+            select(Node.id, Node.last_seq, archived).where(Node.agent_id == agent_id)
+        ).one_or_none()
+        return (row[0], row[1], row[2]) if row is not None else None
+
     def usage_range_metadata(
         self, agent_id: str, after_seq: int, through_seq: int
     ) -> tuple[tuple[str, int, int], ...]:

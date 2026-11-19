@@ -17,6 +17,43 @@ MAX_ARCHIVE_MESSAGES = 128
 MAX_ARCHIVE_SOURCE_CHARACTERS = 2 * 1024 * 1024
 
 
+class UsageArchiveHeadQuery(UsageFactContract):
+    agent_id: str = Field(min_length=1, max_length=128, pattern=r"^\S+$")
+    node_id: str = Field(min_length=1, max_length=128, pattern=r"^\S+$")
+
+
+class UsageArchiveHead(UsageFactContract):
+    assessment_scope: Literal["archive_source_ceiling"] = "archive_source_ceiling"
+    sequence_coverage: Literal["not_assessed"] = "not_assessed"
+    payload_integrity: Literal["not_assessed"] = "not_assessed"
+    quota_usage_available: Literal[False] = False
+    query: UsageArchiveHeadQuery
+    highest_committed_seq: int = Field(ge=0, le=MAX_ARCHIVE_SEQ, strict=True)
+    read_at: AwareDatetime
+    fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+    @field_validator("read_at")
+    @classmethod
+    def utc_time(cls, value: datetime) -> datetime:
+        return value.astimezone(UTC)
+
+    @model_validator(mode="after")
+    def fixed_ceiling(self) -> "UsageArchiveHead":
+        if self.fingerprint != archive_head_fingerprint(self):
+            raise ValueError("archive source ceiling fingerprint differs")
+        return self
+
+
+def archive_head_fingerprint(head: UsageArchiveHead) -> str:
+    raw = json.dumps(
+        head.model_dump(mode="json", exclude={"fingerprint", "read_at"}),
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(b"aris.vega.archive.ceiling\x00" + raw.encode()).hexdigest()
+
+
 class UsageArchiveQuery(UsageFactContract):
     agent_id: str = Field(min_length=1, max_length=128, pattern=r"^\S+$")
     node_id: str = Field(min_length=1, max_length=128, pattern=r"^\S+$")

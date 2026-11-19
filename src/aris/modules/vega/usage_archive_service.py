@@ -1,4 +1,4 @@
-"""Read-only original messages for an internal consumer; never skip a sequence gap."""
+"""Read-only source ceilings and original pages; never skip a sequence gap."""
 
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -17,8 +17,11 @@ from aris.modules.vega.usage_archive_schemas import (
     MAX_ARCHIVE_SOURCE_CHARACTERS,
     ArchivedUsageItem,
     ArchivedUsageReference,
+    UsageArchiveHead,
+    UsageArchiveHeadQuery,
     UsageArchivePage,
     UsageArchiveQuery,
+    archive_head_fingerprint,
     archive_page_fingerprint,
 )
 from aris.modules.vega.usage_service import _original_report, _usage_fact
@@ -59,6 +62,60 @@ class VegaUsageArchive:
         self.sessions = sessions
         self.clock = clock or (lambda: datetime.now(UTC))
         self.timeout_ms = timeout_ms
+
+    def head(self, query: UsageArchiveHeadQuery) -> UsageArchiveHead:
+        try:
+            with self.sessions() as session:
+                transaction_budget(
+                    session, min(100, self.timeout_ms), min(1000, self.timeout_ms), self.timeout_ms
+                )
+                return self.head_in_transaction(session, query)
+        except DBAPIError as error:
+            raise self._database_failure(error) from None
+
+    def head_in_transaction(
+        self, session: Session, query: UsageArchiveHeadQuery
+    ) -> UsageArchiveHead:
+        query = UsageArchiveHeadQuery.model_validate(query.model_dump(mode="json"))
+        deadline = monotonic() + self.timeout_ms / 1000
+        try:
+            with session.no_autoflush:
+                row = VegaRepository(session).usage_source_ceiling(query.agent_id)
+                if row is None:
+                    raise DomainError("NOT_FOUND", "Archived usage source is unknown", 404)
+                node_id, projected, archived = row
+                if node_id != query.node_id:
+                    raise DomainError("CONFLICT", "Archived usage source binding differs", 409)
+                if (archived is not None and archived < 1) or projected != (
+                    archived if archived is not None else 0
+                ):
+                    raise ValueError("archive source ceiling differs from its node projection")
+                now = self.clock()
+                if now.tzinfo is None or now.utcoffset() is None:
+                    raise ValueError("usage archive clock requires a timezone")
+                unchecked = UsageArchiveHead.model_construct(
+                    query=query,
+                    highest_committed_seq=projected,
+                    read_at=utc(now),
+                    fingerprint="0" * 64,
+                )
+                result = UsageArchiveHead.model_validate(
+                    {
+                        **unchecked.model_dump(mode="json"),
+                        "fingerprint": archive_head_fingerprint(unchecked),
+                    }
+                )
+                if monotonic() >= deadline:
+                    raise DomainError(
+                        "RETRYABLE_DATABASE_ERROR", "Archive head read budget exceeded", 503
+                    )
+                return result
+        except DBAPIError as error:
+            raise self._database_failure(error) from None
+        except (ValueError, TypeError, KeyError, RecursionError):
+            raise DomainError(
+                "DEPENDENCY_UNAVAILABLE", "Original archive source ceiling is inconsistent", 503
+            ) from None
 
     def page(self, query: UsageArchiveQuery) -> UsageArchivePage:
         try:
