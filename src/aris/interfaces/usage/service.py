@@ -21,6 +21,7 @@ from aris.core.commands.budgets import transaction_budget
 from aris.core.commands.schemas import ActorContext
 from aris.core.contracts import DomainError
 from aris.interfaces.commands.auth import BoundSubjectTokens
+from aris.interfaces.usage.activity_service import ActivityPreviewAccess
 from aris.interfaces.usage.report import history_report
 from aris.modules.lyra.ledger_schemas import UsageLedgerHead
 from aris.modules.lyra.usage_history import (
@@ -97,6 +98,7 @@ class UsageSession(AccessContract):
     weekly_reports_available: bool = False
     weekly_plans_available: bool = False
     group_reports_available: bool = False
+    activity_preview_nodes: tuple[str, ...] = ()
 
 
 class UsageHistoryPage(AccessContract):
@@ -173,6 +175,7 @@ class UsageHistorySurface:
         saved_windows: UsageWindowReader | None = None,
         weekly_reports: WeeklyReportReader | None = None,
         weekly_plans: WeeklyPlanReader | None = None,
+        activity: ActivityPreviewAccess | None = None,
     ) -> None:
         if not 1 <= len(node_ids) <= 32 or len(set(node_ids)) != len(node_ids):
             raise ValueError("usage history requires explicit unique nodes")
@@ -182,6 +185,12 @@ class UsageHistorySurface:
         self.saved_windows = saved_windows
         self.weekly_reports = weekly_reports
         self.weekly_plans = weekly_plans
+        if activity is not None and (
+            activity.reader.sessions is not history.sessions
+            or any(node not in node_ids for node in activity.node_ids)
+        ):
+            raise ValueError("activity preview requires the same database and allowed nodes")
+        self.activity = activity
 
     def session(self, authorization: str | None) -> UsageSession:
         subject = self.authenticator.authenticate(authorization)
@@ -220,6 +229,13 @@ class UsageHistorySurface:
                     weekly_reports_available=self.weekly_reports is not None,
                     weekly_plans_available=self.weekly_plans is not None,
                     group_reports_available=len(nodes) > 1,
+                    activity_preview_nodes=tuple(
+                        node.node_id
+                        for node in nodes
+                        if node.node
+                        and self.activity is not None
+                        and node.node_id in self.activity.node_ids
+                    ),
                 )
         except DBAPIError:
             raise DomainError(

@@ -7,6 +7,7 @@ from starlette.responses import HTMLResponse, JSONResponse, Response
 
 from aris.core.contracts import DomainError
 from aris.interfaces.commands.api import authorization, bounded_input
+from aris.interfaces.usage.activity_service import ActivityPreviewInput, activity_usage
 from aris.interfaces.usage.group_service import GroupUsageInput, group_usage
 from aris.interfaces.usage.saved_service import SavedUsageQuery, SavedUsageRead, saved_usage
 from aris.interfaces.usage.service import UsageHistoryInput, UsageHistorySurface
@@ -30,6 +31,18 @@ PAGE_HEADERS = {
 
 def build_router(service: UsageHistorySurface) -> APIRouter:
     router = APIRouter(prefix="/internal/usage", tags=["recorded-usage"])
+
+    if service.activity is not None:
+
+        @router.post("/activity/query")
+        async def activity(request: Request) -> JSONResponse:
+            if request.query_params:
+                raise DomainError("VALIDATION_ERROR", "Unexpected activity query parameters", 422)
+            selection = await bounded_input(request, ActivityPreviewInput)
+            result = await run_in_threadpool(
+                activity_usage, service, authorization(request), request.state.request_id, selection
+            )
+            return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
 
     @router.post("/groups/query")
     @router.post("/groups/report")
@@ -194,7 +207,12 @@ def build_router(service: UsageHistorySurface) -> APIRouter:
     @router.get("/ui/assets/{name}")
     def asset(
         name: Literal[
-            "usage.js", "usage-saved.js", "usage-weekly.js", "usage-group.js", "usage.css"
+            "usage.js",
+            "usage-saved.js",
+            "usage-weekly.js",
+            "usage-group.js",
+            "usage.css",
+            "usage-activity.js",
         ],
     ) -> Response:
         return Response(

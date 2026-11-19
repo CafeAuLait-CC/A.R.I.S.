@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Literal
 
 import uvicorn
-from pydantic import Field, SecretStr, ValidationError
+from pydantic import Field, SecretStr, ValidationError, model_validator
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -19,11 +19,14 @@ from aris.core.contracts import DomainError
 from aris.core.db import build_engine, check_database, session_factory
 from aris.interfaces.commands.auth import BoundSubjectTokens, UserTokenBinding
 from aris.interfaces.slack.config import SlackSettings
+from aris.interfaces.usage.activity_service import ActivityPreviewAccess, ActivityPreviewConfig
 from aris.interfaces.usage.service import UsageHistorySurface
+from aris.modules.lyra.activity_preview_service import ActivityPreviewService
 from aris.modules.lyra.usage_history_service import UsageHistoryService
 from aris.modules.lyra.weekly_report_service import WeeklyReportReader
 from aris.modules.lyra.window_reader import UsageWindowReader
 from aris.modules.nova.weekly_plan_reader import WeeklyPlanReader
+from aris.modules.vega.usage_archive_service import VegaUsageArchive
 
 
 class LocalUsageConfig(AccessContract):
@@ -34,6 +37,15 @@ class LocalUsageConfig(AccessContract):
     node_ids: tuple[str, ...] = Field(min_length=1, max_length=32)
     saved_snapshots: bool = False
     weekly_reports: bool = False
+    activity_preview: ActivityPreviewConfig | None = None
+
+    @model_validator(mode="after")
+    def configured_activity_nodes(self) -> "LocalUsageConfig":
+        if self.activity_preview is not None and any(
+            item.node_id not in self.node_ids for item in self.activity_preview.sources
+        ):
+            raise ValueError("activity archive source must be a configured usage node")
+        return self
 
     def settings(self) -> Settings:
         url = make_url(self.database_url.get_secret_value())
@@ -88,8 +100,9 @@ def main(argv: list[str] | None = None) -> int:
             )
         engine = build_engine(settings.database_url)
         check_database(engine)
+        sessions = session_factory(engine)
         surface = UsageHistorySurface(
-            UsageHistoryService(session_factory(engine)),
+            UsageHistoryService(sessions),
             auth,
             config.node_ids,
             saved_windows=UsageWindowReader(session_factory(engine))
@@ -100,6 +113,12 @@ def main(argv: list[str] | None = None) -> int:
             else None,
             weekly_plans=WeeklyPlanReader(session_factory(engine))
             if config.weekly_reports
+            else None,
+            activity=ActivityPreviewAccess(
+                ActivityPreviewService(sessions, VegaUsageArchive(sessions)),
+                config.activity_preview,
+            )
+            if config.activity_preview is not None
             else None,
         )
         uvicorn.run(

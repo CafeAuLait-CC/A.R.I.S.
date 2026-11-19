@@ -7,6 +7,7 @@
   <script src="/internal/usage/ui/assets/usage-saved.js" defer></script>
   <script src="/internal/usage/ui/assets/usage-weekly.js" defer></script>
   <script src="/internal/usage/ui/assets/usage-group.js" defer></script>
+  <script src="/internal/usage/ui/assets/usage-activity.js" defer></script>
   <script src="/internal/usage/ui/assets/usage.js" defer></script>
 </head>
 <body>
@@ -34,6 +35,7 @@
       <button id="tab-saved" type="button" role="tab" aria-controls="saved-results" aria-selected="false" hidden>统计快照</button>
       <button id="tab-weekly" type="button" role="tab" aria-controls="weekly-results" aria-selected="false" hidden>周报</button>
       <button id="tab-group" type="button" role="tab" aria-controls="group-results" aria-selected="false" hidden>跨节点汇总</button>
+      <button id="tab-activity" type="button" role="tab" aria-controls="activity-results" aria-selected="false" hidden>归档观测</button>
     </div>
     <div id="results" role="tabpanel" aria-labelledby="tab-records" hidden>
       <div class="summary-grid">
@@ -104,6 +106,29 @@
         <div class="chart-grid"><section class="panel trend-panel"><div class="section-head"><h2>每日已记录用量</h2><span>GPU 小时</span></div><div id="group-trend" class="group-trend"></div></section><section class="panel owners-panel"><h2>用户汇总</h2><div id="group-owners"></div></section></div>
         <section class="panel records-panel"><div class="section-head"><div><h2>节点分项</h2><p id="group-snapshot-note" class="muted"></p></div><div class="export-actions"><button id="group-report" class="secondary" type="button">导出报告</button><button id="group-csv" class="secondary" type="button">导出节点汇总 CSV</button></div></div><div class="table-scroll"><table><thead><tr><th>节点</th><th class="number">已记录 GPU 小时</th><th class="number">涉及 GPU</th><th class="number">记录段</th><th class="number">账本快照</th></tr></thead><tbody id="group-nodes"></tbody></table></div></section>
         <p class="coverage-note">这里只汇总选定节点的已记录时长，尚未确认完整观测覆盖。无记录不代表未使用；各节点账本快照分别保留，本汇总不合并额度，也不用于配额扣减。</p>
+      </div>
+    </section>
+    <section id="activity-results" role="tabpanel" aria-labelledby="tab-activity" hidden>
+      <section class="panel activity-controls">
+        <div><h2>计算进程观测分组</h2><p class="muted">按最近的归档包查看，不使用日期筛选；点击上方查询读取一次。</p></div>
+        <label>最近原包数量<select id="activity-limit"><option value="128">128</option><option value="256">256</option><option value="512">512</option><option value="1024">1024</option></select></label>
+      </section>
+      <div id="activity-data" hidden>
+        <div class="summary-grid">
+          <section class="panel metric"><p>原始归档包</p><strong id="activity-packets">—</strong><span id="activity-packet-note"></span></section>
+          <section class="panel metric"><p>独立计算采样帧</p><strong id="activity-frames">—</strong><span id="activity-cache-note"></span></section>
+          <section class="panel metric"><p>GPU 观测分组</p><strong id="activity-groups">—</strong><span>状态、归属或质量变化时断组</span></section>
+        </div>
+        <section class="panel records-panel activity-panel">
+          <div class="section-head"><div><h2 id="activity-title"></h2><p id="activity-range" class="muted"></p></div><span id="activity-coverage" class="coverage-badge"></span></div>
+          <p id="activity-quality" class="activity-quality"></p>
+          <label class="activity-gpu-filter">GPU<select id="activity-gpu"><option value="">全部 GPU</option></select></label>
+          <div class="table-scroll"><table><thead><tr><th>GPU / 状态</th><th>首次 / 最后计算观测</th><th>归档原包</th><th>采样 / 重复缓存</th><th>分组依据</th></tr></thead><tbody id="activity-rows"></tbody></table></div>
+          <p id="activity-empty" class="empty" hidden>这次范围没有可显示的 GPU 观测；不能据此判断空闲。</p>
+          <div class="pagination"><span id="activity-page-note"></span><div><button id="activity-previous" class="secondary" type="button">上一页</button><button id="activity-next" class="secondary" type="button">下一页</button></div></div>
+          <details id="activity-evidence" class="activity-evidence"><summary>查看原始依据</summary><p id="activity-rule"></p><p id="activity-fingerprint"></p><ul id="activity-gaps"></ul></details>
+        </section>
+        <p class="coverage-note">这里归纳的是计算进程报告，不是连续使用时长或计费记录。所选范围之前的上下文未加载；原包齐全也不能证明采样间隙持续工作。心跳不作为 GPU 采样，原始数据保持不变。</p>
       </div>
     </section>
   </section>
