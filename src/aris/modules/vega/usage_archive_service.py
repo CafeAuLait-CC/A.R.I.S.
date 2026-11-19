@@ -156,7 +156,9 @@ class VegaUsageArchive:
                     if seq != query.after_seq + index:
                         break
                     characters += size
-                    if characters > MAX_ARCHIVE_SOURCE_CHARACTERS:
+                    if characters > min(
+                        MAX_ARCHIVE_SOURCE_CHARACTERS, query.source_character_budget
+                    ):
                         raise DomainError(
                             "USAGE_ARCHIVE_TOO_LARGE", "Archive page exceeds its source budget", 503
                         )
@@ -179,6 +181,7 @@ class VegaUsageArchive:
                 unchecked = UsageArchivePage.model_construct(
                     query=query,
                     items=items,
+                    source_characters=characters,
                     next_after_seq=end,
                     state=state,
                     missing_seq=end + 1 if state == "gap" else None,

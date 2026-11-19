@@ -63,6 +63,7 @@ def pure_page():
     page = UsageArchivePage.model_construct(
         query=query(through_seq=1),
         items=(item,),
+        source_characters=1000,
         next_after_seq=1,
         state="range_end",
         read_at=datetime.now(UTC),
@@ -84,6 +85,8 @@ def pure_page():
         {"limit": 129},
         {"limit": "2"},
         {"complete": True},
+        {"source_character_budget": 0},
+        {"source_character_budget": 2097153},
     ],
 )
 def test_archive_range_is_explicit_bounded_and_cannot_supply_completeness(change):
@@ -91,7 +94,9 @@ def test_archive_range_is_explicit_bounded_and_cannot_supply_completeness(change
         query(**change)
 
 
-@pytest.mark.parametrize("change", ["cursor", "gap", "authority", "source", "heartbeat"])
+@pytest.mark.parametrize(
+    "change", ["cursor", "gap", "authority", "source", "heartbeat", "source_characters"]
+)
 def test_archive_page_cannot_misrepresent_its_prefix_or_observations(change):
     page = pure_page()
     raw = page.model_dump(mode="json")
@@ -103,8 +108,10 @@ def test_archive_page_cannot_misrepresent_its_prefix_or_observations(change):
         raw["quota_usage_available"] = True
     elif change == "source":
         raw["items"][0]["reference"]["fingerprint"] = "c" * 64
-    else:
+    elif change == "heartbeat":
         raw["items"][0]["reference"]["kind"] = "heartbeat"
+    else:
+        raw["source_characters"] = 0
     with pytest.raises(ValidationError):
         UsageArchivePage.model_validate(raw)
 
@@ -129,6 +136,27 @@ def test_source_pages_are_sequence_ordered_and_heartbeats_never_become_usage_sam
     first = service.page(query())
     second = service.page(query())
     assert first.fingerprint == second.fingerprint and first.read_at <= second.read_at
+
+
+def test_composed_source_budget_is_reported_and_rejected_before_body_loading(client, monkeypatch):
+    from aris.modules.vega.repo import VegaRepository
+
+    seed(client)
+    page = archive(client).page(query())
+    with sessionmaker(client.app.state.engine)() as session:
+        total = sum(
+            size for _, _, size in VegaRepository(session).usage_range_metadata("agent-a", 0, 5)
+        )
+    assert page.source_characters == total and total > 0
+
+    def reject(*args):
+        raise AssertionError("body loading must follow the caller source budget")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(VegaRepository, "usage_messages", reject)
+        with pytest.raises(DomainError) as error:
+            archive(client).page(query(source_character_budget=1))
+        assert error.value.code == "USAGE_ARCHIVE_TOO_LARGE"
 
 
 def test_high_sequence_and_later_arrival_do_not_advance_over_an_archive_gap(client):

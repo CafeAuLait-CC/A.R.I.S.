@@ -435,14 +435,30 @@ def test_postgresql_locked_original_source_is_retryable_and_then_recovers(attest
 
 
 def test_over_1024_observations_remain_one_open_residency_across_bounded_proof_restarts(consumer):
+    from aris.modules.lyra.ledger_schemas import UsagePostingContext
     from aris.modules.lyra.residency_evidence_service import ResidencyRunEvidenceService
+    from aris.modules.lyra.residency_partition_schemas import (
+        ResidencyPartitionMethod,
+        ResidencyPartitionReference,
+    )
+    from aris.modules.lyra.residency_partition_service import ResidencyPartitionService
     from aris.modules.lyra.residency_segment_service import ResidencySegmentService
     from aris.modules.lyra.residency_segments import ResidencySegmentQuery
+    from aris.modules.lyra.segment_store_schemas import RecordResidencySegments
+    from aris.modules.lyra.segment_store_service import ResidencySegmentStore
 
     state = consumer
     state.base -= timedelta(hours=8)
     points = 1030
     seed(state, times=tuple(10 + 15 * i for i in range(points)))
+    posting_context = UsagePostingContext(request_id="fixture-long-source-segments")
+    saved_segments = ResidencySegmentStore(
+        state.sessions,
+        ResidencySegmentService(
+            state.sessions, service(state), state.archive, state.observations, clock=state.now
+        ),
+        clock=state.now,
+    )
     parent, first_run, final, max_queries = None, None, None, 0
     local_segments = []
     for _ in range((points * 2 + 127) // 128):
@@ -461,16 +477,16 @@ def test_over_1024_observations_remain_one_open_residency_across_bounded_proof_r
         assert value.previous_id == parent and value.source_count <= 128
         parent = value.request.id
         local_segments.extend(
-            ResidencySegmentService(
-                state.sessions, service(state), state.archive, state.observations, clock=state.now
-            )
-            .analyze(
-                ResidencySegmentQuery(
-                    attestation_id=value.request.id,
-                    expected_attestation_fingerprint=value.fingerprint,
-                )
-            )
-            .segments
+            saved_segments.record(
+                posting_context,
+                RecordResidencySegments(
+                    id=uuid4(),
+                    source=ResidencySegmentQuery(
+                        attestation_id=value.request.id,
+                        expected_attestation_fingerprint=value.fingerprint,
+                    ),
+                ),
+            ).value.analysis.segments
         )
         max_queries = max(max_queries, len(statements))
         run = final.position.residency.open_runs[0]
@@ -506,4 +522,39 @@ def test_over_1024_observations_remain_one_open_residency_across_bounded_proof_r
     end = service(state).record(CONTEXT, incoming(state, closed)).attestation
     assert end.previous_id == parent and closed.closed_run_count == 1
     assert state.service.exact(closed.id).closed_runs[0].run == run
+    method = ResidencyPartitionMethod(max_intervals=128)
+    partition_service = ResidencyPartitionService(
+        state.sessions,
+        service(state),
+        rebuild(state),
+        saved_segments,
+        state.archive,
+        method=method,
+        clock=state.now,
+    )
+    parent_reference = ResidencyPartitionReference(
+        reference=reference(state, closed),
+        closing_attestation_id=end.request.id,
+        expected_closing_attestation_fingerprint=end.fingerprint,
+        expected_trace_configuration_fingerprint=state.config.fingerprint,
+        expected_method_fingerprint=method.fingerprint,
+        partition_index=0,
+    )
+    number = (run.intervals + method.max_intervals - 1) // method.max_intervals
+    partitions = [
+        partition_service.verify(parent_reference.model_copy(update={"partition_index": index}))
+        for index in range(number)
+    ]
+    assert (
+        number == 9 and sum(len(value.candidate.evidence) for value in partitions) == run.intervals
+    )
+    assert (
+        sum(value.candidate.observed_microseconds for value in partitions)
+        == run.observed_microseconds
+    )
+    assert all(
+        a.candidate.evidence[-1].current == b.candidate.evidence[0].previous
+        for a, b in zip(partitions, partitions[1:], strict=False)
+    )
+    assert all(len(value.sources) <= 1024 and value.source_count <= 8192 for value in partitions)
     assert counts(state)[-1] == 0 and not end.quota_usage_available

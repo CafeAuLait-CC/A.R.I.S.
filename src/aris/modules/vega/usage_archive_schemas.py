@@ -60,6 +60,9 @@ class UsageArchiveQuery(UsageFactContract):
     after_seq: int = Field(ge=0, lt=MAX_ARCHIVE_SEQ, strict=True)
     through_seq: int = Field(ge=1, le=MAX_ARCHIVE_SEQ, strict=True)
     limit: int = Field(default=128, ge=1, le=MAX_ARCHIVE_MESSAGES, strict=True)
+    source_character_budget: int = Field(
+        default=MAX_ARCHIVE_SOURCE_CHARACTERS, ge=1, le=MAX_ARCHIVE_SOURCE_CHARACTERS, strict=True
+    )
 
     @model_validator(mode="after")
     def increasing_range(self) -> "UsageArchiveQuery":
@@ -123,6 +126,7 @@ class UsageArchivePage(UsageFactContract):
     quota_usage_available: Literal[False] = False
     query: UsageArchiveQuery
     items: tuple[ArchivedUsageItem, ...] = Field(max_length=MAX_ARCHIVE_MESSAGES)
+    source_characters: int = Field(ge=0, le=MAX_ARCHIVE_SOURCE_CHARACTERS, strict=True)
     next_after_seq: int = Field(ge=0, le=MAX_ARCHIVE_SEQ, strict=True)
     state: Literal["range_end", "page_end", "gap"]
     missing_seq: int | None = Field(default=None, ge=1, le=MAX_ARCHIVE_SEQ, strict=True)
@@ -145,6 +149,9 @@ class UsageArchivePage(UsageFactContract):
         )
         if (
             len(self.items) > query.limit
+            or (bool(self.items) != (self.source_characters > 0))
+            or self.source_characters < len(self.items)
+            or self.source_characters > query.source_character_budget
             or self.next_after_seq != expected
             or expected > query.through_seq
             or self.state != state
