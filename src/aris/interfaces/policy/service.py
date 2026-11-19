@@ -11,14 +11,21 @@ from sqlalchemy.orm import Session
 from aris.core.access.schemas import AccessContract, AccessRequest, UserPrincipal
 from aris.core.commands.budgets import transaction_budget
 from aris.core.commands.schemas import ActorContext
+from aris.core.commands.service import bounded_json
 from aris.core.contracts import DomainError
 from aris.interfaces.commands.auth import BoundSubjectTokens
+from aris.interfaces.policy.drafts import (
+    PolicyDraftCommandSurface,
+    PolicyDraftInput,
+    PolicyDraftValidation,
+)
 from aris.modules.nova.policy_catalog_schemas import (
     PolicySourceComparisonQuery,
     PolicySourceListQuery,
     PolicySourcePage,
     PolicySourceReference,
     PolicySourceView,
+    RecordPolicyDraft,
     StoredPolicyComparison,
 )
 from aris.modules.nova.policy_catalog_service import (
@@ -26,7 +33,9 @@ from aris.modules.nova.policy_catalog_service import (
     GLOBAL_SCOPE,
     PolicyCatalogService,
 )
+from aris.modules.nova.policy_review import policy_difference
 from aris.modules.nova.policy_schemas import PolicyName
+from aris.modules.nova.policy_source import compile_policy, parse_policy_source
 
 Result = TypeVar("Result", bound=BaseModel)
 
@@ -34,6 +43,7 @@ Result = TypeVar("Result", bound=BaseModel)
 class PolicyCatalogSession(AccessContract):
     actor: UserPrincipal
     policy_names: tuple[PolicyName, ...] = Field(min_length=1, max_length=32)
+    draft_editing_available: bool = False
 
 
 class PolicyDetailInput(AccessContract):
@@ -47,12 +57,20 @@ class PolicyReadSurface:
         catalog: PolicyCatalogService,
         authenticator: BoundSubjectTokens,
         policy_names: tuple[str, ...],
+        *,
+        draft_commands: PolicyDraftCommandSurface | None = None,
     ) -> None:
         if not 1 <= len(policy_names) <= 32 or len(set(policy_names)) != len(policy_names):
             raise ValueError("policy interface requires explicit unique policy names")
         for name in policy_names:
             PolicySourceReference(name=name, version=1)
+        if draft_commands is not None and (
+            draft_commands.authentication is not authenticator
+            or draft_commands.policy_names != policy_names
+        ):
+            raise ValueError("policy reads and draft commands require one user and name boundary")
         self.catalog, self.authenticator, self.policy_names = catalog, authenticator, policy_names
+        self.draft_commands = draft_commands
 
     def _run(
         self,
@@ -97,7 +115,9 @@ class PolicyReadSurface:
             authorization,
             request_id,
             lambda session, actor, principal: PolicyCatalogSession(
-                actor=principal, policy_names=self.policy_names
+                actor=principal,
+                policy_names=self.policy_names,
+                draft_editing_available=self.draft_commands is not None,
             ),
         )
 
@@ -141,3 +161,50 @@ class PolicyReadSurface:
             ),
             names=(query.before.name, query.after.name),
         )
+
+    def validate_draft(
+        self, authorization: str | None, request_id: str, query: PolicyDraftInput
+    ) -> PolicyDraftValidation:
+        if self.draft_commands is None:
+            raise DomainError("POLICY_DRAFTS_NOT_CONFIGURED", "Draft editing is not enabled", 503)
+
+        def validate(
+            session: Session, actor: ActorContext, principal: UserPrincipal
+        ) -> PolicyDraftValidation:
+            try:
+                source = parse_policy_source(query.source_text.encode("utf-8"))
+                compiled = compile_policy(source)
+                draft = RecordPolicyDraft(source=compiled.source, reason=query.reason)
+            except ValueError:
+                raise DomainError("VALIDATION_ERROR", "Invalid policy draft", 422) from None
+            self._name(compiled.source.metadata.name)
+            inline_bytes = len(bounded_json(draft.model_dump(mode="json"), 16384))
+            reference = PolicySourceReference(
+                name=compiled.source.metadata.name, version=compiled.source.metadata.version
+            )
+            existing = None
+            try:
+                existing = self.catalog.exact_in_transaction(session, actor, reference)
+            except DomainError as error:
+                if error.code != "NOT_FOUND":
+                    raise
+            if existing is not None and existing.fingerprint != compiled.fingerprint:
+                raise DomainError("CONFLICT", "This version already contains different rules", 409)
+            difference = None
+            if query.base is not None:
+                self._name(query.base.name)
+                if query.base.name != reference.name:
+                    raise DomainError("VALIDATION_ERROR", "Draft and base policy names differ", 422)
+                base = self.catalog.exact_in_transaction(session, actor, query.base)
+                if base.fingerprint != query.expected_base_fingerprint:
+                    raise DomainError("CONFLICT", "Base source fingerprint differs", 409)
+                difference = policy_difference(compile_policy(base.source), compiled)
+            return PolicyDraftValidation(
+                draft=draft,
+                fingerprint=compiled.fingerprint,
+                inline_bytes=inline_bytes,
+                difference=difference,
+                existing_equivalent=existing is not None,
+            )
+
+        return self._run(authorization, request_id, validate)

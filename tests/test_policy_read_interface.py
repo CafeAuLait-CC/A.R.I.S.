@@ -59,6 +59,11 @@ def test_policy_browser_routes_page_versions_show_verified_details_and_compare_w
         info = client.post("/internal/policy/session", headers=headers).json()
         assert info["actor"]["user_id"] == state[3]["alice"]
         assert info["policy_names"] == ["fixture-only", "empty-policy"]
+        assert not info["draft_editing_available"]
+        assert (
+            client.post("/internal/policy/drafts/validate", headers=headers, json={}).status_code
+            == 404
+        )
         first = client.post(
             "/internal/policy/sources", headers=headers, json={"name": "fixture-only", "limit": 2}
         ).json()

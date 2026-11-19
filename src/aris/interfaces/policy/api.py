@@ -7,6 +7,7 @@ from starlette.responses import HTMLResponse, JSONResponse, Response
 
 from aris.core.contracts import DomainError
 from aris.interfaces.commands.api import authorization, bounded_input
+from aris.interfaces.policy.drafts import PolicyDraftInput
 from aris.interfaces.policy.service import PolicyDetailInput, PolicyReadSurface
 from aris.modules.nova.policy_catalog_schemas import (
     PolicySourceComparisonQuery,
@@ -25,6 +26,18 @@ PAGE_HEADERS = {
 
 def build_router(service: PolicyReadSurface) -> APIRouter:
     router = APIRouter(prefix="/internal/policy", tags=["policy-source-review"])
+
+    if service.draft_commands is not None:
+
+        @router.post("/drafts/validate")
+        async def validate_draft(request: Request) -> JSONResponse:
+            if request.query_params:
+                raise DomainError("VALIDATION_ERROR", "Unexpected draft query parameters", 422)
+            query = await bounded_input(request, PolicyDraftInput)
+            result = await run_in_threadpool(
+                service.validate_draft, authorization(request), request.state.request_id, query
+            )
+            return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
 
     @router.post("/session")
     async def session(request: Request) -> JSONResponse:
@@ -73,7 +86,9 @@ def build_router(service: PolicyReadSurface) -> APIRouter:
         return HTMLResponse((ASSETS / "index.html").read_text(), headers=PAGE_HEADERS)
 
     @router.get("/ui/assets/{name}")
-    def asset(name: Literal["policy.js", "policy-scenarios.js", "policy.css"]) -> Response:
+    def asset(
+        name: Literal["policy.js", "policy-scenarios.js", "policy-editor.js", "policy.css"],
+    ) -> Response:
         return Response(
             (ASSETS / name).read_bytes(),
             headers=PAGE_HEADERS,

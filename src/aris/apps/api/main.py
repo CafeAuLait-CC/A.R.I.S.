@@ -95,6 +95,11 @@ def create_app(
     if policy_sources is not None:
         if config.environment not in {"development", "test"}:
             raise ValueError("bound policy credentials are development-only")
+        if (
+            policy_sources.draft_commands is not None
+            and policy_sources.draft_commands is not user_commands
+        ):
+            raise ValueError("policy editing requires the same authenticated command surface")
         policy_sources.authenticator.ensure_distinct_credentials(
             [
                 config.read_token,
