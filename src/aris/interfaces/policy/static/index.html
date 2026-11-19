@@ -70,7 +70,7 @@
           <section id="material-detail" class="material-detail" hidden aria-live="polite"></section>
           <section id="material-comparison-panel" class="material-comparison-panel" hidden aria-labelledby="material-comparison-heading">
             <h3 id="material-comparison-heading">重演已保存案例</h3><p class="muted">沿用原参考时间和完整假设，比较同名已加载版本。保存结果、原版本重演和目标版本重演分别呈现。</p>
-            <div class="material-comparison-controls"><label>目标版本<select id="material-comparison-target"></select></label><button id="material-comparison-run" type="button" class="secondary">重演并比较案例</button></div>
+            <div class="material-comparison-controls"><label>目标版本<select id="material-comparison-target"></select></label><button id="material-comparison-run" type="button" class="secondary">重演并比较案例</button><button id="material-comparison-export" type="button" class="secondary" disabled>导出比较报告</button></div>
             <div id="material-comparison-results" hidden><p id="material-comparison-summary"></p><details class="source"><summary>原版本与目标版本的来源差异</summary><p id="material-replay-diff-note" class="muted"></p><div id="material-replay-diff" class="table-scroll"></div></details><div class="table-scroll"><table><thead><tr><th>案例</th><th>保存时结果</th><th>原版本重演</th><th>目标版本重演</th></tr></thead><tbody id="material-comparison-rows"></tbody></table></div><label class="material-comparison-picker">查看案例<select id="material-comparison-case"></select></label><div id="material-comparison-detail" class="material-comparison-detail"></div><details class="source"><summary>重演实现与来源依据</summary><pre id="material-comparison-evidence"></pre></details></div>
           </section>
         </section>

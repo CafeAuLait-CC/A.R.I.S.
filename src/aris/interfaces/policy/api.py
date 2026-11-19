@@ -9,6 +9,7 @@ from aris.core.contracts import DomainError
 from aris.interfaces.commands.api import authorization, bounded_input
 from aris.interfaces.policy.drafts import PolicyDraftInput
 from aris.interfaces.policy.history import PolicyHistoryAssessmentInput, PolicyHistoryWindowsInput
+from aris.interfaces.policy.material_report import REPORT_CSP, comparison_report
 from aris.interfaces.policy.materials import (
     PolicyMaterialComparisonInput,
     PolicyMaterialDetailInput,
@@ -47,6 +48,25 @@ def build_router(service: PolicyReadSurface) -> APIRouter:
                 service.materials_compare, authorization(request), request.state.request_id, query
             )
             return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
+
+        @router.post("/materials/report")
+        async def materials_report(request: Request) -> HTMLResponse:
+            if request.query_params:
+                raise DomainError("VALIDATION_ERROR", "Unexpected material query parameters", 422)
+            query = await bounded_input(request, PolicyMaterialComparisonInput)
+            result = await run_in_threadpool(
+                service.materials_compare, authorization(request), request.state.request_id, query
+            )
+            return HTMLResponse(
+                comparison_report(result),
+                headers={
+                    **PAGE_HEADERS,
+                    "Content-Security-Policy": REPORT_CSP + "; frame-ancestors 'none'",
+                    "Content-Disposition": (
+                        'attachment; filename="aris-policy-case-comparison.html"'
+                    ),
+                },
+            )
 
     if (
         service.draft_commands is not None

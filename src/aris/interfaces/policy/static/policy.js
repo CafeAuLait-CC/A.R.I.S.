@@ -14,7 +14,7 @@
     const current=generation;
     const url=options.commands ? `/internal/commands${path}` : `/internal/policy/${path}`;
     const response=await fetch(url,{method:options.method || 'POST',cache:'no-store',headers:{Authorization:`Bearer ${token}`,...(input?{'Content-Type':'application/json'}:{}),...(options.key?{'Idempotency-Key':options.key}:{})},body:input?JSON.stringify(input):undefined});
-    let result;try{result=await response.json();}catch{result={error:{code:'UNAVAILABLE'}};}
+    let result;if(options.download && response.ok){result=await response.blob();}else{try{result=await response.json();}catch{result={error:{code:'UNAVAILABLE'}};}}
     if(current!==generation){const stale=new Error('Request no longer belongs to this connection');stale.stale=true;throw stale;}
     if(!response.ok){const code=result.error?.code || result.error_code;const errors={PERMISSION_DENIED:'没有相应的草稿权限，或访问凭据已失效。',NOT_FOUND:'这个版本暂时不可用，请刷新目录。',CONFLICT:'来源或版本已变化，请检查版本号后重新校验。',VALIDATION_ERROR:'请检查策略 JSON、版本号、保存原因或假设输入。',CONFIRMATION_EXPIRED:'确认已过期，请刷新命令状态。',EXECUTION_EXPIRED:'执行期限已过，请刷新命令状态。',QUEUE_FULL:'保存队列暂时已满，请保留原请求稍后重试。'};const error=new Error(errors[code]||'策略服务暂时不可用，请稍后重试。');error.code=code;throw error;}
     return result;

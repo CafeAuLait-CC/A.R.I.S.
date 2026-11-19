@@ -38,7 +38,7 @@ def material_comparison(policy_surface, materials):
     proposed = request(
         materials,
         scenarios=(
-            scenario(name="two-gpus", projected_concurrent_gpus=2),
+            scenario(name='<script>alert("case")</script>', projected_concurrent_gpus=2),
             scenario(name="large-usage", used_microseconds=(1 << 44) + 1),
         ),
     )
@@ -81,6 +81,7 @@ def test_stored_case_replay_is_opt_in_exact_and_read_only(material_comparison, s
             ).status_code
             == 404
         )
+        assert client.post("/internal/policy/materials/report", headers=HEADERS).status_code == 404
     baseline = counts(materials)
     with client_for(surface, settings) as client:
         assert (
@@ -135,6 +136,32 @@ def test_stored_case_replay_is_opt_in_exact_and_read_only(material_comparison, s
             ),
         ).json()
         assert str((1 << 44) + 1) in detail["raw_scenarios"][1]
+        report = client.post(
+            "/internal/policy/materials/report", headers=HEADERS, json=query.model_dump(mode="json")
+        )
+        assert report.status_code == 200 and report.headers["cache-control"] == "no-store"
+        assert report.headers["content-type"].startswith("text/html")
+        assert report.headers["content-disposition"] == (
+            'attachment; filename="aris-policy-case-comparison.html"'
+        )
+        assert "default-src 'none'" in report.headers["content-security-policy"]
+        assert "script-src" not in report.headers["content-security-policy"]
+        assert "&lt;script&gt;alert(&quot;" in report.text and "<script>" not in report.text
+        assert "<script" not in report.text and "https://" not in report.text
+        assert str(expected.numerator) in report.text and str(expected.denominator) in report.text
+        assert TOKEN not in report.text and "Bearer " not in report.text
+        assert value["material"]["fingerprint"] in report.text
+        assert "fixture-constraints-a" in report.text and "fixture-replay-b" in report.text
+        assert "保存结果重演一致 2/2" in report.text and "目标决策变化 1 个" in report.text
+        assert "未评估当前真实依赖，未批准或发布" in report.text
+        assert (
+            client.post(
+                "/internal/policy/materials/report?extra=1",
+                headers=HEADERS,
+                json=query.model_dump(mode="json"),
+            ).status_code
+            == 422
+        )
     assert counts(materials) == baseline
 
 
@@ -206,6 +233,8 @@ def test_stored_case_replay_rejects_substituted_sources_and_identity_change(
         monkeypatch.setattr(surface.catalog, "compare_sources_in_transaction", revoke)
         response = client.post("/internal/policy/materials/compare", headers=HEADERS, json=value)
         assert response.status_code == 403 and "raw_scenario" not in response.text
+        report = client.post("/internal/policy/materials/report", headers=HEADERS, json=value)
+        assert report.status_code == 403 and "<html" not in report.text
 
 
 def test_postgresql_stored_case_replay_read_only_and_lock_recovery(material_comparison):
