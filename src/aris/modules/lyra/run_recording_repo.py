@@ -2,10 +2,12 @@
 
 import hashlib
 import json
+from datetime import datetime
 from uuid import UUID
 
 from pydantic import TypeAdapter
-from sqlalchemy import select, text
+from sqlalchemy import cast, exists, func, select, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from aris.core.contracts import DomainError
@@ -85,6 +87,40 @@ class ClosedRunRecordingRepository:
         if result is not None and not isinstance(result, StoredClosedRunRecording):
             raise DomainError("CONFLICT", "Recording operation uses a different request kind", 409)
         return result
+
+    def for_entry(
+        self,
+        *,
+        node_id: str,
+        run_id: str,
+        entry_id: UUID,
+        trace_fingerprint: str,
+        recording_fingerprint: str,
+        read_at: datetime,
+    ) -> StoredRunRecording | None:
+        """Find a closing receipt, including aliases that reused an earlier measurement."""
+        column = ClosedRunRecordingRow.canonical_record
+        if self.session.get_bind().dialect.name == "postgresql":
+            contains_entry = cast(column, JSONB).contains({"ledger": {"entries": [str(entry_id)]}})
+        else:
+            values = func.json_each(column, "$.ledger.entries").table_valued("value")
+            contains_entry = exists(
+                select(1).select_from(values).where(values.c.value == str(entry_id))
+            )
+        id = self.session.scalar(
+            select(ClosedRunRecordingRow.id)
+            .where(
+                ClosedRunRecordingRow.node_id == node_id,
+                ClosedRunRecordingRow.run_id == run_id,
+                ClosedRunRecordingRow.created_at <= read_at,
+                column.contains(trace_fingerprint, autoescape=True),
+                column.contains(recording_fingerprint, autoescape=True),
+                contains_entry,
+            )
+            .order_by(ClosedRunRecordingRow.created_at, ClosedRunRecordingRow.id)
+            .limit(1)
+        )
+        return self.get_any(UUID(id)) if id is not None else None
 
     def get_partition(self, operation_id: UUID) -> StoredPartitionRecording | None:
         result = self.get_any(operation_id)

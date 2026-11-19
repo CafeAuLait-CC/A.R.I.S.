@@ -1,0 +1,267 @@
+"""Classify sampled edges against committed closed recordings and identity evidence."""
+
+from datetime import datetime
+from uuid import UUID
+
+from aris.modules.lyra.coverage_replay import CoverageEdge, CoverageReplay
+from aris.modules.lyra.coverage_schemas import (
+    CoverageIdentity,
+    CoverageRecordingReference,
+    ProcessingCoverageAnalysis,
+    ProcessingCoverageCell,
+    ProcessingCoverageConfiguration,
+    ProcessingCoverageRequest,
+    processing_coverage_fingerprint,
+)
+from aris.modules.lyra.ledger_schemas import (
+    PostedMeasurement,
+    ReversedMeasurement,
+    UsageLedgerEntry,
+)
+from aris.modules.lyra.partition_recording_schemas import StoredPartitionRecording
+from aris.modules.lyra.recorded_usage import _active_prefix
+from aris.modules.lyra.residency_state import ResidencyRun
+from aris.modules.lyra.run_recording_schemas import StoredClosedRunRecording
+from aris.modules.lyra.trace_attestation_schemas import StoredTraceAttestation
+
+type CoverageRecording = StoredClosedRunRecording | StoredPartitionRecording
+
+
+def recording_parent(value: CoverageRecording) -> ResidencyRun:
+    return (
+        value.proof.run if isinstance(value, StoredClosedRunRecording) else value.proof.parent_run
+    )
+
+
+def recording_reference(
+    value: CoverageRecording,
+    entry: UsageLedgerEntry,
+    config: ProcessingCoverageConfiguration,
+    head_entries: tuple[UsageLedgerEntry, ...],
+) -> CoverageRecordingReference | None:
+    parent = recording_parent(value)
+    trace_fp = (
+        value.proof.configuration_fingerprint
+        if isinstance(value, StoredClosedRunRecording)
+        else value.request.partition.expected_trace_configuration_fingerprint
+    )
+    receipt = value.ledger
+    if (
+        trace_fp != config.trace.fingerprint
+        or value.request.expected_recording_configuration_fingerprint
+        != config.recording.fingerprint
+        or (parent.first.agent_id, parent.first.node_id)
+        != (config.trace.agent_id, config.trace.node_id)
+        or parent.rule_fingerprint != config.recording.timing_fingerprint
+        or entry.id not in receipt.entries
+        or receipt.head.revision > len(head_entries)
+        or receipt.head.revision == 0
+        or head_entries[receipt.head.revision - 1].fingerprint != receipt.head.fingerprint
+        or receipt.entry_fingerprints[receipt.entries.index(entry.id)] != entry.fingerprint
+    ):
+        return None
+    measured = entry.details.measurement
+    first, last = (
+        (parent.first, parent.last)
+        if isinstance(value, StoredClosedRunRecording)
+        else (
+            value.proof.candidate.evidence[0].previous,
+            value.proof.candidate.evidence[-1].current,
+        )
+    )
+    if (
+        measured.gpu_uuid,
+        measured.start_at,
+        measured.end_at,
+        measured.model,
+        measured.timing_fingerprint,
+    ) != (
+        parent.gpu_uuid,
+        first.compute_observed_at,
+        last.compute_observed_at,
+        parent.model,
+        parent.rule_fingerprint,
+    ):
+        return None
+    return CoverageRecordingReference(
+        id=value.request.id,
+        fingerprint=value.fingerprint,
+        run_id=parent.id,
+        proof_fingerprint=value.proof.fingerprint,
+        entry_id=entry.id,
+        entry_fingerprint=entry.fingerprint,
+    )
+
+
+def processing_coverage(
+    request: ProcessingCoverageRequest,
+    configuration: ProcessingCoverageConfiguration,
+    attestation: StoredTraceAttestation,
+    replay: CoverageReplay,
+    entries: tuple[UsageLedgerEntry, ...],
+    recordings: tuple[CoverageRecording, ...],
+    identities: tuple[CoverageIdentity, ...],
+    *,
+    read_at: datetime,
+) -> ProcessingCoverageAnalysis:
+    active = _active_prefix(request.ledger, entries, read_at)
+    by_identity = {value.run.id: index for index, value in enumerate(identities)}
+    refs: list[CoverageRecordingReference] = []
+    by_recording: dict[tuple[str, UUID], int] = {}
+    for recording in recordings:
+        for entry in active:
+            if entry.id not in recording.ledger.entries:
+                continue
+            ref = recording_reference(recording, entry, configuration, entries)
+            if ref is not None and (ref.run_id, entry.id) not in by_recording:
+                by_recording[(ref.run_id, entry.id)] = len(refs)
+                refs.append(ref)
+    cells = []
+    for gpu_uuid in configuration.gpu_uuids:
+        edges = [
+            edge
+            for edge in replay.edges
+            if edge.gpu.gpu_uuid == gpu_uuid
+            and edge.start_at < request.end_at
+            and edge.end_at > request.start_at
+        ]
+        current = [
+            entry
+            for entry in active
+            if entry.details.measurement.gpu_uuid == gpu_uuid
+            and entry.details.measurement.start_at < request.end_at
+            and entry.details.measurement.end_at > request.start_at
+        ]
+        reversals = [
+            entry.details.measurement
+            for entry in entries
+            if isinstance(entry.details, ReversedMeasurement)
+            and entry.details.measurement.gpu_uuid == gpu_uuid
+        ]
+        boundaries = {request.start_at, request.end_at}
+        for window_edge in edges:
+            boundaries.update(
+                (
+                    max(request.start_at, window_edge.start_at),
+                    min(request.end_at, window_edge.end_at),
+                )
+            )
+        for entry in current:
+            boundaries.update(
+                (
+                    max(request.start_at, entry.details.measurement.start_at),
+                    min(request.end_at, entry.details.measurement.end_at),
+                )
+            )
+        windows = [(value.start_at, value.end_at) for value in replay.hazards]
+        windows.extend((value.start_at, value.end_at) for value in reversals)
+        for window_start, window_end in windows:
+            if window_start < request.end_at and window_end > request.start_at:
+                boundaries.update(
+                    (max(request.start_at, window_start), min(request.end_at, window_end))
+                )
+        if request.start_at < configuration.recording.recording_start_at < request.end_at:
+            boundaries.add(configuration.recording.recording_start_at)
+        ordered = sorted(boundaries)
+        for start, end in zip(ordered, ordered[1:], strict=False):
+            candidates = [edge for edge in edges if edge.start_at <= start and edge.end_at >= end]
+            overlaps = [
+                entry
+                for entry in current
+                if entry.details.measurement.start_at < end
+                and entry.details.measurement.end_at > start
+            ]
+            state, reason = "uncovered", "SOURCE_BOUNDARY_NOT_OBSERVED"
+            edge: CoverageEdge | None = candidates[0] if len(candidates) == 1 else None
+            owner = None
+            recording_index = None
+            identity_index = by_identity.get(edge.run.id) if edge and edge.run else None
+            if start < configuration.recording.recording_start_at:
+                reason = "BEFORE_RECORDING_START"
+            elif any(value.start_at < end and value.end_at > start for value in replay.hazards):
+                state, reason = "unknown", "SOURCE_TIME_OR_QUALITY_UNCERTAIN"
+            elif len(candidates) > 1:
+                state, reason = "unknown", "SOURCE_TIME_OVERLAP"
+            elif edge is not None:
+                state, reason = "unknown", edge.gpu.reason
+                if any(edge.start_at <= value <= edge.end_at for value in replay.invalid_times):
+                    reason = "INVALID_SOURCE_OBSERVATION"
+                elif edge.gpu.state == "observed_idle":
+                    if overlaps or any(
+                        value.start_at < end and value.end_at > start for value in reversals
+                    ):
+                        reason = "LEDGER_SOURCE_CONFLICT"
+                    else:
+                        state, reason = "observed_idle", "NO_COMPUTE_APPS_AT_ENDPOINTS"
+                elif edge.gpu.state == "stable_owner":
+                    identity = (
+                        identities[identity_index].identity if identity_index is not None else None
+                    )
+                    if identity is None or identity.status != "resolved":
+                        reason = "IDENTITY_UNRESOLVED"
+                    elif not overlaps:
+                        reason = (
+                            "REVERSED_AWAITING_REVIEW"
+                            if any(
+                                value.start_at < end and value.end_at > start for value in reversals
+                            )
+                            else "RESIDENCY_NOT_RECORDED"
+                        )
+                    else:
+                        entry = overlaps[0]
+                        measurement = entry.details.measurement
+                        assert isinstance(entry.details, PostedMeasurement)
+                        reference_index = (
+                            by_recording.get((edge.run.id, entry.id)) if edge.run else None
+                        )
+                        if (
+                            measurement.owner_id != identity.user_id
+                            or measurement.model != edge.gpu.model
+                            or measurement.timing_fingerprint
+                            != configuration.recording.timing_fingerprint
+                        ):
+                            reason = "LEDGER_IDENTITY_OR_METHOD_CONFLICT"
+                        elif reference_index is None:
+                            reason = "CLOSED_RECORDING_NOT_VERIFIED"
+                        else:
+                            state, reason = "recorded", "COMMITTED_CLOSED_RECORDING"
+                            owner, recording_index = identity.user_id, reference_index
+            cells.append(
+                ProcessingCoverageCell(
+                    gpu_uuid=gpu_uuid,
+                    start_at=start,
+                    end_at=end,
+                    state=state,
+                    reason=reason,
+                    previous=edge.previous if edge else None,
+                    current=edge.current if edge else None,
+                    run_id=edge.run.id if edge and edge.run else None,
+                    identity_index=identity_index,
+                    recording_index=recording_index,
+                    owner_id=owner,
+                )
+            )
+    known = sum(value.microseconds for value in cells if value.state == "recorded")
+    unknown = sum(value.microseconds for value in cells if value.state == "unknown")
+    uncovered = sum(value.microseconds for value in cells if value.state == "uncovered")
+    result = ProcessingCoverageAnalysis.model_construct(
+        request=request,
+        configuration=configuration,
+        attestation=attestation,
+        observations=replay.observations,
+        hazards=replay.hazards,
+        invalid_observation_times=replay.invalid_times,
+        identities=identities,
+        recordings=tuple(refs),
+        cells=tuple(cells),
+        identity_revision=identities[0].identity.directory_revision if identities else None,
+        known_recorded_microseconds=known,
+        unknown_gpu_microseconds=unknown,
+        uncovered_gpu_microseconds=uncovered,
+        complete_within_source_window=unknown == uncovered == 0,
+        read_at=read_at,
+        fingerprint="0" * 64,
+    )
+    return ProcessingCoverageAnalysis.model_validate(
+        {**result.model_dump(mode="json"), "fingerprint": processing_coverage_fingerprint(result)}
+    )

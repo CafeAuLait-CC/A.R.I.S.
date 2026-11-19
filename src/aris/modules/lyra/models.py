@@ -19,6 +19,31 @@ from sqlalchemy.orm import Mapped, mapped_column
 from aris.core.db import Base
 
 
+class UsageCoverageManifestRow(Base):
+    __tablename__ = "usage_coverage_manifests"
+    __table_args__ = (
+        Index("ix_usage_coverage_source", "consumer_id", "attestation_id"),
+        CheckConstraint("ledger_revision>=0 AND end_at>start_at", name="ck_usage_coverage_range"),
+        CheckConstraint(
+            "length(fingerprint)=64 AND length(configuration_fingerprint)=64 "
+            "AND length(canonical_manifest)>0 AND length(canonical_manifest)<=8388608",
+            name="ck_usage_coverage_size",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    event_id: Mapped[str] = mapped_column(ForeignKey("domain_events.event_id"), unique=True)
+    attestation_id: Mapped[str] = mapped_column(ForeignKey("usage_trace_attestations.id"))
+    consumer_id: Mapped[str] = mapped_column(String(128))
+    node_id: Mapped[str] = mapped_column(String(128))
+    configuration_fingerprint: Mapped[str] = mapped_column(String(64))
+    ledger_revision: Mapped[int] = mapped_column(BigInteger)
+    start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    canonical_manifest: Mapped[str] = mapped_column(Text)
+
+
 class UsageRecordingPipelineBatchRow(Base):
     __tablename__ = "usage_pipeline_batches"
     __table_args__ = (
@@ -410,6 +435,7 @@ class UsageTraceCursorRow(Base):
 class ClosedRunRecordingRow(Base):
     __tablename__ = "usage_run_recordings"
     __table_args__ = (
+        Index("ix_usage_run_recording_node_run", "node_id", "run_id"),
         CheckConstraint("length(fingerprint) = 64", name="ck_usage_run_recording_fingerprint"),
         CheckConstraint("length(run_id) = 64", name="ck_usage_run_recording_run"),
         CheckConstraint(
