@@ -85,6 +85,13 @@ class NodeUserHistoryService:
         with self.sessions() as session:
             return self.resolve_in_transaction(session, query)
 
+    def revision_in_transaction(self, session: Session) -> int | None:
+        """Capture an identity-history boundary without inventing a node-user lookup."""
+        revision = MappingHistoryRepository(session).revision()
+        if revision is not None and revision < 1:
+            raise DomainError("DEPENDENCY_UNAVAILABLE", "Identity history revision is invalid", 503)
+        return revision
+
     def resolve_many(self, request: HistoricalNodeUserBatch) -> HistoricalNodeUserBatchResult:
         with self.sessions() as session:
             return self.resolve_many_in_transaction(session, request)

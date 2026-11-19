@@ -19,6 +19,28 @@ from sqlalchemy.orm import Mapped, mapped_column
 from aris.core.db import Base
 
 
+class UsageWindowSnapshotRow(Base):
+    __tablename__ = "usage_window_snapshots"
+    __table_args__ = (
+        Index("ix_usage_window_node_time", "node_id", "start_at", "end_at"),
+        CheckConstraint("end_at>start_at", name="ck_usage_window_range"),
+        CheckConstraint(
+            "length(fingerprint)=64 AND length(canonical_snapshot)>0 "
+            "AND length(canonical_snapshot)<=8388608",
+            name="ck_usage_window_size",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    event_id: Mapped[str] = mapped_column(ForeignKey("domain_events.event_id"), unique=True)
+    node_id: Mapped[str] = mapped_column(String(128))
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    canonical_snapshot: Mapped[str] = mapped_column(Text)
+
+
 class UsageCoverageManifestRow(Base):
     __tablename__ = "usage_coverage_manifests"
     __table_args__ = (
