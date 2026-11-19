@@ -96,6 +96,7 @@ class UsageSession(AccessContract):
     saved_snapshots_available: bool = False
     weekly_reports_available: bool = False
     weekly_plans_available: bool = False
+    group_reports_available: bool = False
 
 
 class UsageHistoryPage(AccessContract):
@@ -218,6 +219,7 @@ class UsageHistorySurface:
                     saved_snapshots_available=self.saved_windows is not None,
                     weekly_reports_available=self.weekly_reports is not None,
                     weekly_plans_available=self.weekly_plans is not None,
+                    group_reports_available=len(nodes) > 1,
                 )
         except DBAPIError:
             raise DomainError(

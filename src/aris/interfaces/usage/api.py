@@ -7,6 +7,7 @@ from starlette.responses import HTMLResponse, JSONResponse, Response
 
 from aris.core.contracts import DomainError
 from aris.interfaces.commands.api import authorization, bounded_input
+from aris.interfaces.usage.group_service import GroupUsageInput, group_usage
 from aris.interfaces.usage.saved_service import SavedUsageQuery, SavedUsageRead, saved_usage
 from aris.interfaces.usage.service import UsageHistoryInput, UsageHistorySurface
 from aris.interfaces.usage.weekly_service import (
@@ -29,6 +30,40 @@ PAGE_HEADERS = {
 
 def build_router(service: UsageHistorySurface) -> APIRouter:
     router = APIRouter(prefix="/internal/usage", tags=["recorded-usage"])
+
+    @router.post("/groups/query")
+    @router.post("/groups/report")
+    @router.post("/groups/csv")
+    async def groups(request: Request) -> Response:
+        if request.query_params:
+            raise DomainError("VALIDATION_ERROR", "Unexpected selected-node query parameters", 422)
+        selection = await bounded_input(request, GroupUsageInput)
+        route = request.url.path.rsplit("/", 1)[-1]
+        output: Literal["page", "html", "csv"] = (
+            "page" if route == "query" else "html" if route == "report" else "csv"
+        )
+        result = await run_in_threadpool(
+            group_usage,
+            service,
+            authorization(request),
+            request.state.request_id,
+            selection,
+            output=output,
+        )
+        if isinstance(result, bytes):
+            extension = "html" if output == "html" else "csv"
+            filename = f"aris-selected-node-summary.{extension}"
+            return Response(
+                result,
+                media_type="text/html; charset=utf-8"
+                if output == "html"
+                else "text/csv; charset=utf-8",
+                headers={
+                    **PAGE_HEADERS,
+                    "Content-Disposition": f'attachment; filename="{filename}"',
+                },
+            )
+        return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
 
     @router.post("/weekly/plans")
     async def plans(request: Request) -> JSONResponse:
@@ -158,7 +193,9 @@ def build_router(service: UsageHistorySurface) -> APIRouter:
 
     @router.get("/ui/assets/{name}")
     def asset(
-        name: Literal["usage.js", "usage-saved.js", "usage-weekly.js", "usage.css"],
+        name: Literal[
+            "usage.js", "usage-saved.js", "usage-weekly.js", "usage-group.js", "usage.css"
+        ],
     ) -> Response:
         return Response(
             (ASSETS / name).read_bytes(),

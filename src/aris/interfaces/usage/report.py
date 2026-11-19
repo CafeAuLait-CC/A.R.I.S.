@@ -6,7 +6,7 @@ from pathlib import Path
 from string import Template
 from zoneinfo import ZoneInfo
 
-from aris.modules.lyra.usage_history import UsageHistory, usage_gpu_summary
+from aris.modules.lyra.usage_history import UsageHistory, UsageHistoryDay, usage_gpu_summary
 
 
 def hours(value: int) -> str:
@@ -14,19 +14,19 @@ def hours(value: int) -> str:
     return f"{amount:,.3f}".rstrip("0").rstrip(".")
 
 
-def daily_chart(report: UsageHistory) -> str:
+def daily_chart(days: tuple[UsageHistoryDay, ...]) -> str:
     width, left, right, top, bottom, height = 760, 40, 8, 12, 26, 180
     plot = height - top - bottom
-    maximum = max(1.0, *(day.recorded_microseconds / 3600000000 for day in report.days))
-    slot = (width - left - right) / max(1, len(report.days))
+    maximum = max(1.0, *(day.recorded_microseconds / 3600000000 for day in days))
+    slot = (width - left - right) / max(1, len(days))
     lines = []
     for step in range(3):
         y = top + plot * (1 - step / 2)
         label = f"{maximum * step / 2:.2f}".rstrip("0").rstrip(".")
         lines.append(f'<line x1="{left}" x2="{width - right}" y1="{y}" y2="{y}" class="axis"/>')
         lines.append(f'<text x="{left - 7}" y="{y + 3}" text-anchor="end">{label}</text>')
-    stride = max(1, (len(report.days) + 7) // 8)
-    for index, day in enumerate(report.days):
+    stride = max(1, (len(days) + 7) // 8)
+    for index, day in enumerate(days):
         bar_height = day.recorded_microseconds / 3600000000 / maximum * plot
         x, y = left + (index + 0.18) * slot, top + plot - bar_height
         label = f"{day.date.isoformat()} · {hours(day.recorded_microseconds)} GPU 小时"
@@ -34,7 +34,7 @@ def daily_chart(report: UsageHistory) -> str:
             f'<rect x="{x:.2f}" y="{y:.2f}" width="{slot * 0.64:.2f}" '
             f'height="{bar_height:.2f}" rx="2" class="bar"><title>{escape(label)}</title></rect>'
         )
-        if index % stride == 0 or index == len(report.days) - 1:
+        if index % stride == 0 or index == len(days) - 1:
             lines.append(
                 f'<text x="{left + (index + 0.5) * slot:.2f}" y="{height - 5}" '
                 'text-anchor="middle">'
@@ -87,7 +87,7 @@ def history_report(report: UsageHistory, labels: dict[str, str]) -> bytes:
         gpu_count=report.gpu_count,
         segment_count=report.segment_count,
         empty=empty,
-        chart=daily_chart(report),
+        chart=daily_chart(report.days),
         owner_rows=owner_rows,
         gpu_rows=gpu_rows,
         read_at=read_at,

@@ -6,6 +6,7 @@
   <link rel="stylesheet" href="/internal/usage/ui/assets/usage.css">
   <script src="/internal/usage/ui/assets/usage-saved.js" defer></script>
   <script src="/internal/usage/ui/assets/usage-weekly.js" defer></script>
+  <script src="/internal/usage/ui/assets/usage-group.js" defer></script>
   <script src="/internal/usage/ui/assets/usage.js" defer></script>
 </head>
 <body>
@@ -19,7 +20,7 @@
   <section id="workspace" hidden>
     <section class="panel filters" aria-label="查询条件">
       <div class="filter-row">
-        <label>节点<select id="node"></select></label>
+        <label id="node-filter">节点<select id="node"></select></label>
         <label>视图<select id="mode"><option value="mine">我的用量</option><option value="node">节点用量</option></select></label>
         <label>时间范围<select id="range"><option value="week">本周</option><option value="seven">近 7 天</option><option value="custom">自定义</option></select></label>
         <label>开始日期<input id="start" type="date" required></label>
@@ -32,6 +33,7 @@
       <button id="tab-records" type="button" role="tab" aria-controls="results" aria-selected="true">已记录用量</button>
       <button id="tab-saved" type="button" role="tab" aria-controls="saved-results" aria-selected="false" hidden>统计快照</button>
       <button id="tab-weekly" type="button" role="tab" aria-controls="weekly-results" aria-selected="false" hidden>周报</button>
+      <button id="tab-group" type="button" role="tab" aria-controls="group-results" aria-selected="false" hidden>跨节点汇总</button>
     </div>
     <div id="results" role="tabpanel" aria-labelledby="tab-records" hidden>
       <div class="summary-grid">
@@ -89,6 +91,19 @@
           <p class="coverage-note">这份周报保留生成时的已记录用量。完整观测覆盖尚未确认，因此不代表全部实际用量，也不用于配额扣减。</p>
           <div class="export-actions"><button id="weekly-report" class="secondary" type="button">下载报告</button><button id="weekly-csv" class="secondary" type="button">下载 CSV</button></div>
         </section>
+      </div>
+    </section>
+    <section id="group-results" role="tabpanel" aria-labelledby="tab-group" hidden>
+      <section class="panel group-node-picker"><div class="section-head"><div><h2>选定节点汇总</h2><p class="muted">选择节点后，点击上方查询更新报告。</p></div><span id="group-selection-note"></span></div><div id="group-node-list" class="group-node-list"></div></section>
+      <div id="group-summary" hidden>
+        <div class="summary-grid">
+          <section class="panel metric"><p>已记录 GPU 小时合计</p><strong id="group-total">—</strong><span>选定节点的驻留时间累加</span></section>
+          <section class="panel metric"><p>汇总节点</p><strong id="group-node-count">—</strong><span>本次固定查询中的节点</span></section>
+          <section class="panel metric"><p>使用记录段</p><strong id="group-segment-count">—</strong><span>按计量区间整理的记录</span></section>
+        </div>
+        <div class="chart-grid"><section class="panel trend-panel"><div class="section-head"><h2>每日已记录用量</h2><span>GPU 小时</span></div><div id="group-trend" class="group-trend"></div></section><section class="panel owners-panel"><h2>用户汇总</h2><div id="group-owners"></div></section></div>
+        <section class="panel records-panel"><div class="section-head"><div><h2>节点分项</h2><p id="group-snapshot-note" class="muted"></p></div><div class="export-actions"><button id="group-report" class="secondary" type="button">导出报告</button><button id="group-csv" class="secondary" type="button">导出节点汇总 CSV</button></div></div><div class="table-scroll"><table><thead><tr><th>节点</th><th class="number">已记录 GPU 小时</th><th class="number">涉及 GPU</th><th class="number">记录段</th><th class="number">账本快照</th></tr></thead><tbody id="group-nodes"></tbody></table></div></section>
+        <p class="coverage-note">这里只汇总选定节点的已记录时长，尚未确认完整观测覆盖。无记录不代表未使用；各节点账本快照分别保留，本汇总不合并额度，也不用于配额扣减。</p>
       </div>
     </section>
   </section>

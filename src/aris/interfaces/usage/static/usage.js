@@ -6,7 +6,7 @@
   const hours = value => (value / 3600000000).toLocaleString("zh-CN", {maximumFractionDigits:3});
   const duration = value => {const seconds = value / 1000000; return seconds >= 3600 ? `${hours(value)} 小时` : seconds >= 60 ? `${(seconds/60).toLocaleString("zh-CN",{maximumFractionDigits:2})} 分钟` : `${seconds.toLocaleString("zh-CN",{maximumFractionDigits:3})} 秒`;};
   function message(value, error = false) {$('message').textContent = value; $('message').hidden = !value; $('message').classList.toggle('error', error);}
-  function lock(value) {busy = value; ['query','export','report','previous','next','node','mode','range','start','end','owner','tab-records','tab-saved','saved-more','tab-weekly','weekly-more','weekly-report','weekly-csv'].forEach(id => $(id).disabled = value); if(!value && current){$('previous').disabled = current.offset === 0; $('next').disabled = !current.has_more;}}
+  function lock(value) {busy = value; ['query','export','report','previous','next','node','mode','range','start','end','owner','tab-records','tab-saved','saved-more','tab-weekly','weekly-more','weekly-report','weekly-csv','tab-group','group-report','group-csv'].forEach(id => $(id).disabled = value);group.setBusy(value);if(!value)$('node').disabled=group.active; if(!value && current){$('previous').disabled = current.offset === 0; $('next').disabled = !current.has_more;}}
   async function request(path, body) {
     const pendingEpoch = epoch;
     const response = await fetch(`/internal/usage/${path}`, {method:'POST', cache:'no-store', headers:{Authorization:`Bearer ${token}`, ...(body ? {'Content-Type':'application/json'} : {})}, body:body ? JSON.stringify(body) : undefined});
@@ -16,7 +16,7 @@
   }
   function localDate(value) {const parts = new Intl.DateTimeFormat('en-CA',{timeZone:session.actor.timezone,year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(value); const p = Object.fromEntries(parts.map(item => [item.type,item.value])); return `${p.year}-${p.month}-${p.day}`;}
   function dates() {const end = localDate(new Date()); const start = new Date(`${end}T12:00:00Z`); if($('range').value === 'week') start.setUTCDate(start.getUTCDate() - (start.getUTCDay()+6)%7); else if($('range').value === 'seven') start.setUTCDate(start.getUTCDate()-6); else return; $('start').value = start.toISOString().slice(0,10); $('end').value = end;}
-  function modes() {const node = session.nodes.find(value => value.node_id === $('node').value); [...$('mode').options].forEach(option => option.disabled = !node[option.value === 'mine' ? 'mine':'node']); if($('mode').selectedOptions[0].disabled) $('mode').value = node.mine ? 'mine':'node'; $('owner-filter').hidden = weekly.active || $('mode').value !== 'node';}
+  function modes() {const node = group.active ? {mine:session.nodes.some(value=>value.mine),node:session.nodes.some(value=>value.node)}:session.nodes.find(value => value.node_id === $('node').value); [...$('mode').options].forEach(option => option.disabled = !node[option.value === 'mine' ? 'mine':'node']); if($('mode').selectedOptions[0].disabled) $('mode').value = node.mine ? 'mine':'node'; $('owner-filter').hidden = group.active || weekly.active || $('mode').value !== 'node';$('node-filter').hidden=group.active;$('node').disabled=group.active || busy;}
   const label = id => current.labels[id] || id;
   function drawTrend(report) {
     const ns = 'http://www.w3.org/2000/svg'; const svg = document.createElementNS(ns,'svg'); const width=720, height=173, left=34, right=8, top=10, bottom=29, plot=height-top-bottom, maximum=Math.max(1,...report.days.map(day => day.recorded_microseconds/3600000000)); svg.setAttribute('viewBox',`0 0 ${width} ${height}`); svg.setAttribute('role','presentation');
@@ -40,13 +40,17 @@
   const weekly = window.createWeeklyUsage({el:$,request,lock,message,isBusy:()=>busy,
     plansAvailable:()=>Boolean(session?.weekly_plans_available),
     selection:()=>({node_id:$('node').value,mode:$('mode').value,window:{kind:'calendar',start_date:$('start').value,end_date:$('end').value,timezone:session.actor.timezone}})});
-  async function tab(value){if(busy)return;saved.active=value==='saved';weekly.active=value==='weekly';$('results').hidden=saved.active || weekly.active || !current;modes();
-    for(const name of ['records','saved','weekly'])$(`tab-${name}`).setAttribute('aria-selected',String(value===name));
-    if(weekly.active)await weekly.load();else if(saved.active)await saved.load();else{$('results').hidden=true;await load();}}
+  const group=window.createGroupUsage({el:$,request,lock,message,isBusy:()=>busy,
+    selection:()=>({mode:$('mode').value,window:{kind:'calendar',start_date:$('start').value,end_date:$('end').value,timezone:session.actor.timezone}})});
+  async function tab(value){if(busy)return;saved.active=value==='saved';weekly.active=value==='weekly';group.active=value==='group';$('results').hidden=saved.active || weekly.active || group.active || !current;modes();
+    for(const name of ['records','saved','weekly','group'])$(`tab-${name}`).setAttribute('aria-selected',String(value===name));
+    if(group.active){group.refreshNodes();await group.load();}else if(weekly.active)await weekly.load();else if(saved.active)await saved.load();else{$('results').hidden=true;await load();}}
   $('tab-records').addEventListener('click',()=>tab('records'));
   $('tab-saved').addEventListener('click',()=>tab('saved'));
   $('tab-weekly').addEventListener('click',()=>tab('weekly'));
+  $('tab-group').addEventListener('click',()=>tab('group'));
   async function load(offset=0, fixed=false) {
+    if(group.active)return group.load();
     if(weekly.active)return weekly.load();
     if(saved.active)return saved.load();
     if(busy)return;lock(true);message('正在读取使用记录…');
@@ -56,15 +60,15 @@
   $('connect-form').addEventListener('submit',async event=>{
     event.preventDefault();if(busy)return;epoch++;const opening=epoch;lock(true);
     token=$('credential').value.trim();$('credential').value='';
-    try{session=await (await request('session')).json();saved.active=false;saved.reset();weekly.active=false;weekly.reset();
-      $('tab-saved').hidden=!session.saved_snapshots_available;$('tab-weekly').hidden=!session.weekly_reports_available;$('tab-records').setAttribute('aria-selected','true');$('tab-saved').setAttribute('aria-selected','false');$('tab-weekly').setAttribute('aria-selected','false');
+    try{session=await (await request('session')).json();saved.active=false;saved.reset();weekly.active=false;weekly.reset();group.active=false;group.reset();group.configure(session.nodes);
+      $('tab-saved').hidden=!session.saved_snapshots_available;$('tab-weekly').hidden=!session.weekly_reports_available;$('tab-group').hidden=!session.group_reports_available;$('tab-records').setAttribute('aria-selected','true');$('tab-saved').setAttribute('aria-selected','false');$('tab-weekly').setAttribute('aria-selected','false');$('tab-group').setAttribute('aria-selected','false');
       $('node').replaceChildren(...session.nodes.map(node=>new Option(node.node_id,node.node_id)));$('identity').textContent=session.actor.display_name;
       $('timezone').textContent=`时区 ${session.actor.timezone}`;$('connect-panel').hidden=true;$('workspace').hidden=false;modes();dates();lock(false);await load();
     }catch(error){if(opening===epoch){token='';message(error.message,true);}}finally{if(opening===epoch)lock(false);}
   });
-  $('disconnect').addEventListener('click',()=>{epoch++;token='';session=null;current=null;selection=null;saved.active=false;saved.reset();weekly.active=false;weekly.reset();lock(false);
+  $('disconnect').addEventListener('click',()=>{epoch++;token='';session=null;current=null;selection=null;saved.active=false;saved.reset();weekly.active=false;weekly.reset();group.active=false;group.reset();lock(false);$('node-filter').hidden=false;
     $('workspace').hidden=true;$('results').hidden=true;$('connect-panel').hidden=false;$('identity').textContent='本地只读查询';message('');});
-  $('node').addEventListener('change',()=>{modes();$('owner').replaceChildren(new Option('全部用户',''));});$('mode').addEventListener('change',()=>{modes();$('owner').value='';});$('range').addEventListener('change',dates);['start','end'].forEach(id=>$(id).addEventListener('change',()=>{$('range').value='custom';}));$('query').addEventListener('click',()=>load());$('owner').addEventListener('change',()=>load());$('previous').addEventListener('click',()=>load(Math.max(0,current.offset-current.limit),true));$('next').addEventListener('click',()=>load(current.offset+current.limit,true));
+  $('node').addEventListener('change',()=>{modes();$('owner').replaceChildren(new Option('全部用户',''));});$('mode').addEventListener('change',()=>{modes();$('owner').value='';if(group.active)group.refreshNodes();});$('range').addEventListener('change',dates);['start','end'].forEach(id=>$(id).addEventListener('change',()=>{$('range').value='custom';}));$('query').addEventListener('click',()=>load());$('owner').addEventListener('change',()=>load());$('previous').addEventListener('click',()=>load(Math.max(0,current.offset-current.limit),true));$('next').addEventListener('click',()=>load(current.offset+current.limit,true));
   async function download(path,filename,success){if(!selection || busy)return;lock(true);try{const blob=await (await request(path,selection)).blob();const url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download=filename;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);message(success);}catch(error){message(error.message,true);}finally{lock(false);}}
   $('export').addEventListener('click',()=>download('export','aris-recorded-usage.csv','已导出当前快照的全部匹配记录。'));
   $('report').addEventListener('click',()=>download('report','aris-recorded-usage-report.html','报告已导出，可在浏览器阅读或打印。'));
