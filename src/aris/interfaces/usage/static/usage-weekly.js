@@ -1,10 +1,33 @@
 "use strict";
-window.createWeeklyUsage = function ({el, request, lock, message, isBusy, selection}) {
+window.createWeeklyUsage = function ({el, request, lock, message, isBusy, selection, plansAvailable}) {
   let active=false, cursor=null, selectedQuery=null, chosen=null, version=0;
   const node=(tag,value,className)=>{const item=document.createElement(tag);item.textContent=value;if(className)item.className=className;return item;};
   const hours=value=>(value/3600000000).toLocaleString('zh-CN',{maximumFractionDigits:3});
   const format=(value,zone)=>new Intl.DateTimeFormat('zh-CN',{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).format(new Date(value));
-  function reset(){version++;cursor=null;selectedQuery=null;chosen=null;el('weekly-list').replaceChildren();el('weekly-days').replaceChildren();el('weekly-owners').replaceChildren();el('weekly-detail').hidden=true;el('weekly-more').hidden=true;el('weekly-empty').hidden=true;}
+  function reset(){version++;cursor=null;selectedQuery=null;chosen=null;el('weekly-list').replaceChildren();el('weekly-days').replaceChildren();el('weekly-owners').replaceChildren();el('weekly-plan-list').replaceChildren();el('weekly-plans').hidden=true;el('weekly-detail').hidden=true;el('weekly-more').hidden=true;el('weekly-empty').hidden=true;}
+  function renderPlans(page){
+    el('weekly-plans').hidden=false;
+    el('weekly-plan-heading').textContent=page ? `周报计划 · ${page.items.length} 项`:'周报计划 · 状态暂不可用';
+    el('weekly-plan-note').textContent=!page ? '暂时无法读取计划状态，已保存的报告仍可单独查看。':!page.items.length ? '当前视图还没有保存的周报计划。':`${page.has_more ? '仅显示最近 16 项。':''}计划状态按当前节点显示；下方报告仍按日期筛选。`;
+    if(!page)return;
+    el('weekly-plan-list').replaceChildren(...page.items.map(plan=>{
+      const counts=plan.jobs.counts,waiting=counts.pending+counts.running+counts.retry,failed=counts.blocked+counts.dead,total=Object.values(counts).reduce((a,b)=>a+b,0),card=node('article','','weekly-plan-card'),head=node('div','','weekly-plan-head');
+      let status='计划已保存',tone='';
+      if(plan.last_error_code || failed){status='需要检查';tone='issue';}
+      else if(plan.jobs.overdue_count){status='生成延迟';tone='issue';}
+      else if(new Date(plan.next_due_at)<=new Date(page.read_at)){status='待补跑';tone='waiting';}
+      else if(waiting){status=counts.retry ? '等待重试':'等待生成';tone='waiting';}
+      else if(counts.completed){status='已安排任务完成';}
+      head.append(node('h3',plan.name),node('span',status,`coverage-badge ${tone}`));card.append(head,
+        node('p',`下一次计划时间 ${format(plan.next_due_at,plan.timezone)} · ${plan.timezone}`),
+        node('p',total ? `已安排时段截至 ${plan.next_week} 00:00`:'尚未安排任务','muted'),
+        node('p',`已完成 ${counts.completed} · 待生成 ${waiting} · 失败 ${failed}`,'weekly-plan-counts'));
+      if(plan.last_prepared_at)card.append(node('small',`最近安排 ${format(plan.last_prepared_at,plan.timezone)}`));
+      if(plan.jobs.overdue_count)card.append(node('p',`${plan.jobs.overdue_count} 个报告任务尚未完成，已等待超过 30 分钟。`,'weekly-plan-warning'));
+      if(plan.last_error_code)card.append(node('p',plan.last_error_code==='PERMISSION_DENIED' ? '计划所需的当前权限不足。':'最近安排任务时遇到错误。','weekly-plan-warning'));
+      return card;
+    }));
+  }
   function render(report){
     const history=report.history;
     el('weekly-detail').hidden=false;
@@ -27,9 +50,10 @@ window.createWeeklyUsage = function ({el, request, lock, message, isBusy, select
   async function load(more=false){
     if(isBusy())return;lock(true);message('正在读取已保存的周报…');if(!more)reset();const ticket=version;
     const {owner_id,...base}=selection();const input=more && selectedQuery ? {...selectedQuery,before:cursor}:{...base,limit:16};
+    const planResponse=!more && plansAvailable() ? request('weekly/plans',{node_id:input.node_id,mode:input.mode}).then(response=>response.json()).catch(()=>null):null;
     try{const page=await (await request('weekly/query',input)).json();if(ticket!==version)return;selectedQuery=input;cursor=page.next_cursor;
       el('weekly-list').append(...page.items.map(item=>{const li=node('li',''),button=node('button','');button.type='button';button.dataset.report=item.id;button.setAttribute('aria-current',String(chosen?.id===item.id));button.append(node('strong',`${item.week} 当周`),node('span','已记录用量','coverage-badge'),node('small',`${hours(item.recorded_microseconds)} GPU 小时 · ${item.timezone}`));button.addEventListener('click',()=>open(item,input));li.append(button);return li;}));
-      el('weekly-empty').hidden=el('weekly-list').children.length!==0;el('weekly-more').hidden=!cursor;if(!more && page.items.length)await openItem(page.items[0],input,ticket);if(ticket===version)message('');
+      el('weekly-empty').hidden=el('weekly-list').children.length!==0;el('weekly-more').hidden=!cursor;if(!more && page.items.length)await openItem(page.items[0],input,ticket);if(planResponse){const plans=await planResponse;if(ticket===version)renderPlans(plans);}if(ticket===version)message('');
     }catch(error){if(ticket===version)message(error.message,true);}finally{if(ticket===version)lock(false);}
   }
   async function download(kind){if(isBusy() || !chosen)return;const ticket=version,input={...chosen};lock(true);try{const blob=await (await request(`weekly/${kind}`,input)).blob();if(ticket!==version)return;const url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download=`aris-weekly-usage.${kind==='report' ? 'html':'csv'}`;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);message('已导出这份保存的周报。');}catch(error){if(ticket===version)message(error.message,true);}finally{if(ticket===version)lock(false);}}

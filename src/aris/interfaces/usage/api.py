@@ -9,7 +9,13 @@ from aris.core.contracts import DomainError
 from aris.interfaces.commands.api import authorization, bounded_input
 from aris.interfaces.usage.saved_service import SavedUsageQuery, SavedUsageRead, saved_usage
 from aris.interfaces.usage.service import UsageHistoryInput, UsageHistorySurface
-from aris.interfaces.usage.weekly_service import WeeklyUsageQuery, WeeklyUsageRead, weekly_usage
+from aris.interfaces.usage.weekly_service import (
+    WeeklyPlanRead,
+    WeeklyUsageQuery,
+    WeeklyUsageRead,
+    weekly_plans,
+    weekly_usage,
+)
 
 ASSETS = Path(__file__).with_name("static")
 PAGE_HEADERS = {
@@ -23,6 +29,16 @@ PAGE_HEADERS = {
 
 def build_router(service: UsageHistorySurface) -> APIRouter:
     router = APIRouter(prefix="/internal/usage", tags=["recorded-usage"])
+
+    @router.post("/weekly/plans")
+    async def plans(request: Request) -> JSONResponse:
+        if request.query_params:
+            raise DomainError("VALIDATION_ERROR", "Unexpected weekly plan query parameters", 422)
+        selection = await bounded_input(request, WeeklyPlanRead)
+        result = await run_in_threadpool(
+            weekly_plans, service, authorization(request), request.state.request_id, selection
+        )
+        return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
 
     @router.post("/weekly/query")
     @router.post("/weekly/read")

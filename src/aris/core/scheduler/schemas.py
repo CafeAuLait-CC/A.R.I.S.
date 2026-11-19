@@ -142,3 +142,28 @@ class TaskTick(AccessContract):
     state: Literal["idle", "completed", "retry", "blocked", "dead", "lost_claim"]
     job_id: UUID | None = None
     error_code: str | None = None
+
+
+class TaskQueueQuery(AccessContract):
+    kind: str = Field(pattern=r"^[a-z][a-z0-9_.-]+$", max_length=128)
+    owner_id: UUID
+    scope: AccessScope
+    key_prefix: str = Field(min_length=1, max_length=512)
+
+
+class TaskQueueSummary(AccessContract):
+    counts: dict[Literal["pending", "running", "retry", "completed", "blocked", "dead"], int]
+    overdue_count: int = Field(ge=0)
+    oldest_unfinished_at: AwareDatetime | None
+    read_at: AwareDatetime
+
+    @model_validator(mode="after")
+    def coherent(self) -> "TaskQueueSummary":
+        if (
+            set(self.counts) != {"pending", "running", "retry", "completed", "blocked", "dead"}
+            or any(value < 0 for value in self.counts.values())
+            or self.overdue_count
+            > sum(value for state, value in self.counts.items() if state != "completed")
+        ):
+            raise ValueError("task queue summary is inconsistent")
+        return self

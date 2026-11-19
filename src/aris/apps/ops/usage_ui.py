@@ -23,6 +23,7 @@ from aris.interfaces.usage.service import UsageHistorySurface
 from aris.modules.lyra.usage_history_service import UsageHistoryService
 from aris.modules.lyra.weekly_report_service import WeeklyReportReader
 from aris.modules.lyra.window_reader import UsageWindowReader
+from aris.modules.nova.weekly_plan_reader import WeeklyPlanReader
 
 
 class LocalUsageConfig(AccessContract):
@@ -95,6 +96,9 @@ def main(argv: list[str] | None = None) -> int:
             if config.saved_snapshots
             else None,
             weekly_reports=WeeklyReportReader(UsageHistoryService(session_factory(engine)))
+            if config.weekly_reports
+            else None,
+            weekly_plans=WeeklyPlanReader(session_factory(engine))
             if config.weekly_reports
             else None,
         )

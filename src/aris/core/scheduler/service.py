@@ -27,6 +27,8 @@ from aris.core.scheduler.schemas import (
     StoredTaskRun,
     TaskClaim,
     TaskEnqueueResult,
+    TaskQueueQuery,
+    TaskQueueSummary,
     TaskTick,
     canonical,
 )
@@ -138,6 +140,23 @@ class SchedulerService:
                 return SchedulerRepository(session).runs(id)
         except DBAPIError as error:
             raise self._failure(error) from None
+
+    def queue_in_transaction(
+        self, session: Session, query: TaskQueueQuery, *, now: datetime
+    ) -> TaskQueueSummary:
+        """Internal scoped metadata only; registered-task execution is not required for reads."""
+        query = TaskQueueQuery.model_validate(query.model_dump(mode="json"))
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("queue status requires an aware read time")
+        try:
+            transaction_budget(session, 100, 1000, 5000)
+            return SchedulerRepository(session).queue(query, now.astimezone(UTC))
+        except DBAPIError as error:
+            raise self._failure(error) from None
+
+    def queue(self, query: TaskQueueQuery) -> TaskQueueSummary:
+        with self.sessions() as session:
+            return self.queue_in_transaction(session, query, now=self._now())
 
     def _require(self, session: Session, job: ScheduledTask, definition: TaskDefinition) -> None:
         if definition.scope_type != job.scope.type:

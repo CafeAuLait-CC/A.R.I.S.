@@ -23,6 +23,7 @@ from aris.modules.lyra.weekly_report_schemas import (
     WeeklyReportCursor,
     WeeklyReportPage,
 )
+from aris.modules.nova.weekly_plan_schemas import WeeklyPlanPage
 
 
 class WeeklyUsageQuery(AccessContract):
@@ -37,6 +38,40 @@ class WeeklyUsageRead(AccessContract):
     node_id: str = Field(min_length=1, max_length=128)
     mode: Literal["mine", "node"] = "mine"
     id: UUID
+
+
+class WeeklyPlanRead(AccessContract):
+    node_id: str = Field(min_length=1, max_length=128)
+    mode: Literal["mine", "node"] = "mine"
+
+
+def weekly_plans(
+    surface: UsageHistorySurface, authorization: str | None, request_id: str, query: WeeklyPlanRead
+) -> WeeklyPlanPage:
+    subject = surface.authenticator.authenticate(authorization)
+    if query.node_id not in surface.node_ids:
+        raise DomainError("PERMISSION_DENIED", "Node is outside this usage interface", 403)
+    reader = surface.weekly_plans
+    if reader is None:
+        raise DomainError("USAGE_NOT_CONFIGURED", "Weekly plan reading is not enabled", 503)
+    try:
+        with surface.history.sessions() as session:
+            transaction_budget(session, 100, 1000, 5000)
+            principal = surface.history.access.resolve_external_in_transaction(session, subject)
+            if principal is None:
+                raise DomainError("PERMISSION_DENIED", "Current identity is unavailable", 403)
+            actor = ActorContext(actor_id=principal.user_id, request_id=request_id)
+            result = reader.read_in_transaction(
+                session, actor, node_id=query.node_id, mode=query.mode
+            )
+            current = surface.history.access.resolve_external_in_transaction(session, subject)
+            if current is None or current.user_id != principal.user_id:
+                raise DomainError("PERMISSION_DENIED", "Current identity differs", 403)
+            return result
+    except DBAPIError:
+        raise DomainError(
+            "DEPENDENCY_UNAVAILABLE", "Weekly plan status is unavailable", 503
+        ) from None
 
 
 def weekly_usage(

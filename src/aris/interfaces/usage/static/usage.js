@@ -38,6 +38,7 @@
       window:{kind:'calendar',start_date:$('start').value,end_date:$('end').value,timezone:session.actor.timezone}}),
     timezone:()=>session.actor.timezone});
   const weekly = window.createWeeklyUsage({el:$,request,lock,message,isBusy:()=>busy,
+    plansAvailable:()=>Boolean(session?.weekly_plans_available),
     selection:()=>({node_id:$('node').value,mode:$('mode').value,window:{kind:'calendar',start_date:$('start').value,end_date:$('end').value,timezone:session.actor.timezone}})});
   async function tab(value){if(busy)return;saved.active=value==='saved';weekly.active=value==='weekly';$('results').hidden=saved.active || weekly.active || !current;modes();
     for(const name of ['records','saved','weekly'])$(`tab-${name}`).setAttribute('aria-selected',String(value===name));

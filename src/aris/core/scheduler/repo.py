@@ -2,11 +2,11 @@
 
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, or_, select, text, update
+from sqlalchemy import and_, case, func, or_, select, text, update
 from sqlalchemy.orm import Session
 
 from aris.core.contracts import DomainError
@@ -16,6 +16,8 @@ from aris.core.scheduler.schemas import (
     ScheduledTask,
     StoredScheduledTask,
     StoredTaskRun,
+    TaskQueueQuery,
+    TaskQueueSummary,
     canonical,
 )
 from aris.core.time import utc
@@ -215,3 +217,53 @@ class SchedulerRepository:
         if any(value is None for value in values):
             raise inconsistent()
         return tuple(value for value in values if value is not None)
+
+    def queue(self, query: TaskQueueQuery, now: datetime) -> TaskQueueSummary:
+        row = ScheduledJobRow
+        cutoff = now - timedelta(minutes=30)
+        rows = self.session.execute(
+            select(
+                row.state,
+                func.count().label("count"),
+                func.sum(
+                    case(
+                        (
+                            and_(
+                                row.state != "completed",
+                                row.scheduled_for <= cutoff,
+                                row.created_at <= cutoff,
+                            ),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ).label("overdue"),
+                func.min(case((row.state != "completed", row.scheduled_for))).label("oldest"),
+            )
+            .where(
+                row.kind == query.kind,
+                row.owner_id == str(query.owner_id),
+                row.scope_type == query.scope.type,
+                row.scope_id == query.scope.id,
+                row.job_key.startswith(query.key_prefix, autoescape=True),
+            )
+            .group_by(row.state)
+        ).mappings()
+        values = {key: 0 for key in ("pending", "running", "retry", "completed", "blocked", "dead")}
+        overdue = 0
+        dates = []
+        for value in rows:
+            if value["state"] not in values:
+                raise inconsistent()
+            values[value["state"]] = value["count"]
+            overdue += value["overdue"]
+            if value["oldest"] is not None:
+                dates.append(utc(value["oldest"]))
+        return TaskQueueSummary.model_validate(
+            {
+                "counts": values,
+                "overdue_count": overdue,
+                "oldest_unfinished_at": min(dates) if dates else None,
+                "read_at": now,
+            }
+        )

@@ -21,6 +21,9 @@ from aris.modules.lyra.weekly_report_models import WeeklyReportRow
 from aris.modules.lyra.weekly_report_service import WeeklyReportHandler, WeeklyReportReader
 from aris.modules.nova.report_calendar import WeeklyReportPlan
 from aris.modules.nova.report_scheduler import enqueue_weekly_reports
+from aris.modules.nova.weekly_plan_reader import WeeklyPlanReader
+from aris.modules.nova.weekly_plan_schemas import WeeklyPreparationLimits
+from aris.modules.nova.weekly_plan_service import WeeklyPlanService
 from tests.test_administration import admin_state
 from tests.test_mapping_history import history_state
 from tests.test_recorded_usage import readings
@@ -184,6 +187,11 @@ def test_existing_weekly_report_has_authenticated_list_detail_and_fixed_exports(
     surface, _, _ = surface_for(readings, settings)
     surface.history = history
     surface.weekly_reports = WeeklyReportReader(history)
+    surface.weekly_plans = WeeklyPlanReader(history.sessions, clock=lambda: clock[0])
+    producer = WeeklyPlanService(
+        history.sessions, scheduler, limits=WeeklyPreparationLimits(), clock=lambda: clock[0]
+    )
+    assert producer.run_once(CONTEXT, plan).state == "prepared"
     headers = {"Authorization": "Bearer " + TOKEN}
     selection = {"node_id": "node-a", "mode": "mine", "id": id}
     window = query()
@@ -203,6 +211,36 @@ def test_existing_weekly_report_has_authenticated_list_detail_and_fixed_exports(
         assert client.post("/internal/usage/session", headers=headers).json()[
             "weekly_reports_available"
         ]
+        plans = client.post(
+            "/internal/usage/weekly/plans",
+            headers=headers,
+            json={"node_id": "node-a", "mode": "mine"},
+        )
+        assert (
+            plans.status_code == 200
+            and plans.json()["items"][0]["jobs"]["counts"]["completed"] == 1
+        )
+        assert plans.json()["items"][0]["worker_health"] == "not_assessed"
+        assert (
+            client.post(
+                "/internal/usage/weekly/plans",
+                headers=headers,
+                json={"node_id": "node-a", "mode": "node"},
+            ).json()["items"]
+            == []
+        )
+        assert (
+            client.post(
+                "/internal/usage/weekly/plans",
+                headers=headers,
+                json={"node_id": "node-a", "owner_id": str(actor.actor_id)},
+            ).status_code
+            == 422
+        )
+        assert (
+            client.post("/internal/usage/weekly/plans", json={"node_id": "node-a"}).status_code
+            == 401
+        )
         assert (
             client.post("/internal/usage/weekly/query", headers=headers, json=listing).json()[
                 "items"
@@ -276,9 +314,9 @@ def test_private_weekly_operator_validates_without_db_and_runs_one_explicit_batc
     )
     assert weekly_main(["--config", str(config), "--once"]) == 0
     result = json.loads(capsys.readouterr().out)
-    assert result["plans"][0]["enqueued"] == 1 and result["job_states"]["completed"] == 1
+    assert result["plans"][0]["tasks_prepared"] == 1 and result["job_states"]["completed"] == 1
     assert not result["autostart_added"] and not result["notification_delivery"]
     assert weekly_main(["--config", str(config), "--once"]) == 0
-    assert json.loads(capsys.readouterr().out)["plans"][0]["duplicates"] == 1
+    assert json.loads(capsys.readouterr().out)["plans"][0]["state"] == "idle"
     with history.sessions() as session:
         assert session.scalar(select(func.count()).select_from(WeeklyReportRow)) == 1
