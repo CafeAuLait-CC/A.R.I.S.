@@ -19,6 +19,32 @@ from sqlalchemy.orm import Mapped, mapped_column
 from aris.core.db import Base
 
 
+class UsageRecordingPipelineBatchRow(Base):
+    __tablename__ = "usage_pipeline_batches"
+    __table_args__ = (
+        UniqueConstraint("consumer_id", "revision", name="uq_pipeline_batch_revision"),
+        CheckConstraint("revision>0", name="ck_pipeline_batch_revision"),
+        CheckConstraint(
+            "length(fingerprint)=64 AND length(canonical_batch)>0 "
+            "AND length(canonical_batch)<=131072",
+            name="ck_pipeline_batch_size",
+        ),
+    )
+    id: Mapped[str] = mapped_column(ForeignKey("usage_trace_records.id"), primary_key=True)
+    event_id: Mapped[str] = mapped_column(ForeignKey("domain_events.event_id"), unique=True)
+    consumer_id: Mapped[str] = mapped_column(String(128))
+    revision: Mapped[int] = mapped_column(BigInteger)
+    attestation_id: Mapped[str] = mapped_column(
+        ForeignKey("usage_trace_attestations.id"), unique=True
+    )
+    segment_set_id: Mapped[str] = mapped_column(
+        ForeignKey("usage_residency_segment_sets.id"), unique=True
+    )
+    canonical_batch: Mapped[str] = mapped_column(Text)
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class UsageRecordingPlanRow(Base):
     __tablename__ = "usage_recording_plans"
     __table_args__ = (
