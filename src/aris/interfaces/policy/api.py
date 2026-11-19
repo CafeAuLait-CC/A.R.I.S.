@@ -73,11 +73,11 @@ def build_router(service: PolicyReadSurface) -> APIRouter:
         return HTMLResponse((ASSETS / "index.html").read_text(), headers=PAGE_HEADERS)
 
     @router.get("/ui/assets/{name}")
-    def asset(name: Literal["policy.js", "policy.css"]) -> Response:
+    def asset(name: Literal["policy.js", "policy-scenarios.js", "policy.css"]) -> Response:
         return Response(
             (ASSETS / name).read_bytes(),
             headers=PAGE_HEADERS,
-            media_type="text/javascript" if name == "policy.js" else "text/css",
+            media_type="text/javascript" if name.endswith(".js") else "text/css",
         )
 
     return router

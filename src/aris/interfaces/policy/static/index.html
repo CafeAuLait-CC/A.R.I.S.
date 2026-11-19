@@ -1,7 +1,7 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>策略草稿 · ARIS</title><link rel="stylesheet" href="/internal/policy/ui/assets/policy.css"><script src="/internal/policy/ui/assets/policy.js" defer></script></head>
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>策略草稿 · ARIS</title><link rel="stylesheet" href="/internal/policy/ui/assets/policy.css"><script src="/internal/policy/ui/assets/policy-scenarios.js" defer></script><script src="/internal/policy/ui/assets/policy.js" defer></script></head>
 <body><main>
   <header><div><p class="eyebrow">ARIS / POLICY</p><h1>策略草稿</h1><p class="subtitle">查看已保存的规则，比较版本之间的变化。</p></div><span id="identity" class="muted">本地只读查询</span></header>
-  <section id="connect-panel" class="panel connect"><div><h2>连接策略目录</h2><p>需要策略草稿读取权限。访问凭据仅保留在当前页面内存中。</p></div><form id="connect-form"><label for="credential" class="sr-only">开发访问凭据</label><input id="credential" type="password" autocomplete="off" placeholder="开发访问凭据" required><button>连接</button></form></section>
+  <section id="connect-panel" class="panel connect"><div><h2>连接策略目录</h2><p>需要策略草稿读取权限。访问凭据仅保留在当前页面内存中。</p></div><form id="connect-form"><label for="credential" class="sr-only">开发访问凭据</label><input id="credential" type="password" autocomplete="off" placeholder="开发访问凭据" required><button id="connect-button">连接</button></form></section>
   <p id="message" role="status" aria-live="polite" hidden></p>
   <section id="workspace" hidden>
     <div class="panel toolbar"><label>策略名称<select id="policy-name"></select></label><button id="refresh" class="secondary">刷新目录</button><span class="badge">只读</span><button id="disconnect" class="text-button">断开连接</button></div>
@@ -22,6 +22,24 @@
           <h2>比较版本</h2><p class="muted">比较保存内容的语义变化，结果不构成批准或发布。</p>
           <div class="compare-controls"><label>之前<select id="before"></select></label><span aria-hidden="true">→</span><label>之后<select id="after"></select></label><button id="compare">比较</button></div>
           <p id="comparison-note" class="muted"></p><div id="changes" class="table-scroll"></div>
+          <section class="scenario-section" aria-labelledby="scenario-heading">
+            <div class="section-head"><h3 id="scenario-heading">假设约束试算</h3><span class="badge">不会预约或发布</span></div>
+            <p class="scenario-intro">对上面选择的版本输入同一个假设，查看约束结果。只保存了一个版本时，也可以与自身比较。</p>
+            <form id="scenario-form">
+              <div class="scenario-fields">
+                <label>节点 ID<input id="scenario-node" list="scenario-nodes" maxlength="128" placeholder="输入节点 ID" required autocomplete="off"><datalist id="scenario-nodes"></datalist></label>
+                <label>提前时间（分钟）<input id="scenario-notice" type="number" value="60" min="0" max="525600" step="1" required></label>
+                <label>预约时长（分钟）<input id="scenario-duration" type="number" value="60" min="1" max="525600" step="1" required></label>
+                <label>假设总并发 GPU<input id="scenario-concurrent" type="number" value="1" min="1" max="1000" step="1" placeholder="留空表示未知"></label>
+                <label class="scenario-roles">假设角色（可选）<input id="scenario-roles" maxlength="2079" placeholder="规则角色名，用逗号分隔" autocomplete="off"></label>
+              </div>
+              <p class="muted">参考时间取点击试算的时刻，并在结果中保留。角色是手动假设，不读取当前账号的真实角色。</p>
+              <p class="scenario-context">未提供真实使用数据，有限额规则的用量部分保持未知。这里只检查列出的五项约束，不检查预约冲突、维护窗口或实际授权。</p>
+              <div class="scenario-actions"><button type="submit">试算假设条件</button><button type="reset" class="secondary">重置假设</button></div>
+            </form>
+            <p id="scenario-note" class="muted" role="status" aria-live="polite"></p>
+            <div id="scenario-result" class="scenario-results" hidden></div>
+          </section>
         </section>
       </div>
     </div>

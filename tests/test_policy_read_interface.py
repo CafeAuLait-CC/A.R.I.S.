@@ -18,6 +18,7 @@ from aris.modules.nova.policy_catalog_schemas import (
 )
 from tests.test_commands import command_state
 from tests.test_policy_catalog import actor, catalog_state, confirmed, reference, source_counts
+from tests.test_policy_simulation import scenario
 from tests.test_policy_source import policy
 
 __all__ = ["command_state", "catalog_state"]
@@ -93,10 +94,40 @@ def test_policy_browser_routes_page_versions_show_verified_details_and_compare_w
         changes = {row["path"]: row for row in compared.json()["difference"]["changes"]}
         assert changes["/spec/reservation/max_concurrent_gpus"]["before"] == 1
         assert changes["/spec/reservation/max_concurrent_gpus"]["after"] == 2
+        assumption = scenario(include_usage=False, projected_concurrent_gpus=2).model_dump(
+            mode="json"
+        )
+        for comparison_target, expected in ((old, "WOULD_DENY"), (new, "NOT_EVALUATED")):
+            simulated = client.post(
+                "/internal/policy/compare",
+                headers=headers,
+                json={
+                    "before": old["reference"],
+                    "after": comparison_target["reference"],
+                    "expected_before_fingerprint": old["fingerprint"],
+                    "expected_after_fingerprint": comparison_target["fingerprint"],
+                    "scenarios": [assumption],
+                },
+            )
+            assert simulated.status_code == 200 and simulated.json()["comparison_only"]
+            case = simulated.json()["cases"][0]
+            assert case["before"]["decision"] == "WOULD_DENY"
+            assert case["after"]["decision"] == expected
+            assert all(
+                result["simulation_only"]
+                and result["assumed_used_gpu_seconds"] is None
+                and next(
+                    rule for rule in result["results"] if rule["rule_id"] == "quota.actual_usage"
+                )["reason"]
+                == "USAGE_UNKNOWN"
+                for result in (case["before"], case["after"])
+            )
         assert client.post("/internal/commands", headers=headers, json={}).status_code == 404
         assert "no-store" in detail.headers["cache-control"]
         assert client.get("/internal/policy/ui").status_code == 200
         assert client.get("/internal/policy/ui/assets/policy.js").status_code == 200
+        asset = client.get("/internal/policy/ui/assets/policy-scenarios.js")
+        assert asset.status_code == 200 and "javascript" in asset.headers["content-type"]
         assert client.get("/internal/policy/ui/assets/anything").status_code == 422
     assert source_counts(state[2]) == before
 
