@@ -6,6 +6,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -88,3 +89,32 @@ class PolicySourceVersion(Base):
     request_id: Mapped[str] = mapped_column(String(128))
     reason: Mapped[str] = mapped_column(String(256))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class PolicyReviewMaterialRow(Base):
+    __tablename__ = "policy_review_materials"
+    __table_args__ = (
+        UniqueConstraint("command_id", name="uq_policy_material_command"),
+        CheckConstraint(
+            "source_version>0 AND scenarios>=1 AND scenarios<=8", name="ck_policy_material_scope"
+        ),
+        CheckConstraint(
+            "length(fingerprint)=64 AND length(source_fingerprint)=64 "
+            "AND length(canonical_material)>0 AND length(canonical_material)<=65536",
+            name="ck_policy_material_size",
+        ),
+        Index("ix_policy_material_source_time", "source_id", "created_at", "id"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    source_id: Mapped[str] = mapped_column(ForeignKey("policy_versions.id"))
+    name: Mapped[str] = mapped_column(String(64))
+    source_version: Mapped[int] = mapped_column(Integer)
+    source_fingerprint: Mapped[str] = mapped_column(String(64))
+    implementation_ref: Mapped[str] = mapped_column(String(128))
+    scenarios: Mapped[int] = mapped_column(Integer)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    command_id: Mapped[str] = mapped_column(ForeignKey("commands.id"))
+    request_id: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    canonical_material: Mapped[str] = mapped_column(Text)
