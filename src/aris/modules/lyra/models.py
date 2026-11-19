@@ -6,6 +6,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
+    Index,
     Integer,
     String,
     Text,
@@ -16,6 +17,63 @@ from sqlalchemy.dialects.postgresql import ExcludeConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from aris.core.db import Base
+
+
+class UsageRecordingJobRow(Base):
+    __tablename__ = "usage_recording_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('queued','running','completed','blocked','failed')",
+            name="ck_recording_job_state",
+        ),
+        CheckConstraint(
+            "version >= 1 AND attempts >= 0 AND attempts <= 20", name="ck_recording_job_counters"
+        ),
+        CheckConstraint(
+            "length(request_fingerprint)=64 AND length(canonical_request)>0 "
+            "AND length(canonical_request)<=16384",
+            name="ck_recording_job_input",
+        ),
+        CheckConstraint(
+            "updated_at>=created_at AND available_at>=created_at", name="ck_recording_job_times"
+        ),
+        CheckConstraint(
+            "(state='running' AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL "
+            "AND attempts>0 AND lease_expires_at>updated_at) OR "
+            "(state<>'running' AND lease_token IS NULL AND lease_expires_at IS NULL)",
+            name="ck_recording_job_lease",
+        ),
+        CheckConstraint(
+            "(state IN ('completed','blocked','failed') AND finished_at IS NOT NULL "
+            "AND finished_at=updated_at) OR "
+            "(state IN ('queued','running') AND finished_at IS NULL)",
+            name="ck_recording_job_finish",
+        ),
+        CheckConstraint(
+            "(state='completed' AND recording_id IS NOT NULL AND recording_id=id "
+            "AND recording_fingerprint IS NOT NULL AND length(recording_fingerprint)=64) OR "
+            "(state<>'completed' AND recording_id IS NULL AND recording_fingerprint IS NULL)",
+            name="ck_recording_job_result",
+        ),
+        Index("ix_recording_jobs_ready", "state", "available_at", "lease_expires_at"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    canonical_request: Mapped[str] = mapped_column(Text)
+    request_fingerprint: Mapped[str] = mapped_column(String(64))
+    state: Mapped[str] = mapped_column(String(16))
+    version: Mapped[int] = mapped_column(BigInteger)
+    attempts: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    lease_token: Mapped[str | None] = mapped_column(String(36))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error_code: Mapped[str | None] = mapped_column(String(64))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    recording_id: Mapped[str | None] = mapped_column(
+        ForeignKey("usage_run_recordings.id"), unique=True
+    )
+    recording_fingerprint: Mapped[str | None] = mapped_column(String(64))
 
 
 class UsageTraceAttestationRow(Base):
