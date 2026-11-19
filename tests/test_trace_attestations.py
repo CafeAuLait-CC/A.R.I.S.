@@ -451,8 +451,14 @@ def test_long_residency_pipeline_preserves_open_state_then_records_every_closed_
     from aris.modules.lyra.derivation_service import UsageDerivationService
     from aris.modules.lyra.ledger_schemas import UsagePostingConfiguration, UsagePostingContext
     from aris.modules.lyra.ledger_service import UsageLedgerService
-    from aris.modules.lyra.partition_recording_schemas import PartitionRecordingRequest
     from aris.modules.lyra.partition_recording_service import PartitionRecordingService
+    from aris.modules.lyra.recording_job_schemas import RecordingJobLimits
+    from aris.modules.lyra.recording_job_service import RecordingJobService
+    from aris.modules.lyra.recording_plan_schemas import (
+        RecordingDispatchRequest,
+        RecordingPlanRequest,
+    )
+    from aris.modules.lyra.recording_plan_service import RecordingPlanService
     from aris.modules.lyra.reservation_links import ResidencyReservationService
     from aris.modules.lyra.residency_attribution import ResidencyAttributionService
     from aris.modules.lyra.residency_evidence_service import ResidencyRunEvidenceService
@@ -465,6 +471,7 @@ def test_long_residency_pipeline_preserves_open_state_then_records_every_closed_
     from aris.modules.lyra.residency_segments import ResidencySegmentQuery
     from aris.modules.lyra.residency_sessions import residency_fingerprint
     from aris.modules.lyra.run_recording_repo import ClosedRunRecordingRepository
+    from aris.modules.lyra.run_recording_service import ClosedRunRecordingService
     from aris.modules.lyra.segment_store_schemas import RecordResidencySegments
     from aris.modules.lyra.segment_store_service import ResidencySegmentStore
     from aris.modules.nova.usage_link_service import ReservationUsageLinkService
@@ -620,18 +627,50 @@ def test_long_residency_pipeline_preserves_open_state_then_records_every_closed_
     writer = PartitionRecordingService(
         state.sessions, partition_service, identities, derivations, ledger, clock=state.now
     )
-    receipts = [
-        writer.record(
-            posting_context,
-            PartitionRecordingRequest(
-                id=uuid4(),
-                partition=parent_reference.model_copy(update={"partition_index": index}),
-                expected_recording_configuration_fingerprint=ledger.configuration.fingerprint,
-                identity_revision=mapping.revision,
-            ),
-        )
-        for index in range(number)
-    ]
+    whole = ClosedRunRecordingService(
+        state.sessions,
+        ResidencyRunEvidenceService(state.sessions, state.archive, clock=state.now),
+        state.archive,
+        derivations,
+        ledger,
+        clock=state.now,
+    )
+    jobs = RecordingJobService(
+        state.sessions,
+        whole,
+        partition_recorder=writer,
+        limits=RecordingJobLimits(
+            transaction_timeout_ms=30000, lease_seconds=60, max_attempts=3, retry_base_seconds=1
+        ),
+        clock=state.now,
+    )
+    plans = RecordingPlanService(state.sessions, partition_service, ledger, jobs, clock=state.now)
+    plan = plans.create(
+        posting_context,
+        RecordingPlanRequest(
+            id=uuid4(),
+            partition=parent_reference,
+            expected_recording_configuration_fingerprint=ledger.configuration.fingerprint,
+            identity_revision=mapping.revision,
+        ),
+    ).plan
+    first_batch = plans.dispatch(
+        posting_context,
+        RecordingDispatchRequest(plan_id=plan.request.id, expected_version=1, limit=8),
+    )
+    assert first_batch.progress.next_partition == 8 and not first_batch.progress.all_enqueued
+    # A new service reconstructs dispatch progress; no in-memory fanout cursor.
+    plans = RecordingPlanService(state.sessions, partition_service, ledger, jobs, clock=state.now)
+    end_batch = plans.dispatch(
+        posting_context,
+        RecordingDispatchRequest(plan_id=plan.request.id, expected_version=2, limit=8),
+    )
+    assert len(end_batch.job_ids) == 1 and end_batch.progress.all_enqueued
+    for _ in range(number):
+        claim = jobs.claim(posting_context)
+        assert jobs.execute(posting_context, claim).state == "completed"
+    receipts = [writer.record(posting_context, plan.job(index)) for index in range(number)]
+    assert all(receipt.duplicate for receipt in receipts)
     with state.sessions() as session:
         partitions = [
             ClosedRunRecordingRepository(session).get_partition(receipt.id).proof

@@ -19,6 +19,41 @@ from sqlalchemy.orm import Mapped, mapped_column
 from aris.core.db import Base
 
 
+class UsageRecordingPlanRow(Base):
+    __tablename__ = "usage_recording_plans"
+    __table_args__ = (
+        CheckConstraint(
+            "partition_count>0 AND next_partition>=0 AND next_partition<=partition_count",
+            name="ck_recording_plan_range",
+        ),
+        CheckConstraint(
+            "version>=1 AND version<=next_partition+1 AND "
+            "((version=1 AND next_partition=0) OR (version>1 AND next_partition>0))",
+            name="ck_recording_plan_version",
+        ),
+        CheckConstraint("updated_at>=created_at", name="ck_recording_plan_time"),
+        CheckConstraint(
+            "length(fingerprint)=64 AND length(run_id)=64 AND "
+            "length(canonical_plan)>0 AND length(canonical_plan)<=16384",
+            name="ck_recording_plan_input",
+        ),
+        Index("ix_recording_plan_run", "consumer_id", "run_id"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    event_id: Mapped[str] = mapped_column(ForeignKey("domain_events.event_id"), unique=True)
+    consumer_id: Mapped[str] = mapped_column(String(128))
+    run_id: Mapped[str] = mapped_column(String(64))
+    source_record_id: Mapped[str] = mapped_column(ForeignKey("usage_trace_records.id"))
+    closing_attestation_id: Mapped[str] = mapped_column(ForeignKey("usage_trace_attestations.id"))
+    partition_count: Mapped[int] = mapped_column(BigInteger)
+    canonical_plan: Mapped[str] = mapped_column(Text)
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    next_partition: Mapped[int] = mapped_column(BigInteger)
+    version: Mapped[int] = mapped_column(BigInteger)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class UsageResidencySegmentSetRow(Base):
     __tablename__ = "usage_residency_segment_sets"
     __table_args__ = (
