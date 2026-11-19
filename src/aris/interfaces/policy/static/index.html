@@ -1,4 +1,4 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>策略草稿 · ARIS</title><link rel="stylesheet" href="/internal/policy/ui/assets/policy.css"><script src="/internal/policy/ui/assets/policy-scenarios.js" defer></script><script src="/internal/policy/ui/assets/policy-editor.js" defer></script><script src="/internal/policy/ui/assets/policy.js" defer></script></head>
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>策略草稿 · ARIS</title><link rel="stylesheet" href="/internal/policy/ui/assets/policy.css"><script src="/internal/policy/ui/assets/policy-scenarios.js" defer></script><script src="/internal/policy/ui/assets/policy-fields.js" defer></script><script src="/internal/policy/ui/assets/policy-editor.js" defer></script><script src="/internal/policy/ui/assets/policy.js" defer></script></head>
 <body><main>
   <header><div><p class="eyebrow">ARIS / POLICY</p><h1>策略草稿</h1><p class="subtitle">查看已保存的规则，比较版本之间的变化。</p></div><span id="identity" class="muted">本地只读查询</span></header>
   <section id="connect-panel" class="panel connect"><div><h2>连接策略目录</h2><p>需要策略草稿读取权限。访问凭据仅保留在当前页面内存中。</p></div><form id="connect-form"><label for="credential" class="sr-only">开发访问凭据</label><input id="credential" type="password" autocomplete="off" placeholder="开发访问凭据" required><button id="connect-button">连接</button></form></section>
@@ -16,8 +16,17 @@
         <section id="editor-panel" class="panel editor-panel" hidden aria-labelledby="editor-heading">
           <div class="section-head"><h2 id="editor-heading">草稿来源编辑</h2><span class="badge">保存不发布</span></div>
           <p id="editor-base" class="muted"></p>
+          <section id="editor-quick" class="editor-quick" hidden aria-labelledby="editor-quick-heading">
+            <h3 id="editor-quick-heading">常用参数</h3><p class="muted">表单修改应用到完整规则后，仍须经服务端校验和确认。</p>
+            <form id="editor-quick-form" autocomplete="off">
+              <div id="editor-quick-general" class="quick-grid"></div><p class="muted">数值和所选单位共同决定时长；原有秒数不会被自动取整。</p>
+              <h4>每人使用额度</h4><p id="editor-quick-scope" class="muted"></p><div id="editor-quick-quotas" class="quick-quotas"></div>
+              <p id="editor-quick-preserved" class="muted"></p><p id="editor-quick-state" class="quick-state" role="status" aria-live="polite"></p>
+              <div class="editor-actions"><button id="editor-quick-apply" type="submit">应用参数到草稿</button><button id="editor-quick-discard" type="button" class="secondary">放弃参数更改</button></div>
+            </form>
+          </section>
           <form id="editor-form">
-            <label for="editor-source">完整规则 JSON</label><textarea id="editor-source" spellcheck="false" autocapitalize="off" autocomplete="off" maxlength="24576" required placeholder="粘贴完整的 GpuAllocationPolicy JSON，或克隆一个已有来源。"></textarea>
+            <details id="editor-json" class="editor-json"><summary>高级 JSON 编辑（包含所有规则）</summary><label for="editor-source">完整规则 JSON</label><textarea id="editor-source" spellcheck="false" autocapitalize="off" autocomplete="off" maxlength="24576" required placeholder="粘贴完整的 GpuAllocationPolicy JSON，或克隆一个已有来源。"></textarea><p class="muted">直接修改原始 JSON 后，重新校验即可同步常用参数；高级字段不会被表单静默删掉。</p></details>
             <label for="editor-reason">保存原因</label><input id="editor-reason" maxlength="256" autocomplete="off" required placeholder="简述这次规则修改的目的">
             <p class="muted">格式与目录校验只读。保存继续遵守现有的命令大小限制；大文件会明确拒绝。</p>
             <button id="editor-validate" type="submit">校验并预览</button>

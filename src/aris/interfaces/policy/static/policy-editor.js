@@ -12,6 +12,23 @@ window.ARISPolicyEditor = ({ $, text, request, commands, run, onState, onViewSav
     $('editor-message').hidden = !value;
     $('editor-message').classList.toggle('error', error);
   }
+  function prepareEdit() {
+    if (held()) return false;
+    if (intent && terminal.has(intent.state)) {
+      const saved=intent.outcome?.result;
+      if (intent.state==='succeeded' && saved?.reference && saved.fingerprint) {
+        base={reference:saved.reference,fingerprint:saved.fingerprint};
+        $('editor-base').textContent=`基于已保存版本 ${base.reference.version} 继续编辑；旧版本保持不变。`;
+      }
+      intent=null;
+    }
+    clearPreview(); return true;
+  }
+  const fields=window.ARISPolicyFields({$,text,run,
+    onDirty(){if(prepareEdit()){note('常用参数尚未应用，请先应用到完整草稿。');changed();}},
+    onApply(source){if(prepareEdit()){input.value=JSON.stringify(source,null,2);note('参数已应用到完整草稿，尚须服务端校验。');changed();}},
+    onDiscard(){note('已放弃未应用的参数更改，完整 JSON 保持不变。请重新校验。');changed();},
+  });
   function controls() {
     const holding = held();
     $('editor-launch').hidden = !enabled;
@@ -20,9 +37,9 @@ window.ARISPolicyEditor = ({ $, text, request, commands, run, onState, onViewSav
     $('editor-recover').disabled = busy || holding;
     $('editor-recover-id').disabled = busy || holding;
     input.disabled = reason.disabled = busy || holding;
-    $('editor-validate').disabled = busy || holding;
+    $('editor-validate').disabled = busy || holding || fields.isDirty();
     $('editor-save').hidden = validated === null || intent !== null;
-    $('editor-save').disabled = busy || validated?.existing_equivalent === true;
+    $('editor-save').disabled = busy || fields.isDirty() || validated?.existing_equivalent === true;
     $('editor-command').hidden = intent === null;
     $('editor-command-id').textContent = intent?.id || '尚未获得命令 ID；保留原请求重试。';
     $('editor-retry').hidden = !intent || !['submit_unknown', 'confirmation_unknown', 'withdraw_unknown'].includes(intent.state);
@@ -36,6 +53,7 @@ window.ARISPolicyEditor = ({ $, text, request, commands, run, onState, onViewSav
     $('editor-view-saved').hidden = intent?.state !== 'succeeded';
     $('editor-view-saved').disabled = busy;
     $('editor-confirm').disabled = busy || intent?.state !== 'awaiting_confirmation';
+    fields.setBusy(busy || holding);
   }
   function changed() {
     controls();
@@ -62,6 +80,23 @@ window.ARISPolicyEditor = ({ $, text, request, commands, run, onState, onViewSav
     const weekdays={monday:'周一',tuesday:'周二',wednesday:'周三',thursday:'周四',friday:'周五',saturday:'周六',sunday:'周日'};
     const window = spec.quota.window.kind === 'calendar_week' ? `自然周 · ${weekdays[spec.quota.window.week_starts_on]}开始` : '滚动 7 天';
     target.replaceChildren(title, list, text('h4', `实际使用额度 · ${window}`), quotas, text('p', `保存原因：${draft.reason}`, 'editor-reason-copy'));
+    if(spec.role_overrides.length || spec.gpu_time_weights.model_weights.length || spec.idle_reclaim.mode==='enabled') {
+      const advanced=text('details','','editor-preserved');
+      advanced.append(text('summary','核对保留的角色、型号及空闲规则'));
+      spec.role_overrides.forEach(role=>{
+        const values=[];
+        if(role.limits.quota_limit)values.push(`额度 ${quota(role.limits.quota_limit)}`);
+        if(role.limits.max_duration_seconds)values.push(`最长 ${duration(role.limits.max_duration_seconds)}`);
+        if(role.limits.max_concurrent_gpus)values.push(`并发 ${role.limits.max_concurrent_gpus} GPU`);
+        advanced.append(text('p',`${role.role}（优先级 ${role.priority}）· ${values.join(' · ')}`));
+      });
+      spec.gpu_time_weights.model_weights.forEach(item=>advanced.append(text('p',`${item.model} · ${item.weight.numerator}:${item.weight.denominator}`)));
+      if(spec.idle_reclaim.mode==='enabled') {
+        const idle=spec.idle_reclaim;
+        advanced.append(text('p',`来源空闲规则：利用率低于 ${idle.utilization_below_percent}% 持续 ${duration(idle.observation_seconds)}，宽限 ${duration(idle.grace_seconds)}，动作释放预约。此处不执行该流程。`));
+      }
+      target.append(advanced);
+    }
   }
   function clearPreview() {
     validated = null;
@@ -82,14 +117,15 @@ window.ARISPolicyEditor = ({ $, text, request, commands, run, onState, onViewSav
     $('editor-confirm-json').textContent = '';
     $('editor-confirm-fingerprint').textContent = '';
     $('editor-confirm-expires').textContent = '';
+    fields.clear(); $('editor-json').open=false;
     clearPreview(); note('');
     if (dialog.open) dialog.close();
     controls();
   }
-  function editStarted() {
-    if (held()) return;
-    if (intent && terminal.has(intent.state)) intent = null;
-    clearPreview(); note('内容已更改，请重新校验。'); changed();
+  function editStarted(event) {
+    if (!prepareEdit()) return;
+    if (event.target===input) fields.clear();
+    note('内容已更改，请重新校验。'); changed();
   }
   function open(source, reference = null) {
     if (held()) return;
@@ -98,8 +134,10 @@ window.ARISPolicyEditor = ({ $, text, request, commands, run, onState, onViewSav
     reason.value = '';
     $('editor-base').textContent = reference ? `从版本 ${reference.reference.version} 克隆；旧版本保持不变。` : '粘贴完整的策略 JSON。所有规则都须显式提供。';
     $('editor-panel').hidden = false;
+    if (source) fields.source(source); else fields.clear();
+    $('editor-json').open=!source;
     changed();
-    input.focus();
+    if (source) fields.focus(); else input.focus();
   }
   function previewInput() {
     return {source_text:input.value, reason:reason.value, ...(base ? {base:base.reference, expected_base_fingerprint:base.fingerprint} : {})};
@@ -132,6 +170,7 @@ window.ARISPolicyEditor = ({ $, text, request, commands, run, onState, onViewSav
     const draft = original.request.parameters;
     intent.parameters = draft;
     input.value = JSON.stringify(draft.source, null, 2); reason.value = draft.reason;
+    fields.source(draft.source); $('editor-json').open=false;
     $('editor-panel').hidden = false;
     applyOutcome(original.outcome);
     if (original.outcome.state === 'awaiting_confirmation' && show) {
@@ -186,12 +225,15 @@ window.ARISPolicyEditor = ({ $, text, request, commands, run, onState, onViewSav
     open(source, {reference:{name:sourceView.source.metadata.name, version:sourceView.source.metadata.version}, fingerprint:sourceView.fingerprint});
   });
   [input, reason].forEach(field => field.addEventListener('input', editStarted));
+  input.addEventListener('invalid',()=>{$('editor-json').open=true;});
   $('editor-form').addEventListener('submit', event => {
     event.preventDefault();
+    if(fields.isDirty()){note('请先应用或放弃常用参数更改。',true);return;}
     run(async () => {
       if (intent && terminal.has(intent.state)) intent = null;
       clearPreview(); note('');
       validated = await request('drafts/validate', previewInput());
+      fields.source(validated.draft.source);
       summary($('editor-preview-summary'), validated.draft);
       $('editor-fingerprint').textContent = validated.fingerprint;
       $('editor-canonical').textContent = JSON.stringify(validated.draft.source, null, 2);

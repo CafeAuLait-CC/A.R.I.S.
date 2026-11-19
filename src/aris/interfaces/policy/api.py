@@ -87,7 +87,9 @@ def build_router(service: PolicyReadSurface) -> APIRouter:
 
     @router.get("/ui/assets/{name}")
     def asset(
-        name: Literal["policy.js", "policy-scenarios.js", "policy-editor.js", "policy.css"],
+        name: Literal[
+            "policy.js", "policy-scenarios.js", "policy-fields.js", "policy-editor.js", "policy.css"
+        ],
     ) -> Response:
         return Response(
             (ASSETS / name).read_bytes(),

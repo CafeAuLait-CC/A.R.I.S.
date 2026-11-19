@@ -131,8 +131,9 @@ def test_policy_browser_routes_page_versions_show_verified_details_and_compare_w
         assert "no-store" in detail.headers["cache-control"]
         assert client.get("/internal/policy/ui").status_code == 200
         assert client.get("/internal/policy/ui/assets/policy.js").status_code == 200
-        asset = client.get("/internal/policy/ui/assets/policy-scenarios.js")
-        assert asset.status_code == 200 and "javascript" in asset.headers["content-type"]
+        for name in ("policy-scenarios.js", "policy-editor.js", "policy-fields.js"):
+            asset = client.get("/internal/policy/ui/assets/" + name)
+            assert asset.status_code == 200 and "javascript" in asset.headers["content-type"]
         assert client.get("/internal/policy/ui/assets/anything").status_code == 422
     assert source_counts(state[2]) == before
 
