@@ -16,10 +16,13 @@ from aris.modules.lyra.ledger_repo import UsageLedgerRepository
 from aris.modules.lyra.quota_evidence_schemas import (
     HistoricalModelUsage,
     HistoricalQuotaEvidence,
+    QuotaEvidenceListQuery,
+    QuotaEvidencePage,
     QuotaEvidenceSelection,
     quota_evidence_fingerprint,
 )
 from aris.modules.lyra.recorded_usage import RecordedUsageQuery, recorded_usage_metrics
+from aris.modules.lyra.window_reader_schemas import WindowPageCursor
 from aris.modules.lyra.window_snapshot_repo import UsageWindowRepository
 from aris.modules.lyra.window_snapshot_schemas import StoredUsageWindow
 
@@ -35,7 +38,9 @@ class HistoricalQuotaEvidenceService:
         transaction_budget(session, 100, 1000, self.timeout_ms)
 
     @staticmethod
-    def _permission(actor: ActorContext, selection: QuotaEvidenceSelection) -> AccessRequest:
+    def _permission(
+        actor: ActorContext, selection: QuotaEvidenceSelection | QuotaEvidenceListQuery
+    ) -> AccessRequest:
         return AccessRequest(
             user_id=actor.actor_id,
             permission="usage.read_own"
@@ -44,10 +49,12 @@ class HistoricalQuotaEvidenceService:
             scope=AccessScope(type="node", id=selection.node_id),
         )
 
-    def require_access(self, actor: ActorContext, selection: QuotaEvidenceSelection) -> None:
+    def require_access(
+        self, actor: ActorContext, selection: QuotaEvidenceSelection | QuotaEvidenceListQuery
+    ) -> None:
         """Recheck current access after a consuming domain finishes its own computation."""
         actor = ActorContext.model_validate(actor.model_dump(mode="json"))
-        selection = QuotaEvidenceSelection.model_validate(selection.model_dump(mode="json"))
+        selection = type(selection).model_validate(selection.model_dump(mode="json"))
         try:
             with self.sessions() as session, session.no_autoflush:
                 self._budget(session)
@@ -63,6 +70,33 @@ class HistoricalQuotaEvidenceService:
             "Historical usage evidence database is unavailable",
             503,
         )
+
+    def list(self, actor: ActorContext, query: QuotaEvidenceListQuery) -> QuotaEvidencePage:
+        actor = ActorContext.model_validate(actor.model_dump(mode="json"))
+        query = QuotaEvidenceListQuery.model_validate(query.model_dump(mode="json"))
+        deadline = monotonic() + self.timeout_ms / 1000
+        try:
+            with self.sessions() as session, session.no_autoflush:
+                if session.get_bind().dialect.name == "postgresql":
+                    session.execute(text("SET TRANSACTION READ ONLY"))
+                self._budget(session)
+                self.access.require_in_transaction(session, self._permission(actor, query))
+                values = UsageWindowRepository(session).quota_selections(query)
+                result = QuotaEvidencePage(
+                    query=query,
+                    items=values[: query.limit],
+                    next_cursor=WindowPageCursor(
+                        created_at=values[query.limit - 1].created_at,
+                        id=values[query.limit - 1].selection.snapshot_id,
+                    )
+                    if len(values) > query.limit
+                    else None,
+                )
+            self.require_access(actor, query)
+            self._deadline(deadline)
+            return result
+        except DBAPIError as error:
+            raise self._failure(error) from None
 
     @staticmethod
     def _deadline(deadline: float) -> None:

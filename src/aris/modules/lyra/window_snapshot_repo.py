@@ -11,6 +11,11 @@ from sqlalchemy.sql.elements import ColumnElement
 from aris.core.contracts import DomainError
 from aris.core.time import utc
 from aris.modules.lyra.models import UsageCoverageManifestRow, UsageWindowSnapshotRow
+from aris.modules.lyra.quota_evidence_schemas import (
+    QuotaEvidenceListQuery,
+    QuotaEvidenceSelection,
+    QuotaEvidenceWindow,
+)
 from aris.modules.lyra.trace_consumer_schemas import canonical_trace
 from aris.modules.lyra.window_reader_schemas import SavedWindowSummary, WindowListQuery
 from aris.modules.lyra.window_schemas import MAX_WINDOW_SOURCE_BYTES
@@ -24,6 +29,48 @@ from aris.modules.lyra.window_snapshot_schemas import (
 class UsageWindowRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
+
+    def quota_selections(self, query: QuotaEvidenceListQuery) -> tuple[QuotaEvidenceWindow, ...]:
+        """Own-target metadata, including node snapshots projectable to that owner."""
+        row = UsageWindowSnapshotRow
+        clauses = [
+            row.node_id == query.node_id,
+            or_(row.owner_id.is_(None), row.owner_id == str(query.owner_id)),
+            row.start_at < query.end_at,
+            row.end_at > query.start_at,
+        ]
+        if query.before is not None:
+            clauses.append(
+                or_(
+                    row.created_at < query.before.created_at,
+                    and_(row.created_at == query.before.created_at, row.id < str(query.before.id)),
+                )
+            )
+        values = self.session.execute(
+            select(row.id, row.fingerprint, row.start_at, row.end_at, row.created_at)
+            .where(*clauses)
+            .order_by(row.created_at.desc(), row.id.desc())
+            .limit(query.limit + 1)
+        )
+        try:
+            return tuple(
+                QuotaEvidenceWindow(
+                    selection=QuotaEvidenceSelection(
+                        snapshot_id=value.id,
+                        expected_snapshot_fingerprint=value.fingerprint,
+                        node_id=query.node_id,
+                        owner_id=query.owner_id,
+                    ),
+                    start_at=utc(value.start_at),
+                    end_at=utc(value.end_at),
+                    created_at=utc(value.created_at),
+                )
+                for value in values
+            )
+        except (ValueError, TypeError, KeyError):
+            raise DomainError(
+                "DEPENDENCY_UNAVAILABLE", "Historical window directory is inconsistent", 503
+            ) from None
 
     def summaries(self, query: WindowListQuery) -> tuple[SavedWindowSummary, ...]:
         row = UsageWindowSnapshotRow

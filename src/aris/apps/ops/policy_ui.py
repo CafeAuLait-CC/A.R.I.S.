@@ -24,9 +24,12 @@ from aris.core.config import Settings
 from aris.core.contracts import DomainError
 from aris.core.db import build_engine, check_database, session_factory
 from aris.interfaces.commands.auth import BoundSubjectTokens, UserTokenBinding
+from aris.interfaces.policy.history import HistoricalPolicyNode, PolicyHistoricalUsage
 from aris.interfaces.policy.service import PolicyReadSurface
 from aris.interfaces.slack.config import SlackSettings
+from aris.modules.lyra.quota_evidence_service import HistoricalQuotaEvidenceService
 from aris.modules.nova.policy_catalog_service import PolicyCatalogService
+from aris.modules.nova.quota_history_service import HistoricalQuotaAssessmentService
 
 
 class LocalPolicyConfig(AccessContract):
@@ -36,6 +39,7 @@ class LocalPolicyConfig(AccessContract):
     user_tokens: tuple[UserTokenBinding, ...] = Field(min_length=1, max_length=128, repr=False)
     policy_names: tuple[str, ...] = Field(min_length=1, max_length=32)
     draft_commands: PolicyDraftRuntimeConfig | None = None
+    historical_usage: tuple[HistoricalPolicyNode, ...] = Field(default=(), max_length=8)
 
     def settings(self) -> Settings:
         url = make_url(self.database_url.get_secret_value())
@@ -71,6 +75,8 @@ def main(argv: list[str] | None = None) -> int:
         auth = BoundSubjectTokens(config.user_tokens, reserved_tokens=[config.read_token])
         if len(set(config.policy_names)) != len(config.policy_names):
             raise ValueError("duplicate policy names")
+        if len({node.node_id for node in config.historical_usage}) != len(config.historical_usage):
+            raise ValueError("duplicate historical usage nodes")
         from aris.modules.nova.policy_catalog_schemas import PolicySourceReference
 
         for name in config.policy_names:
@@ -88,6 +94,10 @@ def main(argv: list[str] | None = None) -> int:
             }
             if config.draft_commands is not None:
                 summary["draft_commands"] = ["policy.record_draft"]
+            if config.historical_usage:
+                summary["historical_usage_nodes"] = [
+                    node.node_id for node in config.historical_usage
+                ]
             print(json.dumps(summary))
             return 0
         url = make_url(settings.database_url)
@@ -113,11 +123,19 @@ def main(argv: list[str] | None = None) -> int:
                 drafts.worker, once=args.once, poll_seconds=config.draft_commands.poll_seconds
             )
             return 0
+        catalog = PolicyCatalogService(sessions)
+        history = None
+        if config.historical_usage:
+            reader = HistoricalQuotaEvidenceService(sessions)
+            history = PolicyHistoricalUsage(
+                HistoricalQuotaAssessmentService(catalog, reader), reader, config.historical_usage
+            )
         surface = PolicyReadSurface(
-            PolicyCatalogService(sessions),
+            catalog,
             auth,
             config.policy_names,
             draft_commands=drafts.user_api if drafts is not None else None,
+            historical_usage=history,
         )
         uvicorn.run(
             create_app(

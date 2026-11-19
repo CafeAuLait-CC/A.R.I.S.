@@ -9,6 +9,7 @@ from pydantic import AwareDatetime, Field, field_validator, model_validator
 from aris.modules.lyra.ledger_schemas import UsageLedgerHead
 from aris.modules.lyra.trace_consumer_schemas import canonical_trace, trace_fingerprint
 from aris.modules.lyra.usage_intervals import IntervalContract
+from aris.modules.lyra.window_reader_schemas import WindowPageCursor
 from aris.modules.lyra.window_schemas import UsageWindowQuery
 
 MAX_MODEL_MICROSECONDS = 128 * 366 * 86400 * 1000000
@@ -19,6 +20,31 @@ class QuotaEvidenceSelection(IntervalContract):
     expected_snapshot_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
     node_id: str = Field(min_length=1, max_length=128)
     owner_id: UUID
+
+
+class QuotaEvidenceListQuery(UsageWindowQuery):
+    owner_id: UUID
+    before: WindowPageCursor | None = None
+    limit: int = Field(default=8, ge=1, le=16, strict=True)
+
+
+class QuotaEvidenceWindow(IntervalContract):
+    selection: QuotaEvidenceSelection
+    start_at: AwareDatetime
+    end_at: AwareDatetime
+    created_at: AwareDatetime
+
+    @model_validator(mode="after")
+    def positive(self) -> "QuotaEvidenceWindow":
+        if not self.start_at < self.end_at <= self.created_at:
+            raise ValueError("quota window metadata requires an observed historical interval")
+        return self
+
+
+class QuotaEvidencePage(IntervalContract):
+    query: QuotaEvidenceListQuery
+    items: tuple[QuotaEvidenceWindow, ...] = Field(max_length=16)
+    next_cursor: WindowPageCursor | None = None
 
 
 class HistoricalModelUsage(IntervalContract):

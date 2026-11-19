@@ -8,6 +8,7 @@ from starlette.responses import HTMLResponse, JSONResponse, Response
 from aris.core.contracts import DomainError
 from aris.interfaces.commands.api import authorization, bounded_input
 from aris.interfaces.policy.drafts import PolicyDraftInput
+from aris.interfaces.policy.history import PolicyHistoryAssessmentInput, PolicyHistoryWindowsInput
 from aris.interfaces.policy.service import PolicyDetailInput, PolicyReadSurface
 from aris.modules.nova.policy_catalog_schemas import (
     PolicySourceComparisonQuery,
@@ -26,6 +27,28 @@ PAGE_HEADERS = {
 
 def build_router(service: PolicyReadSurface) -> APIRouter:
     router = APIRouter(prefix="/internal/policy", tags=["policy-source-review"])
+
+    if service.historical_usage is not None:
+
+        @router.post("/history/windows")
+        async def history_windows(request: Request) -> JSONResponse:
+            if request.query_params:
+                raise DomainError("VALIDATION_ERROR", "Unexpected historical query parameters", 422)
+            query = await bounded_input(request, PolicyHistoryWindowsInput)
+            result = await run_in_threadpool(
+                service.history_windows, authorization(request), request.state.request_id, query
+            )
+            return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
+
+        @router.post("/history/assess")
+        async def history_assess(request: Request) -> JSONResponse:
+            if request.query_params:
+                raise DomainError("VALIDATION_ERROR", "Unexpected historical query parameters", 422)
+            query = await bounded_input(request, PolicyHistoryAssessmentInput)
+            result = await run_in_threadpool(
+                service.history_assess, authorization(request), request.state.request_id, query
+            )
+            return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
 
     if service.draft_commands is not None:
 
@@ -88,7 +111,12 @@ def build_router(service: PolicyReadSurface) -> APIRouter:
     @router.get("/ui/assets/{name}")
     def asset(
         name: Literal[
-            "policy.js", "policy-scenarios.js", "policy-fields.js", "policy-editor.js", "policy.css"
+            "policy.js",
+            "policy-scenarios.js",
+            "policy-fields.js",
+            "policy-history.js",
+            "policy-editor.js",
+            "policy.css",
         ],
     ) -> Response:
         return Response(

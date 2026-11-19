@@ -19,6 +19,13 @@ from aris.interfaces.policy.drafts import (
     PolicyDraftInput,
     PolicyDraftValidation,
 )
+from aris.interfaces.policy.history import (
+    PolicyHistoricalUsage,
+    PolicyHistoryAssessmentInput,
+    PolicyHistoryAssessmentView,
+    PolicyHistoryWindowsInput,
+)
+from aris.modules.lyra.quota_evidence_schemas import QuotaEvidencePage
 from aris.modules.nova.policy_catalog_schemas import (
     PolicySourceComparisonQuery,
     PolicySourceListQuery,
@@ -44,6 +51,7 @@ class PolicyCatalogSession(AccessContract):
     actor: UserPrincipal
     policy_names: tuple[PolicyName, ...] = Field(min_length=1, max_length=32)
     draft_editing_available: bool = False
+    historical_usage_nodes: tuple[str, ...] = ()
 
 
 class PolicyDetailInput(AccessContract):
@@ -59,6 +67,7 @@ class PolicyReadSurface:
         policy_names: tuple[str, ...],
         *,
         draft_commands: PolicyDraftCommandSurface | None = None,
+        historical_usage: PolicyHistoricalUsage | None = None,
     ) -> None:
         if not 1 <= len(policy_names) <= 32 or len(set(policy_names)) != len(policy_names):
             raise ValueError("policy interface requires explicit unique policy names")
@@ -71,6 +80,9 @@ class PolicyReadSurface:
             raise ValueError("policy reads and draft commands require one user and name boundary")
         self.catalog, self.authenticator, self.policy_names = catalog, authenticator, policy_names
         self.draft_commands = draft_commands
+        if historical_usage is not None and historical_usage.assessments.catalog is not catalog:
+            raise ValueError("historical policy reads require the same source catalog")
+        self.historical_usage = historical_usage
 
     def _run(
         self,
@@ -118,7 +130,39 @@ class PolicyReadSurface:
                 actor=principal,
                 policy_names=self.policy_names,
                 draft_editing_available=self.draft_commands is not None,
+                historical_usage_nodes=self.historical_usage.accessible_nodes(session, actor)
+                if self.historical_usage is not None
+                else (),
             ),
+        )
+
+    def history_windows(
+        self, authorization: str | None, request_id: str, query: PolicyHistoryWindowsInput
+    ) -> QuotaEvidencePage:
+        history = self.historical_usage
+        if history is None:
+            raise DomainError(
+                "HISTORICAL_USAGE_NOT_CONFIGURED", "Historical policy reads are not enabled", 503
+            )
+        return self._run(
+            authorization,
+            request_id,
+            lambda session, actor, principal: history.windows(actor, query),
+        )
+
+    def history_assess(
+        self, authorization: str | None, request_id: str, query: PolicyHistoryAssessmentInput
+    ) -> PolicyHistoryAssessmentView:
+        history = self.historical_usage
+        if history is None:
+            raise DomainError(
+                "HISTORICAL_USAGE_NOT_CONFIGURED", "Historical policy reads are not enabled", 503
+            )
+        return self._run(
+            authorization,
+            request_id,
+            lambda session, actor, principal: history.assess(actor, query),
+            names=(query.reference.name,),
         )
 
     def _name(self, name: str) -> None:

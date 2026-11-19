@@ -1,4 +1,4 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>策略草稿 · ARIS</title><link rel="stylesheet" href="/internal/policy/ui/assets/policy.css"><script src="/internal/policy/ui/assets/policy-scenarios.js" defer></script><script src="/internal/policy/ui/assets/policy-fields.js" defer></script><script src="/internal/policy/ui/assets/policy-editor.js" defer></script><script src="/internal/policy/ui/assets/policy.js" defer></script></head>
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>策略草稿 · ARIS</title><link rel="stylesheet" href="/internal/policy/ui/assets/policy.css"><script src="/internal/policy/ui/assets/policy-scenarios.js" defer></script><script src="/internal/policy/ui/assets/policy-fields.js" defer></script><script src="/internal/policy/ui/assets/policy-editor.js" defer></script><script src="/internal/policy/ui/assets/policy-history.js" defer></script><script src="/internal/policy/ui/assets/policy.js" defer></script></head>
 <body><main>
   <header><div><p class="eyebrow">ARIS / POLICY</p><h1>策略草稿</h1><p class="subtitle">查看已保存的规则，比较版本之间的变化。</p></div><span id="identity" class="muted">本地只读查询</span></header>
   <section id="connect-panel" class="panel connect"><div><h2>连接策略目录</h2><p>需要策略草稿读取权限。访问凭据仅保留在当前页面内存中。</p></div><form id="connect-form"><label for="credential" class="sr-only">开发访问凭据</label><input id="credential" type="password" autocomplete="off" placeholder="开发访问凭据" required><button id="connect-button">连接</button></form></section>
@@ -53,6 +53,18 @@
           <div class="extra-grid"><section><h3>GPU 计时权重</h3><div id="weights"></div></section><section><h3>空闲处理规则</h3><p id="idle"></p></section></div>
           <section id="roles-section" hidden><h3 class="rule-head">角色覆盖</h3><div id="roles"></div></section>
           <details class="source"><summary>查看原始规则与来源指纹</summary><p id="fingerprint"></p><pre id="source-json"></pre></details>
+        </section>
+        <section id="history-panel" class="panel history-panel" hidden aria-labelledby="history-heading">
+          <div class="section-head"><h2 id="history-heading">本人历史额度核对</h2><span class="badge">只读 · 不授权预约</span></div><p id="history-source" class="muted"></p>
+          <p class="history-context">选择已保存的统计窗口，按当前选中的草稿版本核对本人用量。仅到原采样末尾，不能代表当前剩余额度。</p>
+          <p id="history-unavailable" class="muted"></p>
+          <form id="history-form">
+            <div class="history-directory"><label>历史节点<select id="history-node"></select></label><label>查找范围<select id="history-range"><option value="7">最近 7 天</option><option value="30">最近 30 天</option><option value="90" selected>最近 90 天</option><option value="365">最近 365 天</option></select></label><button id="history-load" type="button" class="secondary">查询已保存窗口</button></div>
+            <p id="history-note" class="muted" role="status" aria-live="polite"></p>
+            <label class="history-window-label">统计窗口<select id="history-window" required></select></label><p id="history-selected" class="muted"></p><button id="history-more" type="button" class="secondary" hidden>更多窗口</button>
+            <label class="history-roles-label">历史核对的假设角色（可选）<input id="history-roles" maxlength="2079" placeholder="规则角色名，用逗号分隔" autocomplete="off"></label><p class="muted">角色仅为手动假设，不读取或授予当前账号的真实角色。</p><button id="history-assess" type="submit">核对历史额度</button>
+          </form>
+          <section id="history-result" class="history-result" hidden aria-live="polite"></section>
         </section>
         <section id="comparison" class="panel comparison" hidden>
           <h2>比较版本</h2><p class="muted">比较保存内容的语义变化，结果不构成批准或发布。</p>

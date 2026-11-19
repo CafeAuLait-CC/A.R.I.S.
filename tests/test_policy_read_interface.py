@@ -60,6 +60,15 @@ def test_policy_browser_routes_page_versions_show_verified_details_and_compare_w
         assert info["actor"]["user_id"] == state[3]["alice"]
         assert info["policy_names"] == ["fixture-only", "empty-policy"]
         assert not info["draft_editing_available"]
+        assert info["historical_usage_nodes"] == []
+        assert (
+            client.post("/internal/policy/history/windows", headers=headers, json={}).status_code
+            == 404
+        )
+        assert (
+            client.post("/internal/policy/history/assess", headers=headers, json={}).status_code
+            == 404
+        )
         assert (
             client.post("/internal/policy/drafts/validate", headers=headers, json={}).status_code
             == 404
@@ -131,7 +140,12 @@ def test_policy_browser_routes_page_versions_show_verified_details_and_compare_w
         assert "no-store" in detail.headers["cache-control"]
         assert client.get("/internal/policy/ui").status_code == 200
         assert client.get("/internal/policy/ui/assets/policy.js").status_code == 200
-        for name in ("policy-scenarios.js", "policy-editor.js", "policy-fields.js"):
+        for name in (
+            "policy-scenarios.js",
+            "policy-editor.js",
+            "policy-fields.js",
+            "policy-history.js",
+        ):
             asset = client.get("/internal/policy/ui/assets/" + name)
             assert asset.status_code == 200 and "javascript" in asset.headers["content-type"]
         assert client.get("/internal/policy/ui/assets/anything").status_code == 422
