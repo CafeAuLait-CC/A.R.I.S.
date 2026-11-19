@@ -171,6 +171,12 @@ class UsageLedgerService:
                     raise DomainError("CONFLICT", "Usage recording configuration changed", 409)
                 now = self._now()
                 candidate = self._candidate(source, request, configuration, now)
+                if repo.overlapping_reversal(candidate) is not None:
+                    raise DomainError(
+                        "USAGE_NEEDS_REVIEW",
+                        "Previously reversed GPU time requires reconciliation",
+                        409,
+                    )
                 head = repo.head(candidate.node_id)
                 coverage = repo.coverage(candidate, at=now)
                 outcome = plan_usage_posting(

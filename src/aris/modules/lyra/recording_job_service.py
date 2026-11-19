@@ -16,6 +16,8 @@ from aris.core.events import DomainEvent, OutboxEntry
 from aris.core.time import utc
 from aris.modules.lyra.ledger_schemas import UsagePostingContext
 from aris.modules.lyra.models import UsageRecordingJobRow
+from aris.modules.lyra.partition_recording_schemas import PartitionRecordingReceipt
+from aris.modules.lyra.partition_recording_service import PartitionRecordingService
 from aris.modules.lyra.recording_job_repo import RecordingJobRepository
 from aris.modules.lyra.recording_job_schemas import (
     MAX_RECORDING_JOB_INPUT_BYTES,
@@ -23,11 +25,17 @@ from aris.modules.lyra.recording_job_schemas import (
     RecordingJobEnqueueReceipt,
     RecordingJobLimits,
     RecordingJobResult,
+    RecordingRequest,
     StoredRecordingJob,
     recording_job_fingerprint,
+    recording_request_adapter,
+    recording_source_cutoff,
 )
 from aris.modules.lyra.run_recording_repo import ClosedRunRecordingRepository
-from aris.modules.lyra.run_recording_schemas import ClosedRunRecordingRequest
+from aris.modules.lyra.run_recording_schemas import (
+    ClosedRunRecordingReceipt,
+    ClosedRunRecordingRequest,
+)
 from aris.modules.lyra.run_recording_service import ClosedRunRecordingService
 from aris.modules.lyra.trace_consumer_schemas import canonical_trace
 
@@ -46,9 +54,11 @@ class RecordingJobService:
         recorder: ClosedRunRecordingService,
         *,
         limits: RecordingJobLimits | None = None,
+        partition_recorder: PartitionRecordingService | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.sessions, self.recorder = sessions, recorder
+        self.partition_recorder = partition_recorder
         self.limits = (
             RecordingJobLimits.model_validate(limits.model_dump(mode="json"))
             if limits is not None
@@ -82,7 +92,7 @@ class RecordingJobService:
         if value is None:
             raise DomainError("NOT_FOUND", "Recording job not found", 404)
         if value.state == "completed":
-            result = ClosedRunRecordingRepository(repo.session).get(id)
+            result = ClosedRunRecordingRepository(repo.session).get_any(id)
             if (
                 result is None
                 or result.request != value.request
@@ -107,7 +117,7 @@ class RecordingJobService:
             return self._stored(RecordingJobRepository(session), id)
 
     def enqueue(
-        self, context: UsagePostingContext, request: ClosedRunRecordingRequest
+        self, context: UsagePostingContext, request: RecordingRequest
     ) -> RecordingJobEnqueueReceipt:
         with self.sessions() as session:
             try:
@@ -119,10 +129,10 @@ class RecordingJobService:
                 raise self._failure(error) from None
 
     def enqueue_in_transaction(
-        self, session: Session, context: UsagePostingContext, request: ClosedRunRecordingRequest
+        self, session: Session, context: UsagePostingContext, request: RecordingRequest
     ) -> RecordingJobEnqueueReceipt:
         context = UsagePostingContext.model_validate(context.model_dump(mode="json"))
-        request = ClosedRunRecordingRequest.model_validate(request.model_dump(mode="json"))
+        request = recording_request_adapter.validate_python(request.model_dump(mode="json"))
         raw = canonical_trace(request)
         if len(raw.encode()) > MAX_RECORDING_JOB_INPUT_BYTES:
             raise DomainError("VALIDATION_ERROR", "Recording job input exceeds its budget", 422)
@@ -139,7 +149,7 @@ class RecordingJobService:
                     )
                 limits = self._active()
                 now = self._now()
-                if request.reference.source_cutoff > now:
+                if recording_source_cutoff(request) > now:
                     raise DomainError(
                         "VALIDATION_ERROR", "Recording job source cutoff is in the future", 422
                     )
@@ -202,7 +212,7 @@ class RecordingJobService:
                 transaction_budget(session, 100, 1000, limits.transaction_timeout_ms)
                 repo = RecordingJobRepository(session)
                 now = self._now()
-                row = repo.next(now)
+                row = repo.next(now, include_partitions=self.partition_recorder is not None)
                 if row is None:
                     return None
                 self._stored(repo, UUID(row.id))
@@ -263,7 +273,19 @@ class RecordingJobService:
                     return self._result(job)
                 if not self._owned(row, claim, self._now()):
                     return RecordingJobResult(id=claim.id, state="lost_claim")
-                result = self.recorder.record_in_transaction(session, context, job.request)
+                result: ClosedRunRecordingReceipt | PartitionRecordingReceipt
+                if isinstance(job.request, ClosedRunRecordingRequest):
+                    result = self.recorder.record_in_transaction(session, context, job.request)
+                else:
+                    if self.partition_recorder is None:
+                        raise DomainError(
+                            "USAGE_NOT_CONFIGURED",
+                            "Partition recording handler is not configured",
+                            503,
+                        )
+                    result = self.partition_recorder.record_in_transaction(
+                        session, context, job.request
+                    )
                 if result.id != claim.id:
                     raise DomainError("CONFLICT", "Job recorder returned another operation", 409)
                 now = self._now()

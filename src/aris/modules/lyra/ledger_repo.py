@@ -134,6 +134,35 @@ class UsageLedgerRepository:
             )
         )
 
+    def overlapping_reversal(self, window: MeasuredWindow) -> UsageLedgerEntry | None:
+        """A different partition/owner cannot resurrect explicitly reversed GPU time."""
+        entry = self._one(
+            select(*UsageLedgerEntryRow.__table__.c)
+            .where(
+                UsageLedgerEntryRow.kind == "reversal",
+                UsageLedgerEntryRow.gpu_uuid == window.gpu_uuid,
+                UsageLedgerEntryRow.start_at < window.end_at,
+                UsageLedgerEntryRow.end_at > window.start_at,
+            )
+            .order_by(UsageLedgerEntryRow.recorded_at, UsageLedgerEntryRow.id)
+            .limit(1)
+        )
+        if entry is not None:
+            if not isinstance(entry.details, ReversedMeasurement):
+                raise inconsistent()
+            target = self.entry(entry.details.target_id)
+            if (
+                target is None
+                or not isinstance(target.details, PostedMeasurement)
+                or target.fingerprint != entry.details.target_fingerprint
+                or MeasuredWindow.model_validate(
+                    target.details.measurement.model_dump(include=set(MeasuredWindow.model_fields))
+                )
+                != entry.details.measurement
+            ):
+                raise inconsistent()
+        return entry
+
     def head(self, node_id: str) -> UsageLedgerHead:
         state = (
             self.session.execute(

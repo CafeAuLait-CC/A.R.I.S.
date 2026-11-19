@@ -434,8 +434,27 @@ def test_postgresql_locked_original_source_is_retryable_and_then_recovers(attest
     assert service(state).reverify(value.request.id) == value
 
 
-def test_over_1024_observations_remain_one_open_residency_across_bounded_proof_restarts(consumer):
-    from aris.modules.lyra.ledger_schemas import UsagePostingContext
+def test_long_residency_pipeline_preserves_open_state_then_records_every_closed_partition(consumer):
+    from pydantic import SecretStr
+
+    from aris.core.access.admin_schemas import (
+        AdministrationBatch,
+        AdministrationContext,
+        AssignNodeUser,
+        BootstrapRequest,
+        DirectoryProfile,
+        IdentityNamespace,
+    )
+    from aris.core.access.administration import AccessAdministrationService
+    from aris.core.access.history_service import NodeUserHistoryService
+    from aris.core.access.schemas import ExternalSubject
+    from aris.modules.lyra.derivation_service import UsageDerivationService
+    from aris.modules.lyra.ledger_schemas import UsagePostingConfiguration, UsagePostingContext
+    from aris.modules.lyra.ledger_service import UsageLedgerService
+    from aris.modules.lyra.partition_recording_schemas import PartitionRecordingRequest
+    from aris.modules.lyra.partition_recording_service import PartitionRecordingService
+    from aris.modules.lyra.reservation_links import ResidencyReservationService
+    from aris.modules.lyra.residency_attribution import ResidencyAttributionService
     from aris.modules.lyra.residency_evidence_service import ResidencyRunEvidenceService
     from aris.modules.lyra.residency_partition_schemas import (
         ResidencyPartitionMethod,
@@ -444,13 +463,48 @@ def test_over_1024_observations_remain_one_open_residency_across_bounded_proof_r
     from aris.modules.lyra.residency_partition_service import ResidencyPartitionService
     from aris.modules.lyra.residency_segment_service import ResidencySegmentService
     from aris.modules.lyra.residency_segments import ResidencySegmentQuery
+    from aris.modules.lyra.residency_sessions import residency_fingerprint
+    from aris.modules.lyra.run_recording_repo import ClosedRunRecordingRepository
     from aris.modules.lyra.segment_store_schemas import RecordResidencySegments
     from aris.modules.lyra.segment_store_service import ResidencySegmentStore
+    from aris.modules.nova.usage_link_service import ReservationUsageLinkService
+    from aris.modules.vega.scope_service import VegaNodeScopes
 
     state = consumer
     state.base -= timedelta(hours=8)
     points = 1030
     seed(state, times=tuple(10 + 15 * i for i in range(points)))
+    # Explicit synthetic identity history covers this synthetic stream. It is
+    # independent of any real Slack member, permission or runtime configuration.
+    key = SecretStr("isolated-long-pipeline-operator-key-123456789")
+    admin = AccessAdministrationService(
+        state.sessions,
+        IdentityNamespace(provider="slack", namespace="TLONGPIPELINE"),
+        operator_key=key,
+        permission_catalog=(),
+        scopes=VegaNodeScopes(state.sessions),
+        clock=lambda: state.base,
+    )
+    actor = admin.bootstrap(
+        BootstrapRequest(
+            subject=ExternalSubject(
+                provider="slack", namespace="TLONGPIPELINE", external_id="ULONGFIXTURE"
+            ),
+            profile=DirectoryProfile(display_name="Long pipeline fixture", timezone="UTC"),
+            operator_proof=key,
+            request_id="long-pipeline-bootstrap",
+        )
+    ).user_id
+    mapping = admin.apply(
+        AdministrationContext(
+            actor_id=actor,
+            request_id="long-pipeline-map",
+            reason="Explicit isolated fixture mapping",
+        ),
+        AdministrationBatch(
+            changes=(AssignNodeUser(node_id="node-a", os_username="fixture-user", user_id=actor),)
+        ),
+    )
     posting_context = UsagePostingContext(request_id="fixture-long-source-segments")
     saved_segments = ResidencySegmentStore(
         state.sessions,
@@ -541,10 +595,48 @@ def test_over_1024_observations_remain_one_open_residency_across_bounded_proof_r
         partition_index=0,
     )
     number = (run.intervals + method.max_intervals - 1) // method.max_intervals
-    partitions = [
-        partition_service.verify(parent_reference.model_copy(update={"partition_index": index}))
+    identities = NodeUserHistoryService(state.sessions, clock=state.now)
+    derivations = UsageDerivationService(
+        state.sessions,
+        state.observations,
+        ResidencyAttributionService(state.sessions, identities),
+        ResidencyReservationService(
+            state.sessions, ReservationUsageLinkService(state.sessions, clock=state.now)
+        ),
+        clock=state.now,
+    )
+    ledger = UsageLedgerService(
+        state.sessions,
+        derivations,
+        configuration=UsagePostingConfiguration(
+            source_ref="isolated-long-pipeline-recording",
+            recording_start_at=state.base,
+            timing_fingerprint=residency_fingerprint(
+                state.config.continuity, state.config.formation
+            ),
+        ),
+        clock=state.now,
+    )
+    writer = PartitionRecordingService(
+        state.sessions, partition_service, identities, derivations, ledger, clock=state.now
+    )
+    receipts = [
+        writer.record(
+            posting_context,
+            PartitionRecordingRequest(
+                id=uuid4(),
+                partition=parent_reference.model_copy(update={"partition_index": index}),
+                expected_recording_configuration_fingerprint=ledger.configuration.fingerprint,
+                identity_revision=mapping.revision,
+            ),
+        )
         for index in range(number)
     ]
+    with state.sessions() as session:
+        partitions = [
+            ClosedRunRecordingRepository(session).get_partition(receipt.id).proof
+            for receipt in receipts
+        ]
     assert (
         number == 9 and sum(len(value.candidate.evidence) for value in partitions) == run.intervals
     )
@@ -557,4 +649,10 @@ def test_over_1024_observations_remain_one_open_residency_across_bounded_proof_r
         for a, b in zip(partitions, partitions[1:], strict=False)
     )
     assert all(len(value.sources) <= 1024 and value.source_count <= 8192 for value in partitions)
-    assert counts(state)[-1] == 0 and not end.quota_usage_available
+    entries = [ledger.exact(receipt.ledger.entries[0]) for receipt in receipts]
+    assert (
+        sum(entry.details.measurement.observed_microseconds for entry in entries)
+        == run.observed_microseconds
+    )
+    assert all(entry.details.measurement.owner_id == actor for entry in entries)
+    assert counts(state)[-1] == number and not end.quota_usage_available

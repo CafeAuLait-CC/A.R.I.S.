@@ -14,8 +14,8 @@ from aris.modules.lyra.models import UsageRecordingJobRow
 from aris.modules.lyra.recording_job_schemas import (
     MAX_RECORDING_JOB_INPUT_BYTES,
     StoredRecordingJob,
+    recording_request_adapter,
 )
-from aris.modules.lyra.run_recording_schemas import ClosedRunRecordingRequest
 from aris.modules.lyra.trace_consumer_schemas import canonical_trace
 
 
@@ -45,7 +45,7 @@ class RecordingJobRepository:
             raw = row["canonical_request"]
             if len(raw.encode()) > MAX_RECORDING_JOB_INPUT_BYTES:
                 raise ValueError("oversized recording job")
-            request = ClosedRunRecordingRequest.model_validate(json.loads(raw))
+            request = recording_request_adapter.validate_python(json.loads(raw))
             if canonical_trace(request) != raw or str(request.id) != row["id"]:
                 raise ValueError("recording job input differs")
             return StoredRecordingJob.model_validate(
@@ -86,10 +86,19 @@ class RecordingJobRepository:
             select(UsageRecordingJobRow).where(UsageRecordingJobRow.id == str(id)).with_for_update()
         )
 
-    def next(self, now: datetime) -> UsageRecordingJobRow | None:
+    def next(
+        self, now: datetime, *, include_partitions: bool = True
+    ) -> UsageRecordingJobRow | None:
+        statement = select(UsageRecordingJobRow)
+        if not include_partitions:
+            # The two closed canonical input shapes are unambiguous. Full-run
+            # requests contain only UUIDs, hashes, times and numeric revisions;
+            # none can contain a nested or caller-supplied partition key.
+            statement = statement.where(
+                ~UsageRecordingJobRow.canonical_request.contains('"partition":')
+            )
         return self.session.scalar(
-            select(UsageRecordingJobRow)
-            .where(
+            statement.where(
                 or_(
                     and_(
                         UsageRecordingJobRow.state == "queued",

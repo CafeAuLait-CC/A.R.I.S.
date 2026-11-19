@@ -268,6 +268,25 @@ def test_reviewed_target_revision_is_stable_when_unrelated_entries_advance_the_n
     assert counts(state[0])[:4] == (3, 1, 3, 1)
 
 
+def test_different_measurement_key_cannot_rebill_reversed_time_but_adjacent_time_can(adjustments):
+    from tests.test_usage_ledger import post_window
+
+    state = adjustments
+    ledger = state[0]
+    confirm(state, pending(state))
+    # Original [10,40) was reversed; [20,50) has another measurement key.
+    overlap = post_window(ledger, start=20, seq=9)
+    before = counts(ledger)
+    with pytest.raises(DomainError) as error:
+        ledger[0].post(POST, overlap)
+    assert error.value.code == "USAGE_NEEDS_REVIEW" and counts(ledger) == before
+    # A past successful operation remains a historical receipt, not a new charge.
+    assert ledger[0].post(POST, ledger[1]).duplicate
+    assert counts(ledger) == before
+    adjacent = ledger[0].post(POST, post_window(ledger, start=40, seq=15))
+    assert adjacent.effect == "recorded" and counts(ledger)[:4] == (3, 1, 3, 1)
+
+
 def test_postgresql_concurrent_confirmations_of_distinct_reversals_only_void_once(adjustments):
     state = adjustments
     postgres(state[0])
