@@ -36,6 +36,7 @@ from aris.modules.lyra.partition_recording_schemas import (
 )
 from aris.modules.lyra.residency_attribution import HistoricalIdentityReader
 from aris.modules.lyra.residency_partition_schemas import (
+    ResidencyPartitionMethod,
     ResidencyPartitionReference,
     VerifiedResidencyPartition,
 )
@@ -43,6 +44,8 @@ from aris.modules.lyra.run_recording_repo import ClosedRunRecordingRepository
 
 
 class PartitionEvidenceReader(Protocol):
+    method: ResidencyPartitionMethod
+
     def verify_in_transaction(
         self, session: Session, request: ResidencyPartitionReference
     ) -> VerifiedResidencyPartition: ...

@@ -26,6 +26,7 @@ from aris.modules.lyra.recording_job_schemas import (
     RecordingJobLimits,
     RecordingJobResult,
     RecordingRequest,
+    RecordingWorkSelection,
     StoredRecordingJob,
     recording_job_fingerprint,
     recording_request_adapter,
@@ -204,15 +205,24 @@ class RecordingJobService:
             and utc(row.lease_expires_at) > now
         )
 
-    def claim(self, context: UsagePostingContext) -> RecordingJobClaim | RecordingJobResult | None:
+    def claim(
+        self, context: UsagePostingContext, *, selection: RecordingWorkSelection | None = None
+    ) -> RecordingJobClaim | RecordingJobResult | None:
         context = UsagePostingContext.model_validate(context.model_dump(mode="json"))
+        selection = (
+            RecordingWorkSelection.model_validate(selection.model_dump(mode="json"))
+            if selection is not None
+            else None
+        )
         limits = self._active()
         with self.sessions() as session:
             try:
                 transaction_budget(session, 100, 1000, limits.transaction_timeout_ms)
                 repo = RecordingJobRepository(session)
                 now = self._now()
-                row = repo.next(now, include_partitions=self.partition_recorder is not None)
+                row = repo.next(
+                    now, include_partitions=self.partition_recorder is not None, selection=selection
+                )
                 if row is None:
                     return None
                 self._stored(repo, UUID(row.id))

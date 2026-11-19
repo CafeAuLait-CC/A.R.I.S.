@@ -17,6 +17,11 @@ RecordingRequest = ClosedRunRecordingRequest | PartitionRecordingRequest
 recording_request_adapter: TypeAdapter[RecordingRequest] = TypeAdapter(RecordingRequest)
 
 
+class RecordingWorkSelection(IntervalContract):
+    recording_configuration_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    partition_method_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 class RecordingJobLimits(IntervalContract):
     transaction_timeout_ms: int = Field(ge=1001, le=30000, strict=True)
     lease_seconds: int = Field(ge=2, le=600, strict=True)

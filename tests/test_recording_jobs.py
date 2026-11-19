@@ -17,6 +17,7 @@ from aris.modules.lyra.recording_job_repo import RecordingJobRepository
 from aris.modules.lyra.recording_job_schemas import (
     RecordingJobClaim,
     RecordingJobLimits,
+    RecordingWorkSelection,
     StoredRecordingJob,
 )
 from aris.modules.lyra.recording_job_service import RecordingJobService
@@ -69,6 +70,7 @@ def test_fixed_job_queues_then_atomically_completes_one_real_measured_record(job
     assert counts(state)[:6] == tuple(
         a + b for a, b in zip(before[:6], (1, 1, 1, 1, 1, 1), strict=True)
     )
+
     committed = counts(state)
     assert queue.execute(POST, claim) == result and queue.claim(POST) is None
     assert queue.enqueue(POST, request).duplicate and counts(state) == committed
@@ -82,6 +84,27 @@ def test_fixed_job_queues_then_atomically_completes_one_real_measured_record(job
         )
     assert [row.aggregate_version for row in events] == [1, 2, 3]
     assert "linux-user" not in str([row.payload for row in events])
+
+
+def test_full_run_selection_skips_other_configuration_and_accepts_any_partition_method(
+    jobs,
+):
+    queue, request, _, _ = jobs
+    queue.enqueue(POST, request)
+    wrong = RecordingWorkSelection(
+        recording_configuration_fingerprint="f" * 64, partition_method_fingerprint="e" * 64
+    )
+    assert queue.claim(POST, selection=wrong) is None
+    assert queue.exact(request.id).attempts == 0 and queue.exact(request.id).state == "queued"
+    selected = wrong.model_copy(
+        update={
+            "recording_configuration_fingerprint": (
+                request.expected_recording_configuration_fingerprint
+            )
+        }
+    )
+    claim = queue.claim(POST, selection=selected)
+    assert claim.id == request.id and queue.execute(POST, claim).state == "completed"
 
 
 def test_paused_queue_keeps_history_and_refuses_new_work_without_rewriting_requests(jobs):

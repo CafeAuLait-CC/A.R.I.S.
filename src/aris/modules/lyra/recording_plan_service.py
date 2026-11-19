@@ -16,7 +16,7 @@ from aris.core.events import DomainEvent, OutboxEntry
 from aris.modules.lyra.ledger_schemas import UsagePostingConfiguration, UsagePostingContext
 from aris.modules.lyra.ledger_service import UsageLedgerService
 from aris.modules.lyra.partition_recording_service import PartitionEvidenceReader
-from aris.modules.lyra.recording_job_schemas import RecordingJobLimits
+from aris.modules.lyra.recording_job_schemas import RecordingJobLimits, RecordingWorkSelection
 from aris.modules.lyra.recording_job_service import RecordingJobService
 from aris.modules.lyra.recording_plan_repo import RecordingPlanRepository
 from aris.modules.lyra.recording_plan_schemas import (
@@ -193,6 +193,31 @@ class RecordingPlanService:
             with self.sessions() as session:
                 transaction_budget(session, 100, 1000, self.timeout_ms)
                 result = self.dispatch_in_transaction(session, context, request)
+                commit_owned_transaction(session)
+                return result
+        except DBAPIError as error:
+            raise self._failure(error) from None
+
+    def dispatch_next(
+        self, context: UsagePostingContext, selection: RecordingWorkSelection, *, limit: int = 1
+    ) -> RecordingDispatchReceipt | None:
+        context = UsagePostingContext.model_validate(context.model_dump(mode="json"))
+        selection = RecordingWorkSelection.model_validate(selection.model_dump(mode="json"))
+        # Validate the same batch-size contract even when the queue is empty.
+        prototype = RecordingDispatchRequest(plan_id=UUID(int=0), expected_version=1, limit=limit)
+        try:
+            with self.sessions() as session:
+                transaction_budget(session, 100, 1000, self.timeout_ms)
+                row = RecordingPlanRepository(session).next_pending(selection)
+                if row is None:
+                    return None
+                result = self.dispatch_in_transaction(
+                    session,
+                    context,
+                    prototype.model_copy(
+                        update={"plan_id": UUID(row.id), "expected_version": row.version}
+                    ),
+                )
                 commit_owned_transaction(session)
                 return result
         except DBAPIError as error:

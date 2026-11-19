@@ -101,8 +101,17 @@ class UsageTraceConsumerService:
         return configuration
 
     def position(self) -> UsageTracePosition:
-        with self.sessions() as session, session.no_autoflush:
-            return UsageTraceRepository(session).position(self._configuration())
+        try:
+            with self.sessions() as session, session.no_autoflush:
+                transaction_budget(session, 100, 1000, 3000)
+                return UsageTraceRepository(session).position(self._configuration())
+        except DBAPIError as error:
+            code = database_failure(error)
+            raise DomainError(
+                code if code == "RETRYABLE_DATABASE_ERROR" else "DEPENDENCY_UNAVAILABLE",
+                "Candidate position database is unavailable",
+                503,
+            ) from None
 
     def exact(self, record_id: UUID) -> StoredTraceConsumption:
         with self.sessions() as session, session.no_autoflush:

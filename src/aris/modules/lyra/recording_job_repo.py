@@ -13,6 +13,7 @@ from aris.core.time import utc
 from aris.modules.lyra.models import UsageRecordingJobRow
 from aris.modules.lyra.recording_job_schemas import (
     MAX_RECORDING_JOB_INPUT_BYTES,
+    RecordingWorkSelection,
     StoredRecordingJob,
     recording_request_adapter,
 )
@@ -87,7 +88,11 @@ class RecordingJobRepository:
         )
 
     def next(
-        self, now: datetime, *, include_partitions: bool = True
+        self,
+        now: datetime,
+        *,
+        include_partitions: bool = True,
+        selection: RecordingWorkSelection | None = None,
     ) -> UsageRecordingJobRow | None:
         statement = select(UsageRecordingJobRow)
         if not include_partitions:
@@ -96,6 +101,24 @@ class RecordingJobRepository:
             # none can contain a nested or caller-supplied partition key.
             statement = statement.where(
                 ~UsageRecordingJobRow.canonical_request.contains('"partition":')
+            )
+        if selection is not None:
+            statement = statement.where(
+                UsageRecordingJobRow.canonical_request.contains(
+                    '"expected_recording_configuration_fingerprint":"'
+                    + selection.recording_configuration_fingerprint
+                    + '"',
+                    autoescape=True,
+                ),
+                or_(
+                    ~UsageRecordingJobRow.canonical_request.contains('"partition":'),
+                    UsageRecordingJobRow.canonical_request.contains(
+                        '"expected_method_fingerprint":"'
+                        + selection.partition_method_fingerprint
+                        + '"',
+                        autoescape=True,
+                    ),
+                ),
             )
         return self.session.scalar(
             statement.where(

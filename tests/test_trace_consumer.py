@@ -620,3 +620,16 @@ def test_postgresql_consumer_gate_timeout_preserves_request_and_initial_cursor(c
         assert error.value.code == "RETRYABLE_DATABASE_ERROR" and counts(state) == before
         held.rollback()
     assert not state.service.consume(CONTEXT, incoming).duplicate
+
+
+def test_postgresql_position_metadata_lock_wait_is_bounded_and_recoverable(consumer):
+    state = consumer
+    postgres(state)
+    with state.sessions.begin() as holder:
+        holder.execute(text("LOCK TABLE usage_trace_cursors IN ACCESS EXCLUSIVE MODE"))
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(state.service.position)
+            with pytest.raises(DomainError) as error:
+                future.result(timeout=5)
+            assert error.value.code == "RETRYABLE_DATABASE_ERROR"
+    assert state.service.position().revision == 0

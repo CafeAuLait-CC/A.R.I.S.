@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from aris.core.contracts import DomainError
 from aris.core.time import utc
 from aris.modules.lyra.models import UsageRecordingPlanRow
+from aris.modules.lyra.recording_job_schemas import RecordingWorkSelection
 from aris.modules.lyra.recording_plan_schemas import (
     MAX_RECORDING_PLAN_BYTES,
     RecordingPlanProgress,
@@ -89,6 +90,29 @@ class RecordingPlanRepository:
             select(UsageRecordingPlanRow)
             .where(UsageRecordingPlanRow.id == str(id))
             .with_for_update()
+        )
+
+    def next_pending(self, selection: RecordingWorkSelection) -> UsageRecordingPlanRow | None:
+        return self.session.scalar(
+            select(UsageRecordingPlanRow)
+            .where(
+                UsageRecordingPlanRow.next_partition < UsageRecordingPlanRow.partition_count,
+                UsageRecordingPlanRow.canonical_plan.contains(
+                    '"expected_recording_configuration_fingerprint":"'
+                    + selection.recording_configuration_fingerprint
+                    + '"',
+                    autoescape=True,
+                ),
+                UsageRecordingPlanRow.canonical_plan.contains(
+                    '"expected_method_fingerprint":"'
+                    + selection.partition_method_fingerprint
+                    + '"',
+                    autoescape=True,
+                ),
+            )
+            .order_by(UsageRecordingPlanRow.created_at, UsageRecordingPlanRow.id)
+            .with_for_update(skip_locked=True)
+            .limit(1)
         )
 
     def append(self, plan: StoredRecordingPlan) -> None:
