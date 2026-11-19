@@ -49,7 +49,7 @@ def build_router(service: UsageHistorySurface) -> APIRouter:
             raise DomainError("VALIDATION_ERROR", "Unexpected usage query parameters", 422)
         selection = await bounded_input(request, UsageHistoryInput)
         result = await run_in_threadpool(
-            service.read, authorization(request), request.state.request_id, selection, export=True
+            service.read, authorization(request), request.state.request_id, selection, output="csv"
         )
         assert isinstance(result, bytes)
         return Response(
@@ -58,6 +58,24 @@ def build_router(service: UsageHistorySurface) -> APIRouter:
             headers={
                 **PAGE_HEADERS,
                 "Content-Disposition": 'attachment; filename="aris-recorded-usage.csv"',
+            },
+        )
+
+    @router.post("/report")
+    async def report(request: Request) -> Response:
+        if request.query_params:
+            raise DomainError("VALIDATION_ERROR", "Unexpected usage query parameters", 422)
+        selection = await bounded_input(request, UsageHistoryInput)
+        result = await run_in_threadpool(
+            service.read, authorization(request), request.state.request_id, selection, output="html"
+        )
+        assert isinstance(result, bytes)
+        return Response(
+            result,
+            media_type="text/html; charset=utf-8",
+            headers={
+                **PAGE_HEADERS,
+                "Content-Disposition": 'attachment; filename="aris-recorded-usage-report.html"',
             },
         )
 

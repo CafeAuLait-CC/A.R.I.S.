@@ -37,7 +37,7 @@
         <section class="panel owners-panel"><div class="section-head"><h2>用户汇总</h2><span>已记录 GPU 小时</span></div><div id="owner-summary"></div></section>
       </div>
       <section class="panel records-panel">
-        <div class="section-head"><div><h2>逐段记录</h2><p id="snapshot-note" class="muted"></p></div><button id="export" class="secondary" type="button">导出 CSV</button></div>
+        <div class="section-head"><div><h2>逐段记录</h2><p id="snapshot-note" class="muted"></p></div><div class="export-actions"><button id="report" class="secondary" type="button">导出报告</button><button id="export" class="secondary" type="button">导出 CSV</button></div></div>
         <div class="table-scroll"><table><thead><tr><th>用户</th><th>GPU</th><th>开始</th><th>结束</th><th class="number">已记录时长</th></tr></thead><tbody id="records"></tbody></table></div>
         <div id="empty" class="empty" hidden><h3>这段时间还没有使用记录</h3><p>可以切换节点或日期再查看。没有记录不代表 GPU 未被使用。</p></div>
         <div class="pagination"><span id="page-note"></span><div><button id="previous" class="secondary" type="button">上一页</button><button id="next" class="secondary" type="button">下一页</button></div></div>

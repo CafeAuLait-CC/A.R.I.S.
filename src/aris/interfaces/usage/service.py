@@ -21,6 +21,7 @@ from aris.core.commands.budgets import transaction_budget
 from aris.core.commands.schemas import ActorContext
 from aris.core.contracts import DomainError
 from aris.interfaces.commands.auth import BoundSubjectTokens
+from aris.interfaces.usage.report import history_report
 from aris.modules.lyra.ledger_schemas import UsageLedgerHead
 from aris.modules.lyra.usage_history import (
     UsageHistory,
@@ -210,13 +211,15 @@ class UsageHistorySurface:
         request_id: str,
         query: UsageHistoryInput,
         *,
-        export: bool = False,
+        output: Literal["page", "csv", "html"] = "page",
     ) -> UsageHistoryPage | bytes:
         subject = self.authenticator.authenticate(authorization)
         query = UsageHistoryInput.model_validate(query.model_dump(mode="json"))
         if query.node_id not in self.node_ids:
             raise DomainError("PERMISSION_DENIED", "Node is outside this usage interface", 403)
-        if export and (query.snapshot is None or query.window.kind != "utc"):
+        if output not in ("page", "csv", "html"):
+            raise DomainError("VALIDATION_ERROR", "Usage output format is invalid", 422)
+        if output != "page" and (query.snapshot is None or query.window.kind != "utc"):
             raise DomainError("VALIDATION_ERROR", "Export requires the displayed snapshot", 422)
         if isinstance(query.window, CalendarWindow):
             bounds = calendar_boundaries(
@@ -255,8 +258,12 @@ class UsageHistorySurface:
                     )
                 }
                 result = (
-                    history_csv(report, labels)
-                    if export
+                    (
+                        history_csv(report, labels)
+                        if output == "csv"
+                        else history_report(report, labels)
+                    )
+                    if output != "page"
                     else UsageHistoryPage(
                         report=report.model_copy(
                             update={"rows": report.rows[query.offset : query.offset + query.limit]}

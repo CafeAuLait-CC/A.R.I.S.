@@ -58,6 +58,36 @@ class UsageHistoryDay(IntervalContract):
     recorded_microseconds: int = Field(ge=0)
 
 
+class UsageHistoryGpu(IntervalContract):
+    gpu_uuid: str
+    models: tuple[str, ...]
+    recorded_microseconds: int = Field(gt=0)
+    owner_count: int = Field(ge=1)
+    segment_count: int = Field(ge=1)
+
+
+def usage_gpu_summary(rows: tuple[UsageHistoryRow, ...]) -> tuple[UsageHistoryGpu, ...]:
+    """Presentation of already-authorized history; no new metering source."""
+    by_gpu: dict[str, list[UsageHistoryRow]] = defaultdict(list)
+    for row in rows:
+        by_gpu[row.gpu_uuid].append(row)
+    return tuple(
+        sorted(
+            (
+                UsageHistoryGpu(
+                    gpu_uuid=gpu,
+                    models=tuple(sorted({value.model for value in values})),
+                    recorded_microseconds=sum(value.recorded_microseconds for value in values),
+                    owner_count=len({value.owner_id for value in values}),
+                    segment_count=len(values),
+                )
+                for gpu, values in by_gpu.items()
+            ),
+            key=lambda item: (-item.recorded_microseconds, item.gpu_uuid),
+        )
+    )
+
+
 class UsageHistory(IntervalContract):
     assessment_scope: Literal["recorded_usage_only"] = "recorded_usage_only"
     source_coverage: Literal["unknown"] = "unknown"

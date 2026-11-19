@@ -264,6 +264,12 @@ def test_authenticated_page_pagination_and_csv_keep_one_snapshot_during_new_post
             and sum(int(row["recorded_microseconds"]) for row in records) == 60000000
         )
         assert {row["report_fingerprint"] for row in records} == {page["report"]["fingerprint"]}
+        human_report = client.post("/internal/usage/report", headers=headers, json=fixed)
+        assert human_report.status_code == 200
+        assert page["report"]["fingerprint"] in human_report.text
+        assert "0.017" in human_report.text
+        assert "GPU 汇总" in human_report.text
+        assert "attachment" in human_report.headers["content-disposition"]
         latest = client.post(
             "/internal/usage/query", headers=headers, json=input_query().model_dump(mode="json")
         ).json()
@@ -324,7 +330,7 @@ def test_calendar_request_clips_today_but_invalid_dates_and_unfixed_export_are_r
     )
     assert result.report.end_at == surface.history._now()
     with pytest.raises(DomainError) as error:
-        surface.read("Bearer " + TOKEN, "fixture-history", input_query(), export=True)
+        surface.read("Bearer " + TOKEN, "fixture-history", input_query(), output="csv")
     assert error.value.code == "VALIDATION_ERROR"
 
 
@@ -371,6 +377,6 @@ def test_postgresql_history_is_select_only_and_rechecks_current_permissions(
             "Bearer " + TOKEN,
             "fixture-history",
             input_query(snapshot=first.report.snapshot),
-            export=True,
+            output="csv",
         )
     assert denied.value.code == "PERMISSION_DENIED"
