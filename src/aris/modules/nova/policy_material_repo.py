@@ -30,6 +30,17 @@ class PolicyMaterialRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
 
+    def scope(self, id: UUID) -> PolicySourceReference | None:
+        row = self.session.execute(
+            select(PolicyReviewMaterialRow.name, PolicyReviewMaterialRow.source_version).where(
+                PolicyReviewMaterialRow.id == str(id)
+            )
+        ).one_or_none()
+        try:
+            return PolicySourceReference(name=row[0], version=row[1]) if row is not None else None
+        except (ValueError, TypeError):
+            raise inconsistent_material() from None
+
     def insert_if_absent(self, value: StoredPolicyReviewMaterial) -> bool:
         dialect = self.session.get_bind().dialect.name
         if dialect not in {"postgresql", "sqlite"}:

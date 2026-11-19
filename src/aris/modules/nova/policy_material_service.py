@@ -218,7 +218,12 @@ class PolicyReviewMaterialService:
         )
 
     def read(
-        self, actor: ActorContext, id: UUID, *, reverify: bool = False
+        self,
+        actor: ActorContext,
+        id: UUID,
+        *,
+        reverify: bool = False,
+        expected_source: PolicySourceReference | None = None,
     ) -> StoredPolicyReviewMaterial:
         actor = ActorContext.model_validate(actor.model_dump(mode="json"))
         if reverify:
@@ -238,7 +243,12 @@ class PolicyReviewMaterialService:
                         scope=GLOBAL_SCOPE,
                     ),
                 )
-                value = PolicyMaterialRepository(session).get(id)
+                repo = PolicyMaterialRepository(session)
+                if expected_source is not None and repo.scope(id) != expected_source:
+                    raise DomainError(
+                        "NOT_FOUND", "Material does not belong to the selected source", 404
+                    )
+                value = repo.get(id)
                 if value is None:
                     raise DomainError("NOT_FOUND", "Policy review material is unknown", 404)
                 source = self._source(

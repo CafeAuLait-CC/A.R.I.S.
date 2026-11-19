@@ -29,6 +29,7 @@ from aris.interfaces.policy.service import PolicyReadSurface
 from aris.interfaces.slack.config import SlackSettings
 from aris.modules.lyra.quota_evidence_service import HistoricalQuotaEvidenceService
 from aris.modules.nova.policy_catalog_service import PolicyCatalogService
+from aris.modules.nova.policy_material_service import PolicyReviewMaterialService
 from aris.modules.nova.quota_history_service import HistoricalQuotaAssessmentService
 
 
@@ -40,6 +41,7 @@ class LocalPolicyConfig(AccessContract):
     policy_names: tuple[str, ...] = Field(min_length=1, max_length=32)
     draft_commands: PolicyDraftRuntimeConfig | None = None
     historical_usage: tuple[HistoricalPolicyNode, ...] = Field(default=(), max_length=8)
+    review_materials_read: bool = Field(default=False, strict=True)
 
     def settings(self) -> Settings:
         url = make_url(self.database_url.get_secret_value())
@@ -98,6 +100,8 @@ def main(argv: list[str] | None = None) -> int:
                 summary["historical_usage_nodes"] = [
                     node.node_id for node in config.historical_usage
                 ]
+            if config.review_materials_read:
+                summary["review_materials_read"] = True
             print(json.dumps(summary))
             return 0
         url = make_url(settings.database_url)
@@ -136,6 +140,9 @@ def main(argv: list[str] | None = None) -> int:
             config.policy_names,
             draft_commands=drafts.user_api if drafts is not None else None,
             historical_usage=history,
+            review_materials=PolicyReviewMaterialService(catalog)
+            if config.review_materials_read
+            else None,
         )
         uvicorn.run(
             create_app(

@@ -351,7 +351,7 @@ def test_postgresql_material_reads_are_read_only_bounded_and_recover_after_lock(
         return original_get(repo, value)
 
     monkeypatch.setattr(PolicyMaterialRepository, "get", checked)
-    assert state[1].read(actor(state[2][3]), id).id == id
+    assert state[1].read(actor(state[2][3]), id, expected_source=reference()).id == id
     with state[2][2]() as blocker:
         blocker.execute(text("LOCK TABLE policy_review_materials IN ACCESS EXCLUSIVE MODE"))
         with pytest.raises(DomainError) as error:

@@ -9,11 +9,13 @@ from aris.core.contracts import DomainError
 from aris.interfaces.commands.api import authorization, bounded_input
 from aris.interfaces.policy.drafts import PolicyDraftInput
 from aris.interfaces.policy.history import PolicyHistoryAssessmentInput, PolicyHistoryWindowsInput
+from aris.interfaces.policy.materials import PolicyMaterialDetailInput
 from aris.interfaces.policy.service import PolicyDetailInput, PolicyReadSurface
 from aris.modules.nova.policy_catalog_schemas import (
     PolicySourceComparisonQuery,
     PolicySourceListQuery,
 )
+from aris.modules.nova.policy_material_schemas import PolicyMaterialListQuery
 
 ASSETS = Path(__file__).with_name("static")
 PAGE_HEADERS = {
@@ -27,6 +29,28 @@ PAGE_HEADERS = {
 
 def build_router(service: PolicyReadSurface) -> APIRouter:
     router = APIRouter(prefix="/internal/policy", tags=["policy-source-review"])
+
+    if service.review_materials is not None:
+
+        @router.post("/materials/query")
+        async def materials_query(request: Request) -> JSONResponse:
+            if request.query_params:
+                raise DomainError("VALIDATION_ERROR", "Unexpected material query parameters", 422)
+            query = await bounded_input(request, PolicyMaterialListQuery)
+            result = await run_in_threadpool(
+                service.materials_list, authorization(request), request.state.request_id, query
+            )
+            return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
+
+        @router.post("/materials/read")
+        async def materials_read(request: Request) -> JSONResponse:
+            if request.query_params:
+                raise DomainError("VALIDATION_ERROR", "Unexpected material query parameters", 422)
+            query = await bounded_input(request, PolicyMaterialDetailInput)
+            result = await run_in_threadpool(
+                service.materials_detail, authorization(request), request.state.request_id, query
+            )
+            return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
 
     if service.historical_usage is not None:
 
@@ -115,6 +139,7 @@ def build_router(service: PolicyReadSurface) -> APIRouter:
             "policy-scenarios.js",
             "policy-fields.js",
             "policy-history.js",
+            "policy-materials.js",
             "policy-editor.js",
             "policy.css",
         ],

@@ -1,4 +1,4 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>策略草稿 · ARIS</title><link rel="stylesheet" href="/internal/policy/ui/assets/policy.css"><script src="/internal/policy/ui/assets/policy-scenarios.js" defer></script><script src="/internal/policy/ui/assets/policy-fields.js" defer></script><script src="/internal/policy/ui/assets/policy-editor.js" defer></script><script src="/internal/policy/ui/assets/policy-history.js" defer></script><script src="/internal/policy/ui/assets/policy.js" defer></script></head>
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>策略草稿 · ARIS</title><link rel="stylesheet" href="/internal/policy/ui/assets/policy.css"><script src="/internal/policy/ui/assets/policy-scenarios.js" defer></script><script src="/internal/policy/ui/assets/policy-fields.js" defer></script><script src="/internal/policy/ui/assets/policy-editor.js" defer></script><script src="/internal/policy/ui/assets/policy-history.js" defer></script><script src="/internal/policy/ui/assets/policy-materials.js" defer></script><script src="/internal/policy/ui/assets/policy.js" defer></script></head>
 <body><main>
   <header><div><p class="eyebrow">ARIS / POLICY</p><h1>策略草稿</h1><p class="subtitle">查看已保存的规则，比较版本之间的变化。</p></div><span id="identity" class="muted">本地只读查询</span></header>
   <section id="connect-panel" class="panel connect"><div><h2>连接策略目录</h2><p>需要策略草稿读取权限。访问凭据仅保留在当前页面内存中。</p></div><form id="connect-form"><label for="credential" class="sr-only">开发访问凭据</label><input id="credential" type="password" autocomplete="off" placeholder="开发访问凭据" required><button id="connect-button">连接</button></form></section>
@@ -53,6 +53,12 @@
           <div class="extra-grid"><section><h3>GPU 计时权重</h3><div id="weights"></div></section><section><h3>空闲处理规则</h3><p id="idle"></p></section></div>
           <section id="roles-section" hidden><h3 class="rule-head">角色覆盖</h3><div id="roles"></div></section>
           <details class="source"><summary>查看原始规则与来源指纹</summary><p id="fingerprint"></p><pre id="source-json"></pre></details>
+        </section>
+        <section id="materials-panel" class="panel materials-panel" hidden aria-labelledby="materials-heading">
+          <div class="section-head"><div><h2 id="materials-heading">案例审核材料</h2><p id="materials-source" class="muted"></p></div><button id="materials-load" type="button" class="secondary">读取案例材料</button></div>
+          <p class="muted">查看这个版本已保存的假设案例和当时结果。材料的存在不表示审核通过。</p>
+          <p id="materials-note" class="muted" role="status" aria-live="polite"></p><div id="materials-list" class="materials-list"></div><button id="materials-more" type="button" class="secondary" hidden>更多材料</button>
+          <section id="material-detail" class="material-detail" hidden aria-live="polite"></section>
         </section>
         <section id="history-panel" class="panel history-panel" hidden aria-labelledby="history-heading">
           <div class="section-head"><h2 id="history-heading">本人历史额度核对</h2><span class="badge">只读 · 不授权预约</span></div><p id="history-source" class="muted"></p>

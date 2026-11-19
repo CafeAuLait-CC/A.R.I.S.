@@ -25,6 +25,7 @@ from aris.interfaces.policy.history import (
     PolicyHistoryAssessmentView,
     PolicyHistoryWindowsInput,
 )
+from aris.interfaces.policy.materials import PolicyMaterialDetailInput, PolicyMaterialDetailView
 from aris.modules.lyra.quota_evidence_schemas import QuotaEvidencePage
 from aris.modules.nova.policy_catalog_schemas import (
     PolicySourceComparisonQuery,
@@ -40,6 +41,8 @@ from aris.modules.nova.policy_catalog_service import (
     GLOBAL_SCOPE,
     PolicyCatalogService,
 )
+from aris.modules.nova.policy_material_schemas import PolicyMaterialListQuery, PolicyMaterialPage
+from aris.modules.nova.policy_material_service import PolicyReviewMaterialService
 from aris.modules.nova.policy_review import policy_difference
 from aris.modules.nova.policy_schemas import PolicyName
 from aris.modules.nova.policy_source import compile_policy, parse_policy_source
@@ -52,6 +55,7 @@ class PolicyCatalogSession(AccessContract):
     policy_names: tuple[PolicyName, ...] = Field(min_length=1, max_length=32)
     draft_editing_available: bool = False
     historical_usage_nodes: tuple[str, ...] = ()
+    review_materials_available: bool = False
 
 
 class PolicyDetailInput(AccessContract):
@@ -68,6 +72,7 @@ class PolicyReadSurface:
         *,
         draft_commands: PolicyDraftCommandSurface | None = None,
         historical_usage: PolicyHistoricalUsage | None = None,
+        review_materials: PolicyReviewMaterialService | None = None,
     ) -> None:
         if not 1 <= len(policy_names) <= 32 or len(set(policy_names)) != len(policy_names):
             raise ValueError("policy interface requires explicit unique policy names")
@@ -83,6 +88,9 @@ class PolicyReadSurface:
         if historical_usage is not None and historical_usage.assessments.catalog is not catalog:
             raise ValueError("historical policy reads require the same source catalog")
         self.historical_usage = historical_usage
+        if review_materials is not None and review_materials.catalog is not catalog:
+            raise ValueError("policy material reads require the same source catalog")
+        self.review_materials = review_materials
 
     def _run(
         self,
@@ -133,8 +141,46 @@ class PolicyReadSurface:
                 historical_usage_nodes=self.historical_usage.accessible_nodes(session, actor)
                 if self.historical_usage is not None
                 else (),
+                review_materials_available=self.review_materials is not None,
             ),
         )
+
+    def materials_list(
+        self, authorization: str | None, request_id: str, query: PolicyMaterialListQuery
+    ) -> PolicyMaterialPage:
+        materials = self.review_materials
+        if materials is None:
+            raise DomainError("POLICY_REVIEW_NOT_CONFIGURED", "Material reads are not enabled", 503)
+        return self._run(
+            authorization,
+            request_id,
+            lambda session, actor, principal: materials.list(actor, query),
+            names=(query.source.name,),
+        )
+
+    def materials_detail(
+        self, authorization: str | None, request_id: str, query: PolicyMaterialDetailInput
+    ) -> PolicyMaterialDetailView:
+        materials = self.review_materials
+        if materials is None:
+            raise DomainError("POLICY_REVIEW_NOT_CONFIGURED", "Material reads are not enabled", 503)
+
+        def read(
+            session: Session, actor: ActorContext, principal: UserPrincipal
+        ) -> PolicyMaterialDetailView:
+            source = self.catalog.exact_in_transaction(session, actor, query.source)
+            if source.fingerprint != query.expected_source_fingerprint:
+                raise DomainError("CONFLICT", "Selected policy source fingerprint differs", 409)
+            value = materials.read(actor, query.id, expected_source=query.source)
+            if (value.source_id, value.request.expected_source_fingerprint, value.fingerprint) != (
+                source.id,
+                source.fingerprint,
+                query.expected_fingerprint,
+            ):
+                raise DomainError("CONFLICT", "Selected policy review material differs", 409)
+            return PolicyMaterialDetailView.of(value)
+
+        return self._run(authorization, request_id, read, names=(query.source.name,))
 
     def history_windows(
         self, authorization: str | None, request_id: str, query: PolicyHistoryWindowsInput

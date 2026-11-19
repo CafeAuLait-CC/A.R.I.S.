@@ -60,6 +60,14 @@ def test_policy_browser_routes_page_versions_show_verified_details_and_compare_w
         assert info["actor"]["user_id"] == state[3]["alice"]
         assert info["policy_names"] == ["fixture-only", "empty-policy"]
         assert not info["draft_editing_available"]
+        assert not info["review_materials_available"]
+        for path in ("query", "read"):
+            assert (
+                client.post(
+                    "/internal/policy/materials/" + path, headers=headers, json={}
+                ).status_code
+                == 404
+            )
         assert info["historical_usage_nodes"] == []
         assert (
             client.post("/internal/policy/history/windows", headers=headers, json={}).status_code
@@ -145,6 +153,7 @@ def test_policy_browser_routes_page_versions_show_verified_details_and_compare_w
             "policy-editor.js",
             "policy-fields.js",
             "policy-history.js",
+            "policy-materials.js",
         ):
             asset = client.get("/internal/policy/ui/assets/" + name)
             assert asset.status_code == 200 and "javascript" in asset.headers["content-type"]
