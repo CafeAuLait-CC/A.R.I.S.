@@ -18,6 +18,34 @@ from sqlalchemy.orm import Mapped, mapped_column
 from aris.core.db import Base
 
 
+class UsageTraceAttestationRow(Base):
+    __tablename__ = "usage_trace_attestations"
+    __table_args__ = (
+        UniqueConstraint("consumer_id", "revision", name="uq_usage_trace_attestation_revision"),
+        CheckConstraint("revision > 0", name="ck_usage_trace_attestation_revision"),
+        CheckConstraint(
+            "first_seq > 0 AND last_seq >= first_seq AND last_seq - first_seq < 128",
+            name="ck_usage_trace_attestation_range",
+        ),
+        CheckConstraint("length(fingerprint) = 64", name="ck_usage_trace_attestation_fingerprint"),
+        CheckConstraint(
+            "length(canonical_record) > 0 AND length(canonical_record) <= 16384",
+            name="ck_usage_trace_attestation_size",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    event_id: Mapped[str] = mapped_column(ForeignKey("domain_events.event_id"), unique=True)
+    record_id: Mapped[str] = mapped_column(ForeignKey("usage_trace_records.id"), unique=True)
+    previous_id: Mapped[str | None] = mapped_column(ForeignKey("usage_trace_attestations.id"))
+    consumer_id: Mapped[str] = mapped_column(String(128))
+    revision: Mapped[int] = mapped_column(BigInteger)
+    first_seq: Mapped[int] = mapped_column(BigInteger)
+    last_seq: Mapped[int] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    canonical_record: Mapped[str] = mapped_column(Text)
+
+
 class UsageDerivation(Base):
     __tablename__ = "usage_derivations"
     __table_args__ = (

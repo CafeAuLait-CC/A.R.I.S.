@@ -119,7 +119,12 @@ class UsageTraceConsumerService:
         return page
 
     def _evaluate(
-        self, session: Session, before: UsageTracePosition, page: UsageArchivePage
+        self,
+        session: Session,
+        before: UsageTracePosition,
+        page: UsageArchivePage,
+        *,
+        source_cutoff: datetime | None = None,
     ) -> _TraceEvaluation:
         checkpoint = before.trace
         residency = before.residency
@@ -139,11 +144,21 @@ class UsageTraceConsumerService:
                 raise DomainError(
                     "CONFLICT", "Original candidate trace anchor is unavailable or changed", 409
                 )
+            if (
+                source_cutoff is not None
+                and max(anchor.observed_at, anchor.received_at) > source_cutoff
+            ):
+                raise DomainError("CONFLICT", "Original trace anchor follows the cutoff", 409)
             cache[anchor.message_id] = anchor
         sources: list[ConsumedTraceSource] = []
         closed: list[ClosedResidencyCandidate] = []
         transitions = trace_fingerprint("transitions", "[]")
         for item in page.items:
+            if (
+                source_cutoff is not None
+                and max(item.reference.observed_at, item.reference.received_at) > source_cutoff
+            ):
+                raise DomainError("CONFLICT", "Original trace source follows the cutoff", 409)
             fact = item.observation
             sources.append(
                 ConsumedTraceSource(
@@ -198,7 +213,13 @@ class UsageTraceConsumerService:
             closed_runs=tuple(closed),
         )
 
-    def _verify_sources(self, session: Session, record: StoredTraceConsumption) -> None:
+    def _verify_sources(
+        self,
+        session: Session,
+        record: StoredTraceConsumption,
+        *,
+        source_cutoff: datetime | None = None,
+    ) -> None:
         before, config = record.before, record.before.configuration
         page = self._page(
             session,
@@ -210,7 +231,7 @@ class UsageTraceConsumerService:
                 limit=len(record.sources),
             ),
         )
-        evaluated = self._evaluate(session, before, page)
+        evaluated = self._evaluate(session, before, page, source_cutoff=source_cutoff)
         if (
             page.state != "range_end"
             or evaluated.sources != record.sources
@@ -220,6 +241,29 @@ class UsageTraceConsumerService:
             or evaluated.transitions_fingerprint != record.transitions_fingerprint
         ):
             raise DomainError("CONFLICT", "Candidate source prefix changed during processing", 409)
+
+    def verify_record_in_transaction(
+        self,
+        session: Session,
+        record_id: UUID,
+        expected_fingerprint: str,
+        source_cutoff: datetime,
+    ) -> StoredTraceConsumption:
+        """Reproduce one bounded record from originals, not its entire prior history.
+
+        The caller owns the transaction budget and must independently establish
+        the authority of the record's starting checkpoint.
+        """
+        with session.no_autoflush:
+            record = UsageTraceRepository(session).get(record_id)
+            if record is None:
+                raise DomainError("NOT_FOUND", "Candidate consumption record not found", 404)
+            if record.fingerprint != expected_fingerprint:
+                raise DomainError("CONFLICT", "Candidate consumption fingerprint differs", 409)
+            if record.created_at > source_cutoff:
+                raise DomainError("CONFLICT", "Candidate record follows the source cutoff", 409)
+            self._verify_sources(session, record, source_cutoff=source_cutoff)
+            return record
 
     def consume(
         self, context: UsageTraceConsumeContext, request: UsageTraceConsumeRequest
