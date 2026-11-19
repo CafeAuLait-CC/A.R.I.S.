@@ -7,12 +7,14 @@ from pathlib import Path
 
 from sqlalchemy import func, select
 
+from aris.apps.composition.lyra import load_lyra_config
 from aris.apps.composition.m2 import (
     M2RuntimeConfig,
     WorkerMode,
     build_m2_components,
     load_m2_config,
 )
+from aris.apps.worker.lyra import run_lyra_worker
 from aris.core.config import Settings
 from aris.core.db import build_engine, check_database, session_factory
 from aris.core.events import OutboxEntry
@@ -79,15 +81,29 @@ def run_m2_worker(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Inspect events, process Home jobs with --slack, or select an explicit M2 mode"
+        description="Inspect events, or select an explicit Slack, M2 or Lyra worker"
     )
     parser.add_argument("--once", action="store_true")
+    parser.add_argument(
+        "--lyra-config", type=Path, help="Private opt-in Lyra recording configuration"
+    )
     parser.add_argument("--m2-config", type=Path)
     parser.add_argument("--m2-mode", choices=["commands", "events", "notifications", "home", "all"])
     parser.add_argument(
         "--slack", action="store_true", help="Run durable Slack Home publishing jobs"
     )
     args = parser.parse_args()
+    if args.lyra_config is not None and (
+        args.slack or args.m2_config is not None or args.m2_mode is not None
+    ):
+        parser.error("--lyra-config cannot be combined with --slack or M2 worker arguments")
+    if args.lyra_config is not None:
+        try:
+            lyra = load_lyra_config(args.lyra_config)
+        except (ValueError, OSError):
+            parser.error("Lyra configuration must be a valid private regular JSON file")
+        run_lyra_worker(lyra, args.once)
+        return
     if (args.m2_config is None) != (args.m2_mode is None):
         parser.error("--m2-config and --m2-mode must be provided together")
     if args.m2_config is not None:
