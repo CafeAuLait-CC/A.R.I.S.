@@ -14,12 +14,15 @@ from aris.core.commands.gateway import UserCommandGateway
 from aris.core.commands.gateway_schemas import GatewayLimits
 from aris.core.commands.intake import CommandIntakeService
 from aris.core.commands.queue_schemas import CommandWorkerLimits, IntakeLimits
-from aris.core.commands.service import CommandService
+from aris.core.commands.service import CommandService, DatabaseCommand
 from aris.core.commands.worker import CommandWorker
 from aris.interfaces.commands.auth import BoundSubjectTokens
 from aris.interfaces.policy.drafts import PolicyDraftCommandSurface
 from aris.modules.nova.policy_catalog_commands import RecordPolicyDraftCommand
 from aris.modules.nova.policy_catalog_service import PolicyCatalogService
+from aris.modules.nova.policy_material_commands import RecordPolicyReviewMaterialCommand
+from aris.modules.nova.policy_material_schemas import ImplementationReference
+from aris.modules.nova.policy_material_service import PolicyReviewMaterialService
 
 
 class PolicyDraftRuntimeConfig(AccessContract):
@@ -31,6 +34,7 @@ class PolicyDraftRuntimeConfig(AccessContract):
     intake_limits: IntakeLimits
     worker_limits: CommandWorkerLimits
     poll_seconds: float = Field(default=1, ge=0.1, le=60)
+    review_material_implementation_ref: ImplementationReference | None = None
 
     @model_validator(mode="after")
     def explicit_workspace(self) -> "PolicyDraftRuntimeConfig":
@@ -70,9 +74,21 @@ def build_policy_draft_components(
     *,
     clock: Callable[[], datetime] | None = None,
 ) -> PolicyDraftComponents:
+    catalog = PolicyCatalogService(sessions, clock=clock)
+    actions: list[DatabaseCommand] = [RecordPolicyDraftCommand(catalog)]
+    allowed = ["policy.record_draft"]
+    if config.review_material_implementation_ref is not None:
+        actions.append(
+            RecordPolicyReviewMaterialCommand(
+                PolicyReviewMaterialService(
+                    catalog, implementation_ref=config.review_material_implementation_ref
+                )
+            )
+        )
+        allowed.append("policy.record_review_material")
     commands = CommandService(
         sessions,
-        [RecordPolicyDraftCommand(PolicyCatalogService(sessions, clock=clock))],
+        actions,
         confirmation_key=config.confirmation_key,
         confirmation_ttl_seconds=config.confirmation_ttl_seconds,
         clock=clock,
@@ -83,8 +99,13 @@ def build_policy_draft_components(
         config.intake_limits,
         confirmation_key_id=config.confirmation_key_id,
     )
-    gateway = UserCommandGateway(intake, ("policy.record_draft",), config.gateway_limits)
+    gateway = UserCommandGateway(intake, tuple(allowed), config.gateway_limits)
     return PolicyDraftComponents(
-        user_api=PolicyDraftCommandSurface(gateway, auth, policy_names),
+        user_api=PolicyDraftCommandSurface(
+            gateway,
+            auth,
+            policy_names,
+            material_implementation_ref=config.review_material_implementation_ref,
+        ),
         worker=CommandWorker(intake, config.worker_limits),
     )

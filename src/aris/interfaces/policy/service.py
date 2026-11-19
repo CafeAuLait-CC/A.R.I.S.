@@ -25,7 +25,12 @@ from aris.interfaces.policy.history import (
     PolicyHistoryAssessmentView,
     PolicyHistoryWindowsInput,
 )
-from aris.interfaces.policy.materials import PolicyMaterialDetailInput, PolicyMaterialDetailView
+from aris.interfaces.policy.materials import (
+    PolicyExampleResultView,
+    PolicyMaterialDetailInput,
+    PolicyMaterialDetailView,
+    PolicyMaterialValidation,
+)
 from aris.modules.lyra.quota_evidence_schemas import QuotaEvidencePage
 from aris.modules.nova.policy_catalog_schemas import (
     PolicySourceComparisonQuery,
@@ -41,10 +46,15 @@ from aris.modules.nova.policy_catalog_service import (
     GLOBAL_SCOPE,
     PolicyCatalogService,
 )
-from aris.modules.nova.policy_material_schemas import PolicyMaterialListQuery, PolicyMaterialPage
+from aris.modules.nova.policy_material_schemas import (
+    PolicyMaterialListQuery,
+    PolicyMaterialPage,
+    RecordPolicyReviewMaterial,
+)
 from aris.modules.nova.policy_material_service import PolicyReviewMaterialService
 from aris.modules.nova.policy_review import policy_difference
 from aris.modules.nova.policy_schemas import PolicyName
+from aris.modules.nova.policy_simulation import simulate_policy_constraints
 from aris.modules.nova.policy_source import compile_policy, parse_policy_source
 
 Result = TypeVar("Result", bound=BaseModel)
@@ -56,6 +66,7 @@ class PolicyCatalogSession(AccessContract):
     draft_editing_available: bool = False
     historical_usage_nodes: tuple[str, ...] = ()
     review_materials_available: bool = False
+    review_material_implementation_ref: str | None = None
 
 
 class PolicyDetailInput(AccessContract):
@@ -142,8 +153,43 @@ class PolicyReadSurface:
                 if self.historical_usage is not None
                 else (),
                 review_materials_available=self.review_materials is not None,
+                review_material_implementation_ref=self.draft_commands.material_implementation_ref
+                if self.draft_commands is not None and self.review_materials is not None
+                else None,
             ),
         )
+
+    def materials_validate(
+        self, authorization: str | None, request_id: str, query: RecordPolicyReviewMaterial
+    ) -> PolicyMaterialValidation:
+        configured = (
+            self.draft_commands.material_implementation_ref if self.draft_commands else None
+        )
+        if configured is None:
+            raise DomainError(
+                "POLICY_REVIEW_NOT_CONFIGURED", "Material writing is not enabled", 503
+            )
+
+        def validate(
+            session: Session, actor: ActorContext, principal: UserPrincipal
+        ) -> PolicyMaterialValidation:
+            if query.expected_implementation_ref != configured:
+                raise DomainError("CONFLICT", "Material implementation reference changed", 409)
+            source = self.catalog.exact_in_transaction(session, actor, query.source)
+            if source.fingerprint != query.expected_source_fingerprint:
+                raise DomainError("CONFLICT", "Material source fingerprint differs", 409)
+            size = len(bounded_json(query.model_dump(mode="json"), 16384))
+            compiled = compile_policy(source.source)
+            return PolicyMaterialValidation(
+                request=query,
+                inline_bytes=size,
+                results=tuple(
+                    PolicyExampleResultView.of(simulate_policy_constraints(compiled, case))
+                    for case in query.scenarios
+                ),
+            )
+
+        return self._run(authorization, request_id, validate, names=(query.source.name,))
 
     def materials_list(
         self, authorization: str | None, request_id: str, query: PolicyMaterialListQuery

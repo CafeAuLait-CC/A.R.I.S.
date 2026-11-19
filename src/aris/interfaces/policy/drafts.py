@@ -14,6 +14,7 @@ from aris.core.contracts import DomainError
 from aris.interfaces.commands.auth import UserCommandAuthenticator
 from aris.interfaces.commands.service import UserCommandSurface
 from aris.modules.nova.policy_catalog_schemas import PolicySourceReference, RecordPolicyDraft
+from aris.modules.nova.policy_material_schemas import RecordPolicyReviewMaterial
 from aris.modules.nova.policy_review import PolicyDifference
 
 
@@ -54,24 +55,33 @@ class PolicyDraftCommandSurface(UserCommandSurface):
         gateway: UserCommandGateway,
         authentication: UserCommandAuthenticator,
         policy_names: tuple[str, ...],
+        *,
+        material_implementation_ref: str | None = None,
     ) -> None:
         super().__init__(gateway, authentication)
-        if gateway.allowed != frozenset({"policy.record_draft"}):
-            raise ValueError("the draft interface exposes only policy.record_draft")
+        allowed = {"policy.record_draft"}
+        if material_implementation_ref is not None:
+            allowed.add("policy.record_review_material")
+        if gateway.allowed != frozenset(allowed):
+            raise ValueError("policy interface commands must match its explicit configuration")
         if not 1 <= len(policy_names) <= 32 or len(set(policy_names)) != len(policy_names):
             raise ValueError("draft policy names must be explicit and unique")
         for name in policy_names:
             PolicySourceReference(name=name, version=1)
         self.policy_names = policy_names
+        self.material_implementation_ref = material_implementation_ref
 
     def _name(self, request: UserCommandInput) -> None:
-        if request.command != "policy.record_draft":
+        if request.command not in self.gateway.allowed:
             raise DomainError("PERMISSION_DENIED", "Command is outside this draft interface", 403)
         try:
-            draft = RecordPolicyDraft.model_validate(request.parameters)
+            if request.command == "policy.record_draft":
+                name = RecordPolicyDraft.model_validate(request.parameters).source.metadata.name
+            else:
+                name = RecordPolicyReviewMaterial.model_validate(request.parameters).source.name
         except ValidationError:
             raise DomainError("VALIDATION_ERROR", "Invalid policy draft intent", 422) from None
-        if draft.source.metadata.name not in self.policy_names:
+        if name not in self.policy_names:
             raise DomainError("PERMISSION_DENIED", "Policy name is outside this interface", 403)
 
     def submit(

@@ -5,7 +5,7 @@ window.ARISPolicyMaterials = ({$,text,request,run,formatDate,quota}) => {
   const rules={'reservation.max_duration':'预约时长','reservation.min_notice':'至少提前','reservation.max_advance':'最远提前','reservation.concurrent':'总并发 GPU','quota.actual_usage':'假设使用额度'};
   const reasons={WITHIN_LIMIT:'在限制内',MAX_DURATION_EXCEEDED:'超过最长预约时长',MIN_NOTICE_UNMET:'提前时间不足',ADVANCE_HORIZON_EXCEEDED:'超过提前预约范围',CONCURRENCY_UNKNOWN:'没有提供假设并发数',CONCURRENCY_LIMIT_EXCEEDED:'超过并发上限',QUOTA_SCOPE_UNCONFIGURED:'此节点未配置额度',QUOTA_UNLIMITED:'规则不设限额',USAGE_UNKNOWN:'未提供完整假设用量',USAGE_SCOPE_MISMATCH:'假设用量的用户或范围不匹配',USAGE_CUTOFF_MISMATCH:'假设用量的截止时刻不匹配',USAGE_WINDOW_MISMATCH:'假设用量的统计周期不匹配',USAGE_CONTEXT_UNAVAILABLE:'假设用量上下文不可用',QUOTA_NOT_EXHAUSTED:'假设用量未达到限额',WEEKLY_QUOTA_EXHAUSTED:'假设用量已达到限额'};
   function clearDetail(){ $('material-detail').replaceChildren();$('material-detail').hidden=true; }
-  function controls(){panel.hidden=!available || !source;for(const el of panel.querySelectorAll('button'))el.disabled=locked || !source;$('materials-more').hidden=next===null || items.length>=128;}
+  function controls(){panel.hidden=!available || !source;for(const el of [$('materials-load'),$('materials-more'),...$('materials-list').querySelectorAll('button')])el.disabled=locked || !source;$('materials-more').hidden=next===null || items.length>=128;}
   function reset(view=null){revision++;source=view;items=[];next=null;$('materials-list').replaceChildren();$('materials-note').textContent='';$('materials-source').textContent=view?`${view.source.metadata.name} · 版本 ${view.source.metadata.version}`:'';clearDetail();controls();}
   const selection=()=>({source:{name:source.source.metadata.name,version:source.source.metadata.version},expected_source_fingerprint:source.fingerprint});
   async function load(more){
@@ -51,5 +51,5 @@ window.ARISPolicyMaterials = ({$,text,request,run,formatDate,quota}) => {
   }
   $('materials-load').addEventListener('click',()=>run(()=>load(false),'正在读取案例材料目录…'));
   $('materials-more').addEventListener('click',()=>run(()=>load(true),'正在读取更多案例材料…'));
-  return {session(enabled){available=enabled===true;reset();},source:reset,reset(){reset();},disconnect(){available=false;reset();},setBusy(value){locked=value;controls();}};
+  return {caseCard:scenarioCard,async showSaved(id,fingerprint){await load(false);await open({id,fingerprint});},session(enabled){available=enabled===true;reset();},source:reset,reset(){reset();},disconnect(){available=false;reset();},setBusy(value){locked=value;controls();}};
 };

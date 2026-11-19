@@ -85,6 +85,11 @@ def main(argv: list[str] | None = None) -> int:
             PolicySourceReference(name=name, version=1)
         if config.draft_commands is not None:
             validate_policy_draft_configuration(config.draft_commands, auth, config.read_token)
+            if (
+                config.draft_commands.review_material_implementation_ref is not None
+                and not config.review_materials_read
+            ):
+                raise ValueError("material writing requires its explicit read interface")
         elif args.worker:
             raise ValueError("draft commands must be explicitly configured for the worker")
         if args.validate:
@@ -96,6 +101,11 @@ def main(argv: list[str] | None = None) -> int:
             }
             if config.draft_commands is not None:
                 summary["draft_commands"] = ["policy.record_draft"]
+                if config.draft_commands.review_material_implementation_ref is not None:
+                    summary["draft_commands"] = [
+                        "policy.record_draft",
+                        "policy.record_review_material",
+                    ]
             if config.historical_usage:
                 summary["historical_usage_nodes"] = [
                     node.node_id for node in config.historical_usage

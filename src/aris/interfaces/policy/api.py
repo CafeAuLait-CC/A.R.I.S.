@@ -15,7 +15,10 @@ from aris.modules.nova.policy_catalog_schemas import (
     PolicySourceComparisonQuery,
     PolicySourceListQuery,
 )
-from aris.modules.nova.policy_material_schemas import PolicyMaterialListQuery
+from aris.modules.nova.policy_material_schemas import (
+    PolicyMaterialListQuery,
+    RecordPolicyReviewMaterial,
+)
 
 ASSETS = Path(__file__).with_name("static")
 PAGE_HEADERS = {
@@ -29,6 +32,21 @@ PAGE_HEADERS = {
 
 def build_router(service: PolicyReadSurface) -> APIRouter:
     router = APIRouter(prefix="/internal/policy", tags=["policy-source-review"])
+
+    if (
+        service.draft_commands is not None
+        and service.draft_commands.material_implementation_ref is not None
+    ):
+
+        @router.post("/materials/validate")
+        async def materials_validate(request: Request) -> JSONResponse:
+            if request.query_params:
+                raise DomainError("VALIDATION_ERROR", "Unexpected material query parameters", 422)
+            query = await bounded_input(request, RecordPolicyReviewMaterial)
+            result = await run_in_threadpool(
+                service.materials_validate, authorization(request), request.state.request_id, query
+            )
+            return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
 
     if service.review_materials is not None:
 
@@ -140,6 +158,7 @@ def build_router(service: PolicyReadSurface) -> APIRouter:
             "policy-fields.js",
             "policy-history.js",
             "policy-materials.js",
+            "policy-material-save.js",
             "policy-editor.js",
             "policy.css",
         ],

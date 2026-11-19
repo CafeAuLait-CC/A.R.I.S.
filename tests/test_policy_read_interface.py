@@ -61,7 +61,8 @@ def test_policy_browser_routes_page_versions_show_verified_details_and_compare_w
         assert info["policy_names"] == ["fixture-only", "empty-policy"]
         assert not info["draft_editing_available"]
         assert not info["review_materials_available"]
-        for path in ("query", "read"):
+        assert info["review_material_implementation_ref"] is None
+        for path in ("query", "read", "validate"):
             assert (
                 client.post(
                     "/internal/policy/materials/" + path, headers=headers, json={}
@@ -154,6 +155,7 @@ def test_policy_browser_routes_page_versions_show_verified_details_and_compare_w
             "policy-fields.js",
             "policy-history.js",
             "policy-materials.js",
+            "policy-material-save.js",
         ):
             asset = client.get("/internal/policy/ui/assets/" + name)
             assert asset.status_code == 200 and "javascript" in asset.headers["content-type"]

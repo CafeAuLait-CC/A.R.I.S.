@@ -10,6 +10,7 @@ from aris.interfaces.policy.history import ExactSecondsView
 from aris.modules.nova.policy_catalog_schemas import PolicySourceReference
 from aris.modules.nova.policy_material_schemas import (
     PolicyMaterialSummary,
+    RecordPolicyReviewMaterial,
     StoredPolicyReviewMaterial,
 )
 from aris.modules.nova.policy_schemas import QuotaLimit
@@ -82,3 +83,13 @@ class PolicyMaterialDetailView(AccessContract):
             scenarios=request.scenarios,
             results=tuple(PolicyExampleResultView.of(result) for result in value.results),
         )
+
+
+class PolicyMaterialValidation(AccessContract):
+    review_material_only: Literal[True] = True
+    approval_performed: Literal[False] = False
+    publication_performed: Literal[False] = False
+    current_dependencies_assessed: Literal[False] = False
+    request: RecordPolicyReviewMaterial
+    results: tuple[PolicyExampleResultView, ...]
+    inline_bytes: int = Field(ge=1, le=16384)

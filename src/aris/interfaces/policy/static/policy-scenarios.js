@@ -3,6 +3,7 @@ window.ARISPolicyScenarios = ({ $, text, request, versions, run, formatDate }) =
   const form = $('scenario-form');
   const result = $('scenario-result');
   const controls = [...form.querySelectorAll('input,button')];
+  let latest = null;
   const names = {
     'reservation.max_duration': '预约时长',
     'reservation.min_notice': '至少提前',
@@ -22,6 +23,7 @@ window.ARISPolicyScenarios = ({ $, text, request, versions, run, formatDate }) =
     USAGE_UNKNOWN: '没有提供完整使用数据',
   };
   function clear() {
+    latest = null;
     result.replaceChildren();
     result.classList.remove('single');
     result.hidden = true;
@@ -101,6 +103,7 @@ window.ARISPolicyScenarios = ({ $, text, request, versions, run, formatDate }) =
     result.classList.toggle('single', sides.length === 1);
     result.hidden = false;
     $('scenario-note').textContent = `节点 ${assumption.node_id} · 参考时间 ${formatDate(assumption.as_of)} · 所有输入均为假设，未读取真实使用数据。`;
+    latest = structuredClone(assumption);
   }
   form.addEventListener('input', clear);
   form.addEventListener('change', clear);
@@ -123,6 +126,7 @@ window.ARISPolicyScenarios = ({ $, text, request, versions, run, formatDate }) =
   });
   return {
     clear, reset,
+    latest: () => latest === null ? null : structuredClone(latest),
     setBusy(value) { controls.forEach(control => { control.disabled = value; }); },
     source(view) {
       const quota = view.source.spec.quota;
