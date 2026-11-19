@@ -113,6 +113,32 @@ def test_same_id_different_frozen_input_is_a_conflict_not_a_new_job(jobs):
     assert queue.exact(request.id).request == request
 
 
+def test_future_source_cutoff_is_not_accepted_as_an_immediately_runnable_closed_job(jobs):
+    queue, request, _, clock = jobs
+    future = request.model_copy(
+        update={
+            "reference": request.reference.model_copy(
+                update={"source_cutoff": clock["now"] + timedelta(seconds=1)}
+            )
+        }
+    )
+    with pytest.raises(DomainError) as error:
+        queue.enqueue(POST, future)
+    assert error.value.code == "VALIDATION_ERROR" and size(queue) == 0
+
+
+def test_clock_rollback_cannot_execute_a_lease_before_its_claim_time(jobs):
+    queue, request, state, clock = jobs
+    queue.enqueue(POST, request)
+    claim = queue.claim(POST)
+    before = counts(state)
+    clock["now"] -= timedelta(seconds=1)
+    assert queue.execute(POST, claim).state == "lost_claim"
+    assert counts(state) == before and queue.exact(request.id).state == "running"
+    clock["now"] += timedelta(seconds=1)
+    assert queue.execute(POST, claim).state == "completed"
+
+
 def test_expired_lease_is_reclaimed_and_old_owner_cannot_complete_or_register_failure(jobs):
     queue, request, state, clock = jobs
     queue.enqueue(POST, request)

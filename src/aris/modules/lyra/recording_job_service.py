@@ -139,6 +139,10 @@ class RecordingJobService:
                     )
                 limits = self._active()
                 now = self._now()
+                if request.reference.source_cutoff > now:
+                    raise DomainError(
+                        "VALIDATION_ERROR", "Recording job source cutoff is in the future", 422
+                    )
                 row = UsageRecordingJobRow(
                     id=str(request.id),
                     canonical_request=raw,
@@ -185,6 +189,7 @@ class RecordingJobService:
             and row.attempts == claim.attempt
             and row.lease_token == str(claim.lease_token)
             and row.lease_expires_at is not None
+            and utc(row.updated_at) <= now
             and utc(row.lease_expires_at) == claim.lease_expires_at
             and utc(row.lease_expires_at) > now
         )
