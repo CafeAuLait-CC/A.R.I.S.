@@ -408,6 +408,7 @@ def build_m2_components(
                 VegaService(sessions, settings),
                 home_publisher or SlackClient(slack),
                 reservations=home_reservations,
+                usage_available=bool(config.slack_usage_nodes),
                 clock=clock,
             )
             if home_reservations is not None

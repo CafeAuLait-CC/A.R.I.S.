@@ -38,6 +38,7 @@ from aris.interfaces.slack.schemas import (
 )
 from aris.interfaces.slack.security import require_workspace, verify_request
 from aris.interfaces.slack.usage import SlackUsageQueries
+from aris.interfaces.slack.usage_modal import UsageModalAdapter
 from aris.interfaces.slack.user_commands import SlackCommandAdapter
 from aris.modules.vega.service import VegaService
 
@@ -81,6 +82,9 @@ class SlackService:
         self.reservation_drafts = reservation_drafts
         self.home_reservations = home_reservations
         self.usage_queries = usage_queries
+        self.usage_modal = (
+            UsageModalAdapter(usage_queries.queries, self.modal) if usage_queries else None
+        )
         if usage_queries is not None:
             usage_queries.validate_configuration(config)
         if home_reservations is not None:
@@ -177,6 +181,14 @@ class SlackService:
                 payload = json_object(form_fields(body)["payload"])
                 interaction = Interaction.model_validate(payload)
                 require_workspace(self.config, interaction.team.id)
+                if UsageModalAdapter.handles(interaction, payload):
+                    if self.usage_modal is None:
+                        raise DomainError(
+                            "DEPENDENCY_UNAVAILABLE",
+                            "Personal usage callbacks are not enabled",
+                            503,
+                        )
+                    return self.usage_modal.interact(interaction, payload, request_id, received)
                 view = payload.get("view")
                 if SlackReservationChanges.handles(interaction, payload):
                     if (

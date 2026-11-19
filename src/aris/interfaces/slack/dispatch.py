@@ -32,6 +32,7 @@ class SlackDispatcher:
         publisher: HomePublisher,
         *,
         reservations: HomeReservationSource | None = None,
+        usage_available: bool = False,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.sessions = sessions
@@ -39,6 +40,7 @@ class SlackDispatcher:
         self.vega = vega
         self.publisher = publisher
         self.reservations = reservations
+        self.usage_available = usage_available
         if reservations is not None:
             reservations.validate_configuration(config)
         self.clock = clock or (lambda: datetime.now(UTC))
@@ -147,6 +149,7 @@ class SlackDispatcher:
                     asset_base_url=self.config.home_asset_base_url,
                     layout=self.config.home_layout,
                     reservations=reservations,
+                    usage_available=self.usage_available,
                 ),
             )
         except SlackDeliveryError as exc:

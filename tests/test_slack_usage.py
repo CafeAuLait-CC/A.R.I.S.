@@ -210,9 +210,11 @@ def test_usage_composes_without_http_tokens_or_reservation_callbacks(usage_slack
         slack_callbacks=False,
         user_tokens=(),
         slack_usage_nodes=("node-a",),
+        reservation_home=True,
     )
     with TestClient(create_app(settings, slack, m2_config=cfg)) as client:
         assert client.app.state.m2.user_api is None and client.app.state.m2.slack_usage is not None
+        assert client.app.state.m2.home.usage_available
         assert "node-a" in request(client, "usage").text
         assert client.get("/internal/usage/ui").status_code == 404
 

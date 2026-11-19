@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from aris.interfaces.slack.home_reservations import HomeReservationSnapshot
 from aris.interfaces.slack.presentation import escape, markdown, plain, slack_time
+from aris.interfaces.slack.usage_contracts import USAGE_HOME_ACTION
 from aris.interfaces.slack.vram_assets import asset_name
 from aris.modules.vega.resource_schemas import NodeResourceStatus, ResourceStatus
 from aris.modules.vega.schemas import GpuStatus
@@ -328,6 +329,7 @@ def home_view(
     asset_base_url: str | None = None,
     layout: HomeLayout = "two-column",
     reservations: HomeReservationSnapshot | None = None,
+    usage_available: bool = False,
 ) -> dict[str, Any]:
     if layout not in {"two-column", "single-column"}:
         raise ValueError("unsupported Home layout")
@@ -364,6 +366,7 @@ def home_view(
         else fallback
     )
     cost = sum(block_cost(block) for block in blocks)
+    display_limit = 97 if usage_available else 98
     truncated = False
     health = {"ONLINE": "Online", "STALE": "Activity stale", "OFFLINE": "Offline"}
     quality = {
@@ -387,7 +390,7 @@ def home_view(
             node_blocks.append(context("Reserved counts are independent of hardware use."))
         if node.telemetry_status != "CURRENT":
             node_blocks.append(context(quality[node.telemetry_status]))
-        if cost + len(node_blocks) + 3 > 98:
+        if cost + len(node_blocks) + 3 > display_limit:
             truncated = True
             break
         blocks.extend(node_blocks)
@@ -404,7 +407,7 @@ def home_view(
                 else device_blocks(entry, pair[0], asset_base_url, reservations=reservations)
             )
             unit_cost = sum(block_cost(block) for block in unit)
-            if cost + unit_cost > 98:
+            if cost + unit_cost > display_limit:
                 truncated = True
                 break
             blocks.extend(unit)
@@ -420,6 +423,8 @@ def home_view(
                 "open the WebUI for the full inventory."
             )
         )
+    if usage_available:
+        blocks.append({"type": "actions", "elements": [button("My usage", USAGE_HOME_ACTION)]})
     blocks.append(
         context(
             "Updated " + slack_time(snapshot.generated_at) + " · Refresh for latest observations."
