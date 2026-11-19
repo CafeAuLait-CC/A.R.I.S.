@@ -19,6 +19,66 @@ from sqlalchemy.orm import Mapped, mapped_column
 from aris.core.db import Base
 
 
+class UsageResidencySegmentSetRow(Base):
+    __tablename__ = "usage_residency_segment_sets"
+    __table_args__ = (
+        CheckConstraint(
+            "segment_count >= 0 AND segment_count <= 16384", name="ck_residency_set_count"
+        ),
+        CheckConstraint("length(fingerprint)=64", name="ck_residency_set_fingerprint"),
+        CheckConstraint(
+            "length(canonical_record)>0 AND length(canonical_record)<=8388608",
+            name="ck_residency_set_size",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    event_id: Mapped[str] = mapped_column(ForeignKey("domain_events.event_id"), unique=True)
+    attestation_id: Mapped[str] = mapped_column(
+        ForeignKey("usage_trace_attestations.id"), unique=True
+    )
+    consumer_id: Mapped[str] = mapped_column(String(128))
+    segment_count: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    canonical_record: Mapped[str] = mapped_column(Text)
+
+
+class UsageResidencySegmentRow(Base):
+    __tablename__ = "usage_residency_segments"
+    __table_args__ = (
+        UniqueConstraint("set_id", "segment_index", name="uq_residency_segment_position"),
+        UniqueConstraint(
+            "consumer_id", "run_id", "interval_offset", name="uq_residency_segment_offset"
+        ),
+        CheckConstraint(
+            "segment_index>=0 AND segment_index<16384", name="ck_residency_segment_position"
+        ),
+        CheckConstraint(
+            "interval_offset>=0 AND through_interval>interval_offset "
+            "AND through_interval-interval_offset<=128",
+            name="ck_residency_segment_intervals",
+        ),
+        CheckConstraint("first_seq>0 AND last_seq>first_seq", name="ck_residency_segment_sources"),
+        ExcludeConstraint(  # type: ignore[no-untyped-call]
+            ("consumer_id", "="),
+            ("run_id", "="),
+            (text("int8range(interval_offset, through_interval, '[)')"), "&&"),
+            name="ex_residency_segment_intervals",
+            using="gist",
+            ops={"consumer_id": "public.gist_text_ops", "run_id": "public.gist_text_ops"},
+        ).ddl_if(dialect="postgresql"),
+    )
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    set_id: Mapped[str] = mapped_column(ForeignKey("usage_residency_segment_sets.id"))
+    segment_index: Mapped[int] = mapped_column(Integer)
+    consumer_id: Mapped[str] = mapped_column(String(128))
+    run_id: Mapped[str] = mapped_column(String(64))
+    interval_offset: Mapped[int] = mapped_column(BigInteger)
+    through_interval: Mapped[int] = mapped_column(BigInteger)
+    first_seq: Mapped[int] = mapped_column(BigInteger)
+    last_seq: Mapped[int] = mapped_column(BigInteger)
+
+
 class UsageRecordingJobRow(Base):
     __tablename__ = "usage_recording_jobs"
     __table_args__ = (
