@@ -3,16 +3,18 @@
 from typing import Literal
 from uuid import UUID
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from aris.core.access.schemas import AccessContract
 from aris.interfaces.policy.history import ExactSecondsView
 from aris.modules.nova.policy_catalog_schemas import PolicySourceReference
 from aris.modules.nova.policy_material_schemas import (
+    ImplementationReference,
     PolicyMaterialSummary,
     RecordPolicyReviewMaterial,
     StoredPolicyReviewMaterial,
 )
+from aris.modules.nova.policy_review import PolicyDifference
 from aris.modules.nova.policy_schemas import QuotaLimit
 from aris.modules.nova.policy_simulation import (
     ConstraintResult,
@@ -62,6 +64,7 @@ class PolicyMaterialDetailView(AccessContract):
     command_id: UUID
     scenarios: tuple[PolicyScenario, ...]
     results: tuple[PolicyExampleResultView, ...]
+    raw_scenarios: tuple[str, ...]
 
     @classmethod
     def of(cls, value: StoredPolicyReviewMaterial) -> "PolicyMaterialDetailView":
@@ -82,7 +85,46 @@ class PolicyMaterialDetailView(AccessContract):
             command_id=value.command_id,
             scenarios=request.scenarios,
             results=tuple(PolicyExampleResultView.of(result) for result in value.results),
+            raw_scenarios=tuple(case.model_dump_json(indent=2) for case in request.scenarios),
         )
+
+
+class PolicyMaterialComparisonInput(PolicyMaterialDetailInput):
+    target: PolicySourceReference
+    expected_target_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    expected_implementation_ref: ImplementationReference
+
+    @model_validator(mode="after")
+    def one_policy(self) -> "PolicyMaterialComparisonInput":
+        if self.source.name != self.target.name:
+            raise ValueError("stored material comparison requires the same policy name")
+        return self
+
+
+class PolicyMaterialComparedCase(AccessContract):
+    scenario: PolicyScenario
+    raw_scenario: str
+    recorded_result: PolicyExampleResultView
+    before_result: PolicyExampleResultView
+    after_result: PolicyExampleResultView
+    stored_replay_matches: bool
+    decision_changed: bool
+    changed_rules: tuple[str, ...]
+
+
+class PolicyMaterialComparisonView(AccessContract):
+    comparison_only: Literal[True] = True
+    basis: Literal["stored_caller_supplied_examples"] = "stored_caller_supplied_examples"
+    current_dependencies_assessed: Literal[False] = False
+    approval_performed: Literal[False] = False
+    publication_performed: Literal[False] = False
+    material: PolicyMaterialSummary
+    comparison_implementation_ref: ImplementationReference
+    target: PolicySourceReference
+    target_source_id: UUID
+    target_source_fingerprint: str
+    difference: PolicyDifference
+    cases: tuple[PolicyMaterialComparedCase, ...] = Field(min_length=1, max_length=8)
 
 
 class PolicyMaterialValidation(AccessContract):

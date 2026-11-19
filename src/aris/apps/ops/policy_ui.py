@@ -29,6 +29,7 @@ from aris.interfaces.policy.service import PolicyReadSurface
 from aris.interfaces.slack.config import SlackSettings
 from aris.modules.lyra.quota_evidence_service import HistoricalQuotaEvidenceService
 from aris.modules.nova.policy_catalog_service import PolicyCatalogService
+from aris.modules.nova.policy_material_schemas import ImplementationReference
 from aris.modules.nova.policy_material_service import PolicyReviewMaterialService
 from aris.modules.nova.quota_history_service import HistoricalQuotaAssessmentService
 
@@ -42,6 +43,7 @@ class LocalPolicyConfig(AccessContract):
     draft_commands: PolicyDraftRuntimeConfig | None = None
     historical_usage: tuple[HistoricalPolicyNode, ...] = Field(default=(), max_length=8)
     review_materials_read: bool = Field(default=False, strict=True)
+    material_comparison_implementation_ref: ImplementationReference | None = None
 
     def settings(self) -> Settings:
         url = make_url(self.database_url.get_secret_value())
@@ -83,6 +85,11 @@ def main(argv: list[str] | None = None) -> int:
 
         for name in config.policy_names:
             PolicySourceReference(name=name, version=1)
+        if (
+            config.material_comparison_implementation_ref is not None
+            and not config.review_materials_read
+        ):
+            raise ValueError("material comparisons require explicit material reads")
         if config.draft_commands is not None:
             validate_policy_draft_configuration(config.draft_commands, auth, config.read_token)
             if (
@@ -112,6 +119,8 @@ def main(argv: list[str] | None = None) -> int:
                 ]
             if config.review_materials_read:
                 summary["review_materials_read"] = True
+            if config.material_comparison_implementation_ref is not None:
+                summary["material_comparison_read"] = True
             print(json.dumps(summary))
             return 0
         url = make_url(settings.database_url)
@@ -153,6 +162,7 @@ def main(argv: list[str] | None = None) -> int:
             review_materials=PolicyReviewMaterialService(catalog)
             if config.review_materials_read
             else None,
+            material_comparison_implementation_ref=config.material_comparison_implementation_ref,
         )
         uvicorn.run(
             create_app(

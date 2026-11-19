@@ -27,6 +27,9 @@ from aris.interfaces.policy.history import (
 )
 from aris.interfaces.policy.materials import (
     PolicyExampleResultView,
+    PolicyMaterialComparedCase,
+    PolicyMaterialComparisonInput,
+    PolicyMaterialComparisonView,
     PolicyMaterialDetailInput,
     PolicyMaterialDetailView,
     PolicyMaterialValidation,
@@ -67,6 +70,7 @@ class PolicyCatalogSession(AccessContract):
     historical_usage_nodes: tuple[str, ...] = ()
     review_materials_available: bool = False
     review_material_implementation_ref: str | None = None
+    material_comparison_implementation_ref: str | None = None
 
 
 class PolicyDetailInput(AccessContract):
@@ -84,6 +88,7 @@ class PolicyReadSurface:
         draft_commands: PolicyDraftCommandSurface | None = None,
         historical_usage: PolicyHistoricalUsage | None = None,
         review_materials: PolicyReviewMaterialService | None = None,
+        material_comparison_implementation_ref: str | None = None,
     ) -> None:
         if not 1 <= len(policy_names) <= 32 or len(set(policy_names)) != len(policy_names):
             raise ValueError("policy interface requires explicit unique policy names")
@@ -102,6 +107,17 @@ class PolicyReadSurface:
         if review_materials is not None and review_materials.catalog is not catalog:
             raise ValueError("policy material reads require the same source catalog")
         self.review_materials = review_materials
+        if material_comparison_implementation_ref is not None:
+            from pydantic import TypeAdapter
+
+            from aris.modules.nova.policy_material_schemas import ImplementationReference
+
+            material_comparison_implementation_ref = TypeAdapter(
+                ImplementationReference
+            ).validate_python(material_comparison_implementation_ref)
+            if review_materials is None:
+                raise ValueError("stored material comparisons require material reads")
+        self.material_comparison_implementation_ref = material_comparison_implementation_ref
 
     def _run(
         self,
@@ -156,6 +172,7 @@ class PolicyReadSurface:
                 review_material_implementation_ref=self.draft_commands.material_implementation_ref
                 if self.draft_commands is not None and self.review_materials is not None
                 else None,
+                material_comparison_implementation_ref=self.material_comparison_implementation_ref,
             ),
         )
 
@@ -227,6 +244,76 @@ class PolicyReadSurface:
             return PolicyMaterialDetailView.of(value)
 
         return self._run(authorization, request_id, read, names=(query.source.name,))
+
+    def materials_compare(
+        self, authorization: str | None, request_id: str, query: PolicyMaterialComparisonInput
+    ) -> PolicyMaterialComparisonView:
+        materials = self.review_materials
+        implementation = self.material_comparison_implementation_ref
+        if materials is None or implementation is None:
+            raise DomainError(
+                "POLICY_REVIEW_NOT_CONFIGURED", "Material comparison is not enabled", 503
+            )
+
+        def compare(
+            session: Session, actor: ActorContext, principal: UserPrincipal
+        ) -> PolicyMaterialComparisonView:
+            if query.expected_implementation_ref != implementation:
+                raise DomainError(
+                    "CONFLICT", "Material comparison implementation reference changed", 409
+                )
+            source = self.catalog.exact_in_transaction(session, actor, query.source)
+            if source.fingerprint != query.expected_source_fingerprint:
+                raise DomainError("CONFLICT", "Material source fingerprint differs", 409)
+            value = materials.read(actor, query.id, expected_source=query.source)
+            if (value.source_id, value.request.expected_source_fingerprint, value.fingerprint) != (
+                source.id,
+                source.fingerprint,
+                query.expected_fingerprint,
+            ):
+                raise DomainError("CONFLICT", "Selected policy review material differs", 409)
+            result = self.catalog.compare_sources_in_transaction(
+                session,
+                actor,
+                PolicySourceComparisonQuery(
+                    before=query.source,
+                    after=query.target,
+                    expected_before_fingerprint=query.expected_source_fingerprint,
+                    expected_after_fingerprint=query.expected_target_fingerprint,
+                    scenarios=value.request.scenarios,
+                ),
+            )
+            if self.material_comparison_implementation_ref != implementation:
+                raise DomainError(
+                    "CONFLICT", "Material comparison implementation reference changed", 409
+                )
+            return PolicyMaterialComparisonView(
+                material=PolicyMaterialDetailView.of(value).summary,
+                comparison_implementation_ref=implementation,
+                target=query.target,
+                target_source_id=result.after_source_id,
+                target_source_fingerprint=query.expected_target_fingerprint,
+                difference=result.difference,
+                cases=tuple(
+                    PolicyMaterialComparedCase(
+                        scenario=scenario,
+                        raw_scenario=scenario.model_dump_json(indent=2),
+                        recorded_result=PolicyExampleResultView.of(original),
+                        before_result=PolicyExampleResultView.of(pair.before),
+                        after_result=PolicyExampleResultView.of(pair.after),
+                        stored_replay_matches=original == pair.before,
+                        decision_changed=pair.decision_changed,
+                        changed_rules=pair.changed_rules,
+                    )
+                    for scenario, original, pair in zip(
+                        value.request.scenarios, value.results, result.cases, strict=True
+                    )
+                ),
+            )
+
+        return self._run(
+            authorization, request_id, compare, names=(query.source.name, query.target.name)
+        )
 
     def history_windows(
         self, authorization: str | None, request_id: str, query: PolicyHistoryWindowsInput

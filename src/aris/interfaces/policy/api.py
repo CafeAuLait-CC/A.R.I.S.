@@ -9,7 +9,10 @@ from aris.core.contracts import DomainError
 from aris.interfaces.commands.api import authorization, bounded_input
 from aris.interfaces.policy.drafts import PolicyDraftInput
 from aris.interfaces.policy.history import PolicyHistoryAssessmentInput, PolicyHistoryWindowsInput
-from aris.interfaces.policy.materials import PolicyMaterialDetailInput
+from aris.interfaces.policy.materials import (
+    PolicyMaterialComparisonInput,
+    PolicyMaterialDetailInput,
+)
 from aris.interfaces.policy.service import PolicyDetailInput, PolicyReadSurface
 from aris.modules.nova.policy_catalog_schemas import (
     PolicySourceComparisonQuery,
@@ -32,6 +35,18 @@ PAGE_HEADERS = {
 
 def build_router(service: PolicyReadSurface) -> APIRouter:
     router = APIRouter(prefix="/internal/policy", tags=["policy-source-review"])
+
+    if service.material_comparison_implementation_ref is not None:
+
+        @router.post("/materials/compare")
+        async def materials_compare(request: Request) -> JSONResponse:
+            if request.query_params:
+                raise DomainError("VALIDATION_ERROR", "Unexpected material query parameters", 422)
+            query = await bounded_input(request, PolicyMaterialComparisonInput)
+            result = await run_in_threadpool(
+                service.materials_compare, authorization(request), request.state.request_id, query
+            )
+            return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
 
     if (
         service.draft_commands is not None
@@ -159,6 +174,7 @@ def build_router(service: PolicyReadSurface) -> APIRouter:
             "policy-history.js",
             "policy-materials.js",
             "policy-material-save.js",
+            "policy-material-compare.js",
             "policy-editor.js",
             "policy.css",
         ],
