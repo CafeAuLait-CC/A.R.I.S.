@@ -5,6 +5,7 @@
   <title>使用记录 · ARIS</title>
   <link rel="stylesheet" href="/internal/usage/ui/assets/usage.css">
   <script src="/internal/usage/ui/assets/usage-saved.js" defer></script>
+  <script src="/internal/usage/ui/assets/usage-weekly.js" defer></script>
   <script src="/internal/usage/ui/assets/usage.js" defer></script>
 </head>
 <body>
@@ -30,6 +31,7 @@
     <div class="view-tabs" role="tablist" aria-label="用量内容">
       <button id="tab-records" type="button" role="tab" aria-controls="results" aria-selected="true">已记录用量</button>
       <button id="tab-saved" type="button" role="tab" aria-controls="saved-results" aria-selected="false" hidden>统计快照</button>
+      <button id="tab-weekly" type="button" role="tab" aria-controls="weekly-results" aria-selected="false" hidden>周报</button>
     </div>
     <div id="results" role="tabpanel" aria-labelledby="tab-records" hidden>
       <div class="summary-grid">
@@ -66,6 +68,25 @@
           <div id="saved-timeline" class="saved-timeline"></div>
           <div class="table-scroll"><table><thead><tr><th>GPU</th><th>状态 / 用户</th><th>开始</th><th>结束</th><th class="number">时长</th></tr></thead><tbody id="saved-cells"></tbody></table></div>
           <p id="saved-scope-note" class="coverage-note"></p>
+        </section>
+      </div>
+    </section>
+    <section id="weekly-results" role="tabpanel" aria-labelledby="tab-weekly" hidden>
+      <div class="saved-intro"><h2>每周使用报告</h2><p class="muted">查看已保存的个人或节点周报，也可以下载留存。</p></div>
+      <div id="weekly-empty" class="panel empty" hidden><h3>这个时间范围还没有周报</h3><p>周报在计划时段结束后生成。可以切换日期或视图查看。</p></div>
+      <div class="saved-layout">
+        <aside><ul id="weekly-list" class="saved-list" aria-label="已保存的周报"></ul><button id="weekly-more" class="secondary" type="button" hidden>查看更多</button></aside>
+        <section id="weekly-detail" class="panel saved-detail" aria-label="周报详情" hidden>
+          <div class="section-head"><div><h2 id="weekly-title"></h2><p id="weekly-period" class="muted"></p></div><span class="coverage-badge">已记录用量</span></div>
+          <div class="summary-grid saved-metrics">
+            <div class="metric"><p>已记录 GPU 小时</p><strong id="weekly-total">—</strong><span>驻留时间累加</span></div>
+            <div class="metric"><p>使用过的 GPU</p><strong id="weekly-gpus">—</strong><span>有记录的显卡</span></div>
+            <div class="metric"><p>使用记录段</p><strong id="weekly-segments">—</strong><span>按计量区间整理</span></div>
+          </div>
+          <div class="weekly-charts"><div><div class="section-head"><h2>每日用量</h2><span>GPU 小时</span></div><div id="weekly-days"></div></div><div><h2>用户汇总</h2><div id="weekly-owners"></div></div></div>
+          <p id="weekly-generated" class="muted"></p>
+          <p class="coverage-note">这份周报保留生成时的已记录用量。完整观测覆盖尚未确认，因此不代表全部实际用量，也不用于配额扣减。</p>
+          <div class="export-actions"><button id="weekly-report" class="secondary" type="button">下载报告</button><button id="weekly-csv" class="secondary" type="button">下载 CSV</button></div>
         </section>
       </div>
     </section>

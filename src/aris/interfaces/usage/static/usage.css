@@ -9,3 +9,5 @@
 @media(max-width:700px){.saved-layout{grid-template-columns:1fr}.saved-list{grid-template-columns:repeat(2,minmax(0,1fr))}.saved-intro{display:block}.saved-intro p{margin-top:5px}.saved-detail{padding:18px 16px}.saved-gpu{grid-template-columns:70px minmax(0,1fr)}.saved-detail .section-head{align-items:start}.view-tabs button{padding:10px 13px}}
 
 .saved-detail .section-head>div{min-width:0}.saved-detail h2,.saved-gpu>span{overflow-wrap:anywhere}
+.weekly-charts{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);gap:28px;margin:26px 0}.weekly-charts h2{margin-bottom:14px}.weekly-day{display:grid;grid-template-columns:44px minmax(0,1fr) 55px;gap:12px;align-items:center;font-size:12px;margin:13px 0;color:var(--muted)}.weekly-day strong{text-align:right;color:var(--ink);font-weight:500}.weekly-day-track{height:8px;background:#edf1f6;border-radius:3px;overflow:hidden}.weekly-day-track svg{width:100%;height:100%;display:block}.weekly-day-track rect{fill:#729ed1}
+@media(max-width:800px){.weekly-charts{grid-template-columns:1fr;gap:18px}}

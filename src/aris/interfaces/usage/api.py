@@ -9,6 +9,7 @@ from aris.core.contracts import DomainError
 from aris.interfaces.commands.api import authorization, bounded_input
 from aris.interfaces.usage.saved_service import SavedUsageQuery, SavedUsageRead, saved_usage
 from aris.interfaces.usage.service import UsageHistoryInput, UsageHistorySurface
+from aris.interfaces.usage.weekly_service import WeeklyUsageQuery, WeeklyUsageRead, weekly_usage
 
 ASSETS = Path(__file__).with_name("static")
 PAGE_HEADERS = {
@@ -22,6 +23,44 @@ PAGE_HEADERS = {
 
 def build_router(service: UsageHistorySurface) -> APIRouter:
     router = APIRouter(prefix="/internal/usage", tags=["recorded-usage"])
+
+    @router.post("/weekly/query")
+    @router.post("/weekly/read")
+    @router.post("/weekly/report")
+    @router.post("/weekly/csv")
+    async def weekly(request: Request) -> Response:
+        if request.query_params:
+            raise DomainError("VALIDATION_ERROR", "Unexpected weekly report query parameters", 422)
+        route = request.url.path.rsplit("/", 1)[-1]
+        selection = (
+            await bounded_input(request, WeeklyUsageQuery)
+            if route == "query"
+            else await bounded_input(request, WeeklyUsageRead)
+        )
+        output: Literal["html", "csv", "json"] = (
+            "html" if route == "report" else "csv" if route == "csv" else "json"
+        )
+        result = await run_in_threadpool(
+            weekly_usage,
+            service,
+            authorization(request),
+            request.state.request_id,
+            selection,
+            output=output,
+        )
+        if isinstance(result, bytes):
+            extension = "html" if output == "html" else "csv"
+            return Response(
+                result,
+                media_type="text/html; charset=utf-8"
+                if output == "html"
+                else "text/csv; charset=utf-8",
+                headers={
+                    **PAGE_HEADERS,
+                    "Content-Disposition": f'attachment; filename="aris-weekly-usage.{extension}"',
+                },
+            )
+        return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
 
     @router.post("/snapshots/query")
     @router.post("/snapshots/read")
@@ -102,7 +141,9 @@ def build_router(service: UsageHistorySurface) -> APIRouter:
         return HTMLResponse((ASSETS / "index.html").read_text(), headers=PAGE_HEADERS)
 
     @router.get("/ui/assets/{name}")
-    def asset(name: Literal["usage.js", "usage-saved.js", "usage.css"]) -> Response:
+    def asset(
+        name: Literal["usage.js", "usage-saved.js", "usage-weekly.js", "usage.css"],
+    ) -> Response:
         return Response(
             (ASSETS / name).read_bytes(),
             headers=PAGE_HEADERS,

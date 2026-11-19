@@ -29,6 +29,7 @@ from aris.modules.lyra.usage_history import (
     calendar_boundaries,
 )
 from aris.modules.lyra.usage_history_service import UsageHistoryService
+from aris.modules.lyra.weekly_report_service import WeeklyReportReader
 from aris.modules.lyra.window_reader import UsageWindowReader
 
 
@@ -92,6 +93,7 @@ class UsageSession(AccessContract):
     nodes: tuple[UsageNodeAccess, ...]
     credential_mode: Literal["development_bound_user"] = "development_bound_user"
     saved_snapshots_available: bool = False
+    weekly_reports_available: bool = False
 
 
 class UsageHistoryPage(AccessContract):
@@ -166,6 +168,7 @@ class UsageHistorySurface:
         node_ids: tuple[str, ...],
         *,
         saved_windows: UsageWindowReader | None = None,
+        weekly_reports: WeeklyReportReader | None = None,
     ) -> None:
         if not 1 <= len(node_ids) <= 32 or len(set(node_ids)) != len(node_ids):
             raise ValueError("usage history requires explicit unique nodes")
@@ -173,6 +176,7 @@ class UsageHistorySurface:
             AccessScope(type="node", id=node)
         self.history, self.authenticator, self.node_ids = history, authenticator, node_ids
         self.saved_windows = saved_windows
+        self.weekly_reports = weekly_reports
 
     def session(self, authorization: str | None) -> UsageSession:
         subject = self.authenticator.authenticate(authorization)
@@ -208,6 +212,7 @@ class UsageHistorySurface:
                     actor=principal,
                     nodes=tuple(nodes),
                     saved_snapshots_available=self.saved_windows is not None,
+                    weekly_reports_available=self.weekly_reports is not None,
                 )
         except DBAPIError:
             raise DomainError(

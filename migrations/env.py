@@ -7,8 +7,10 @@ from aris.core.config import Settings
 from aris.core.db import Base, build_engine
 from aris.core.notifications import models as notification_models  # noqa: F401
 from aris.core.relay import models as relay_models  # noqa: F401
+from aris.core.scheduler import models as scheduler_models  # noqa: F401
 from aris.interfaces.slack import models as slack_models  # noqa: F401
 from aris.modules.lyra import models as lyra_models  # noqa: F401
+from aris.modules.lyra import weekly_report_models  # noqa: F401
 from aris.modules.nova import models as nova_models  # noqa: F401
 from aris.modules.vega import models  # noqa: F401
 
