@@ -59,7 +59,8 @@
           <p class="muted">查看这个版本已保存的假设案例和当时结果。材料的存在不表示审核通过。</p>
           <p id="materials-note" class="muted" role="status" aria-live="polite"></p><div id="materials-list" class="materials-list"></div><button id="materials-more" type="button" class="secondary" hidden>更多材料</button>
           <section id="material-save-tools" class="material-save-tools" hidden aria-labelledby="material-save-heading">
-            <div class="section-head"><div><h3 id="material-save-heading">保存假设案例</h3><p class="muted">先在下方完成试算，再复制原假设；保存目标为上方当前详情版本。</p></div><button id="material-copy-scenario" type="button" class="secondary">复制刚才的试算假设</button></div>
+            <div class="section-head"><div><h3 id="material-save-heading">组合假设案例</h3><p class="muted">先在下方完成试算，再添加原假设；每份材料最多 8 个案例，保存目标为上方当前详情版本。</p></div><button id="material-copy-scenario" type="button" class="secondary">添加刚才的试算假设</button></div>
+            <div id="material-case-basket" class="material-case-basket" hidden><div class="section-head"><strong id="material-case-count"></strong><button id="material-cases-clear" type="button" class="secondary">清空待保存组合</button></div><ol id="material-case-list"></ol><p class="muted">添加时保留原参考时间。未提交的组合只保留在当前页面，切换来源或断开后清空。</p></div>
             <details class="material-recover"><summary>恢复材料保存命令</summary><form id="material-recover-form"><label for="material-recover-id" class="sr-only">材料保存命令 ID</label><input id="material-recover-id" placeholder="完整材料保存命令 ID" autocomplete="off" required><button id="material-recover" class="secondary">恢复材料命令</button></form></details>
             <p id="material-save-target" class="material-save-target"></p>
             <form id="material-save-form" hidden><label for="material-save-reason">材料保存原因</label><input id="material-save-reason" required maxlength="256" autocomplete="off" placeholder="简述希望核对的规则或边界"><button id="material-validate" type="submit">预览材料</button></form>

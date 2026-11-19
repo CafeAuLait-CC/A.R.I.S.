@@ -69,6 +69,12 @@ def test_material_preview_and_confirmed_queue_preserve_original_receipt_across_r
 ):
     surface, graph, state = material_editor
     params = parameters(material_editor)
+    params["scenarios"] = [
+        scenario(include_usage=False, name="unknown-usage").model_dump(mode="json"),
+        scenario(
+            include_usage=False, name="concurrency-limit", projected_concurrent_gpus=100
+        ).model_dump(mode="json"),
+    ]
     with client_for(material_editor, settings) as client:
         info = client.post("/internal/policy/session", headers=headers()).json()
         assert info["review_material_implementation_ref"] == "fixture-save-a"
@@ -77,6 +83,7 @@ def test_material_preview_and_confirmed_queue_preserve_original_receipt_across_r
         preview = client.post("/internal/policy/materials/validate", headers=headers(), json=params)
         assert preview.status_code == 200 and preview.json()["request"] == params
         assert preview.json()["results"][0]["decision"] == "NOT_EVALUATED"
+        assert preview.json()["results"][1]["decision"] == "WOULD_DENY"
         with state[2]() as session:
             assert session.scalar(select(func.count()).select_from(CommandRecord)) == before
         pending = submit(client, params, "save-material").json()["outcome"]
@@ -98,6 +105,12 @@ def test_material_preview_and_confirmed_queue_preserve_original_receipt_across_r
         material = surface.review_materials.read(actor(state[3]), UUID(receipt["id"]))
         assert material.request.model_dump(mode="json") == params
         assert material.results[0].assumed_used_gpu_seconds is None
+        assert len(material.request.scenarios) == len(material.results) == 2
+        assert [item.name for item in material.request.scenarios] == [
+            "unknown-usage",
+            "concurrency-limit",
+        ]
+        assert all(item.as_of == scenario().as_of for item in material.request.scenarios)
     changed = build_policy_draft_components(
         state[2],
         surface.authenticator,
