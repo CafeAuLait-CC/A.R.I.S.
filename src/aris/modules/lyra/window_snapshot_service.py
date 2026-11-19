@@ -11,8 +11,6 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, sessionmaker
 
 from aris.core.access.history_service import NodeUserHistoryService
-from aris.core.access.schemas import AccessRequest, AccessScope
-from aris.core.access.service import AccessService
 from aris.core.audit import AuditEntry
 from aris.core.commands.budgets import database_failure, transaction_budget
 from aris.core.commands.schemas import ActorContext
@@ -24,6 +22,8 @@ from aris.modules.lyra.coverage_service import ProcessingCoverageService
 from aris.modules.lyra.ledger_repo import UsageLedgerRepository
 from aris.modules.lyra.trace_consumer_schemas import UsageTraceConsumeContext
 from aris.modules.lyra.window_coverage import sampled_usage_window
+from aris.modules.lyra.window_reader import UsageWindowReader
+from aris.modules.lyra.window_reader_schemas import SavedWindowView
 from aris.modules.lyra.window_schemas import SampledUsageWindow
 from aris.modules.lyra.window_snapshot_inputs import selected_window_manifests, window_identities
 from aris.modules.lyra.window_snapshot_repo import UsageWindowRepository
@@ -64,7 +64,7 @@ class UsageWindowSnapshotService:
         )
         self.configuration, self.timeout_ms = configuration, timeout_ms
         self.clock = clock or (lambda: datetime.now(UTC))
-        self.access = AccessService(sessions)
+        self.reader = UsageWindowReader(sessions, timeout_ms=min(timeout_ms, 10000))
 
     def _now(self) -> datetime:
         value = self.clock()
@@ -211,33 +211,8 @@ class UsageWindowSnapshotService:
         except DBAPIError as error:
             raise self._failure(error) from None
 
-    def read(self, actor: ActorContext, id: UUID) -> StoredUsageWindow:
-        actor = ActorContext.model_validate(actor.model_dump(mode="json"))
-        deadline = monotonic() + min(10000, self.timeout_ms) / 1000
-        try:
-            with self.sessions() as session, session.no_autoflush:
-                transaction_budget(session, 100, 1000, min(10000, self.timeout_ms))
-                repo = UsageWindowRepository(session)
-                scope = repo.scope(id)
-                if scope is None:
-                    raise DomainError("NOT_FOUND", "Window snapshot not found", 404)
-                access = AccessRequest(
-                    user_id=actor.actor_id,
-                    permission="usage.read_own" if scope[1] == actor.actor_id else "usage.read_all",
-                    scope=AccessScope(type="node", id=scope[0]),
-                )
-                self.access.require_in_transaction(session, access)
-                result = repo.get(id)
-                if (
-                    result is None
-                    or (result.request.query.node_id, result.request.query.owner_id) != scope
-                ):
-                    raise DomainError("CONFLICT", "Window read scope changed", 409)
-                self.access.require_in_transaction(session, access)
-                self._deadline(deadline)
-                return result
-        except DBAPIError as error:
-            raise self._failure(error) from None
+    def read(self, actor: ActorContext, id: UUID) -> SavedWindowView:
+        return self.reader.read(actor, id)
 
     def reverify(self, id: UUID) -> StoredUsageWindow:
         deadline = monotonic() + self.timeout_ms / 1000

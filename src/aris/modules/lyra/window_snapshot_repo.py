@@ -1,14 +1,18 @@
 """Lyra snapshot queries; all cross-domain evidence comes through public services."""
 
+from typing import Any
 from uuid import UUID
 
-from sqlalchemy import LargeBinary, cast, func, select
+from sqlalchemy import BigInteger, LargeBinary, and_, cast, func, or_, select
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
+from sqlalchemy.sql.elements import ColumnElement
 
 from aris.core.contracts import DomainError
 from aris.core.time import utc
 from aris.modules.lyra.models import UsageCoverageManifestRow, UsageWindowSnapshotRow
 from aris.modules.lyra.trace_consumer_schemas import canonical_trace
+from aris.modules.lyra.window_reader_schemas import SavedWindowSummary, WindowListQuery
 from aris.modules.lyra.window_schemas import MAX_WINDOW_SOURCE_BYTES
 from aris.modules.lyra.window_snapshot_schemas import (
     MAX_WINDOW_SNAPSHOT_BYTES,
@@ -20,6 +24,68 @@ from aris.modules.lyra.window_snapshot_schemas import (
 class UsageWindowRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
+
+    def summaries(self, query: WindowListQuery) -> tuple[SavedWindowSummary, ...]:
+        row = UsageWindowSnapshotRow
+
+        def field(name: str) -> ColumnElement[Any]:
+            if self.session.get_bind().dialect.name == "postgresql":
+                return func.jsonb_extract_path_text(
+                    cast(row.canonical_snapshot, JSONB), "window", name
+                )
+            return func.json_extract(row.canonical_snapshot, "$.window." + name)
+
+        clauses = [
+            row.node_id == query.node_id,
+            row.end_at > query.start_at,
+            row.start_at < query.end_at,
+            row.owner_id == str(query.owner_id)
+            if query.owner_id is not None
+            else row.owner_id.is_(None),
+        ]
+        if query.before is not None:
+            clauses.append(
+                or_(
+                    row.created_at < query.before.created_at,
+                    and_(row.created_at == query.before.created_at, row.id < str(query.before.id)),
+                )
+            )
+        rows = self.session.execute(
+            select(
+                row.id,
+                row.node_id,
+                row.owner_id,
+                row.start_at,
+                row.end_at,
+                row.created_at,
+                field("coverage").label("coverage"),
+                *(
+                    cast(field(name), BigInteger).label(name)
+                    for name in (
+                        "recorded_microseconds",
+                        "verified_usage_microseconds",
+                        "total_usage_microseconds",
+                    )
+                ),
+            )
+            .where(*clauses)
+            .order_by(row.created_at.desc(), row.id.desc())
+            .limit(query.limit + 1)
+        ).mappings()
+        try:
+            return tuple(
+                SavedWindowSummary.model_validate(
+                    {
+                        **dict(value),
+                        **{key: utc(value[key]) for key in ("start_at", "end_at", "created_at")},
+                    }
+                )
+                for value in rows
+            )
+        except (ValueError, TypeError, KeyError):
+            raise DomainError(
+                "DEPENDENCY_UNAVAILABLE", "Stored window summaries are inconsistent", 503
+            ) from None
 
     def scope(self, id: UUID) -> tuple[str, UUID | None] | None:
         row = self.session.execute(

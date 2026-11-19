@@ -179,14 +179,14 @@ def test_read_enforces_current_owner_node_and_revoked_permissions(windows):
     _, actor, other, ids = reading_service(windows.state.ledger)
     own = service.capture(CONTEXT, incoming_window(windows, owner=actor.actor_id)).snapshot
     node = service.capture(CONTEXT, incoming_window(windows)).snapshot
-    assert service.read(actor, own.request.id) == own
-    assert service.read(actor, node.request.id) == node
+    assert service.read(actor, own.request.id).snapshot_fingerprint == own.fingerprint
+    assert service.read(actor, node.request.id).snapshot_fingerprint == node.fingerprint
     with pytest.raises(DomainError) as error:
         service.read(ActorContext(actor_id=other, request_id="fixture-other"), own.request.id)
     assert error.value.code == "PERMISSION_DENIED"
     with service.sessions.begin() as session:
         session.execute(delete(RolePermission).where(RolePermission.permission_id == ids["all"]))
-    assert service.read(actor, own.request.id) == own
+    assert service.read(actor, own.request.id).snapshot_fingerprint == own.fingerprint
     with pytest.raises(DomainError) as error:
         service.read(actor, node.request.id)
     assert error.value.code == "PERMISSION_DENIED"
@@ -205,7 +205,7 @@ def test_saved_read_does_not_rescan_originals_but_explicit_reverification_detect
     result = service.capture(CONTEXT, incoming_window(windows, owner=actor.actor_id)).snapshot
     with service.sessions.begin() as session:
         session.execute(delete(AgentMessage).where(AgentMessage.seq == 5))
-    assert service.read(actor, result.request.id) == result
+    assert service.read(actor, result.request.id).snapshot_fingerprint == result.fingerprint
     with pytest.raises(DomainError):
         service.reverify(result.request.id)
 

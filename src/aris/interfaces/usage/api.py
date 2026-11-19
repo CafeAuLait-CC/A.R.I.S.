@@ -7,6 +7,7 @@ from starlette.responses import HTMLResponse, JSONResponse, Response
 
 from aris.core.contracts import DomainError
 from aris.interfaces.commands.api import authorization, bounded_input
+from aris.interfaces.usage.saved_service import SavedUsageQuery, SavedUsageRead, saved_usage
 from aris.interfaces.usage.service import UsageHistoryInput, UsageHistorySurface
 
 ASSETS = Path(__file__).with_name("static")
@@ -21,6 +22,23 @@ PAGE_HEADERS = {
 
 def build_router(service: UsageHistorySurface) -> APIRouter:
     router = APIRouter(prefix="/internal/usage", tags=["recorded-usage"])
+
+    @router.post("/snapshots/query")
+    @router.post("/snapshots/read")
+    async def snapshots(request: Request) -> JSONResponse:
+        if request.query_params:
+            raise DomainError(
+                "VALIDATION_ERROR", "Unexpected saved-statistics query parameters", 422
+            )
+        selection = (
+            await bounded_input(request, SavedUsageRead)
+            if request.url.path.endswith("/read")
+            else await bounded_input(request, SavedUsageQuery)
+        )
+        result = await run_in_threadpool(
+            saved_usage, service, authorization(request), request.state.request_id, selection
+        )
+        return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
 
     @router.post("/session")
     async def session(request: Request) -> JSONResponse:
@@ -84,11 +102,11 @@ def build_router(service: UsageHistorySurface) -> APIRouter:
         return HTMLResponse((ASSETS / "index.html").read_text(), headers=PAGE_HEADERS)
 
     @router.get("/ui/assets/{name}")
-    def asset(name: Literal["usage.js", "usage.css"]) -> Response:
+    def asset(name: Literal["usage.js", "usage-saved.js", "usage.css"]) -> Response:
         return Response(
             (ASSETS / name).read_bytes(),
             headers=PAGE_HEADERS,
-            media_type="text/javascript" if name == "usage.js" else "text/css",
+            media_type="text/javascript" if name.endswith(".js") else "text/css",
         )
 
     return router

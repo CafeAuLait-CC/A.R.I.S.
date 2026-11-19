@@ -21,6 +21,7 @@ from aris.interfaces.commands.auth import BoundSubjectTokens, UserTokenBinding
 from aris.interfaces.slack.config import SlackSettings
 from aris.interfaces.usage.service import UsageHistorySurface
 from aris.modules.lyra.usage_history_service import UsageHistoryService
+from aris.modules.lyra.window_reader import UsageWindowReader
 
 
 class LocalUsageConfig(AccessContract):
@@ -29,6 +30,7 @@ class LocalUsageConfig(AccessContract):
     read_token: SecretStr = Field(min_length=32, repr=False)
     user_tokens: tuple[UserTokenBinding, ...] = Field(min_length=1, max_length=128, repr=False)
     node_ids: tuple[str, ...] = Field(min_length=1, max_length=32)
+    saved_snapshots: bool = False
 
     def settings(self) -> Settings:
         url = make_url(self.database_url.get_secret_value())
@@ -84,7 +86,12 @@ def main(argv: list[str] | None = None) -> int:
         engine = build_engine(settings.database_url)
         check_database(engine)
         surface = UsageHistorySurface(
-            UsageHistoryService(session_factory(engine)), auth, config.node_ids
+            UsageHistoryService(session_factory(engine)),
+            auth,
+            config.node_ids,
+            saved_windows=UsageWindowReader(session_factory(engine))
+            if config.saved_snapshots
+            else None,
         )
         uvicorn.run(
             create_app(

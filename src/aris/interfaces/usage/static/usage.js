@@ -1,14 +1,16 @@
 "use strict";
 (() => {
   const $ = id => document.getElementById(id);
-  let token = "", session = null, current = null, selection = null, busy = false;
+  let token = "", session = null, current = null, selection = null, busy = false, epoch = 0;
   const text = (tag, value, className) => {const node = document.createElement(tag); node.textContent = value; if(className) node.className = className; return node;};
   const hours = value => (value / 3600000000).toLocaleString("zh-CN", {maximumFractionDigits:3});
   const duration = value => {const seconds = value / 1000000; return seconds >= 3600 ? `${hours(value)} 小时` : seconds >= 60 ? `${(seconds/60).toLocaleString("zh-CN",{maximumFractionDigits:2})} 分钟` : `${seconds.toLocaleString("zh-CN",{maximumFractionDigits:3})} 秒`;};
   function message(value, error = false) {$('message').textContent = value; $('message').hidden = !value; $('message').classList.toggle('error', error);}
-  function lock(value) {busy = value; ['query','export','report','previous','next','node','mode','range','start','end','owner'].forEach(id => $(id).disabled = value); if(!value && current){$('previous').disabled = current.offset === 0; $('next').disabled = !current.has_more;}}
+  function lock(value) {busy = value; ['query','export','report','previous','next','node','mode','range','start','end','owner','tab-records','tab-saved','saved-more'].forEach(id => $(id).disabled = value); if(!value && current){$('previous').disabled = current.offset === 0; $('next').disabled = !current.has_more;}}
   async function request(path, body) {
+    const pendingEpoch = epoch;
     const response = await fetch(`/internal/usage/${path}`, {method:'POST', cache:'no-store', headers:{Authorization:`Bearer ${token}`, ...(body ? {'Content-Type':'application/json'} : {})}, body:body ? JSON.stringify(body) : undefined});
+    if(pendingEpoch !== epoch) throw new Error('连接已结束。');
     if(!response.ok) {let code; try{code = (await response.json()).error.code;}catch{code = 'UNAVAILABLE';} const errors = {PERMISSION_DENIED:'没有相应的使用记录读取权限，或凭据已失效。', VALIDATION_ERROR:'请检查日期范围与查询条件。', USAGE_REPORT_TOO_LARGE:'这份账本超出当前查询上限，请稍后再试或联系管理员。', CONFLICT:'这份查询快照暂时不可用，请重新查询。'}; throw new Error(errors[code] || '使用记录暂时不可用，请稍后重试。');}
     return response;
   }
@@ -31,16 +33,35 @@
     $('records').replaceChildren(...report.rows.map(row=>{const tr=document.createElement('tr'), gpu=text('td',row.model);gpu.append(text('small',row.gpu_uuid));tr.append(text('td',label(row.owner_id)),gpu,text('td',formatter.format(new Date(row.start_at))),text('td',formatter.format(new Date(row.end_at))),text('td',duration(row.recorded_microseconds),'number'));return tr;}));
     $('empty').hidden=report.segment_count!==0; $('page-note').textContent=report.segment_count ? `第 ${current.offset+1}–${current.offset+report.rows.length} 段，共 ${report.segment_count} 段` : '0 条记录'; $('snapshot-note').textContent=`${report.node_id} · ${formatter.format(new Date(report.start_at))} 至 ${formatter.format(new Date(report.end_at))} · 固定记录快照`; $('previous').disabled=current.offset===0; $('next').disabled=!current.has_more;
   }
+  const saved = window.createSavedUsage({el:$, request, lock, message, isBusy:()=>busy,
+    selection:()=>({node_id:$('node').value,mode:$('mode').value,owner_id:$('mode').value==='node' && $('owner').value ? $('owner').value:null,
+      window:{kind:'calendar',start_date:$('start').value,end_date:$('end').value,timezone:session.actor.timezone}}),
+    timezone:()=>session.actor.timezone});
+  async function tab(value){if(busy)return;saved.active=value==='saved';$('results').hidden=saved.active || !current;
+    $('tab-records').setAttribute('aria-selected',String(!saved.active));$('tab-saved').setAttribute('aria-selected',String(saved.active));
+    if(saved.active)await saved.load();else{$('results').hidden=true;await load();}}
+  $('tab-records').addEventListener('click',()=>tab('records'));
+  $('tab-saved').addEventListener('click',()=>tab('saved'));
   async function load(offset=0, fixed=false) {
+    if(saved.active)return saved.load();
     if(busy)return;lock(true);message('正在读取使用记录…');
     const input=fixed && selection ? {...selection,offset} : {node_id:$('node').value,mode:$('mode').value,owner_id:$('mode').value==='node' && $('owner').value ? $('owner').value:null, window:{kind:'calendar',start_date:$('start').value,end_date:$('end').value,timezone:session.actor.timezone},limit:25,offset:0};
     try{const result=await (await request('query',input)).json();current=result;selection={...input,window:{kind:'utc',start_at:result.report.start_at,end_at:result.report.end_at,timezone:result.report.timezone},snapshot:result.report.snapshot,offset:0};if(!fixed && !input.owner_id){$('owner').replaceChildren(new Option('全部用户',''),...result.report.owners.map(owner=>new Option(result.labels[owner.owner_id] || owner.owner_id,owner.owner_id)));}render();message('');}catch(error){message(error.message,true);if(!fixed){$('results').hidden=true;current=null;selection=null;}}finally{lock(false);}
   }
-  $('connect-form').addEventListener('submit',async event=>{event.preventDefault();if(busy)return;token=$('credential').value.trim();$('credential').value='';try{session=await (await request('session')).json();$('node').replaceChildren(...session.nodes.map(node=>new Option(node.node_id,node.node_id)));$('identity').textContent=session.actor.display_name;$('timezone').textContent=`时区 ${session.actor.timezone}`;$('connect-panel').hidden=true;$('workspace').hidden=false;modes();dates();await load();}catch(error){token='';message(error.message,true);}});
-  $('disconnect').addEventListener('click',()=>{token='';session=null;current=null;selection=null;$('workspace').hidden=true;$('results').hidden=true;$('connect-panel').hidden=false;$('identity').textContent='本地只读查询';message('');});
+  $('connect-form').addEventListener('submit',async event=>{
+    event.preventDefault();if(busy)return;epoch++;const opening=epoch;lock(true);
+    token=$('credential').value.trim();$('credential').value='';
+    try{session=await (await request('session')).json();saved.active=false;saved.reset();
+      $('tab-saved').hidden=!session.saved_snapshots_available;$('tab-records').setAttribute('aria-selected','true');$('tab-saved').setAttribute('aria-selected','false');
+      $('node').replaceChildren(...session.nodes.map(node=>new Option(node.node_id,node.node_id)));$('identity').textContent=session.actor.display_name;
+      $('timezone').textContent=`时区 ${session.actor.timezone}`;$('connect-panel').hidden=true;$('workspace').hidden=false;modes();dates();lock(false);await load();
+    }catch(error){if(opening===epoch){token='';message(error.message,true);}}finally{if(opening===epoch)lock(false);}
+  });
+  $('disconnect').addEventListener('click',()=>{epoch++;token='';session=null;current=null;selection=null;saved.active=false;saved.reset();lock(false);
+    $('workspace').hidden=true;$('results').hidden=true;$('connect-panel').hidden=false;$('identity').textContent='本地只读查询';message('');});
   $('node').addEventListener('change',()=>{modes();$('owner').replaceChildren(new Option('全部用户',''));});$('mode').addEventListener('change',()=>{modes();$('owner').value='';});$('range').addEventListener('change',dates);['start','end'].forEach(id=>$(id).addEventListener('change',()=>{$('range').value='custom';}));$('query').addEventListener('click',()=>load());$('owner').addEventListener('change',()=>load());$('previous').addEventListener('click',()=>load(Math.max(0,current.offset-current.limit),true));$('next').addEventListener('click',()=>load(current.offset+current.limit,true));
   async function download(path,filename,success){if(!selection || busy)return;lock(true);try{const blob=await (await request(path,selection)).blob();const url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download=filename;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);message(success);}catch(error){message(error.message,true);}finally{lock(false);}}
   $('export').addEventListener('click',()=>download('export','aris-recorded-usage.csv','已导出当前快照的全部匹配记录。'));
   $('report').addEventListener('click',()=>download('report','aris-recorded-usage-report.html','报告已导出，可在浏览器阅读或打印。'));
-  window.addEventListener('pagehide',()=>{token='';});
+  window.addEventListener('pagehide',()=>{$('disconnect').click();});
 })();
