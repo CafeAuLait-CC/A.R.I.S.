@@ -1,0 +1,157 @@
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from sqlalchemy import delete, event, select, text, update
+
+from aris.core.access.models import RolePermission
+from aris.core.commands.schemas import ActorContext
+from aris.core.contracts import DomainError
+from aris.modules.lyra.activity_preview_service import ActivityPreviewService
+from aris.modules.vega.models import AgentMessage
+from aris.modules.vega.usage_archive_schemas import UsageArchiveHeadQuery
+from aris.modules.vega.usage_archive_service import VegaUsageArchive
+from tests.test_activity_preview import RULE
+from tests.test_administration import admin_state
+from tests.test_heartbeat import beat
+from tests.test_mapping_history import history_state
+from tests.test_recorded_usage import readings
+from tests.test_usage_derivations import derivations
+from tests.test_usage_ledger import counts, ledger
+
+__all__ = ["admin_state", "history_state", "derivations", "ledger", "readings"]
+SOURCE = UsageArchiveHeadQuery(agent_id="agent-a", node_id="node-a")
+
+
+@pytest.fixture
+def preview_source(readings):
+    _, (original, actor, _, _), _ = readings
+    source = VegaUsageArchive(
+        original.sessions, clock=lambda: datetime.now(UTC) + timedelta(seconds=1)
+    )
+    return ActivityPreviewService(original.sessions, source), source, actor, readings
+
+
+def read(state, **changes):
+    service, _, actor, _ = state
+    return service.recent(actor, SOURCE, RULE, max_messages=changes.get("max_messages", 5))
+
+
+def test_activity_preview_reads_original_archive_without_ledger_or_mapping_queries(preview_source):
+    service, source, _, readings = preview_source
+    baseline = counts(readings[0])
+    statements = []
+
+    def observe(conn, cursor, statement, parameters, context, many):
+        statements.append(statement.lower())
+
+    engine = source.sessions.kw["bind"]
+    event.listen(engine, "before_cursor_execute", observe)
+    try:
+        value = read(preview_source)
+    finally:
+        event.remove(engine, "before_cursor_execute", observe)
+    assert (
+        value.source_packets == 5 and value.telemetry_packets == 3 and value.heartbeat_packets == 2
+    )
+    assert len(value.groups) == 1 and value.groups[0].state == "reported_busy"
+    assert value.requested_after_seq == 2
+    assert (
+        value.range_complete
+        and not value.retention_enabled
+        and value.prior_source_context == "not_loaded"
+    )
+    assert not any(
+        "usage_ledger" in statement or "node_user_mapping" in statement for statement in statements
+    )
+    assert counts(readings[0]) == baseline
+
+
+def test_activity_preview_requires_current_all_permission_and_rechecks_after_snapshot(
+    preview_source, monkeypatch
+):
+    service, source, actor, readings = preview_source
+    _, (_, _, other, ids), _ = readings
+    with pytest.raises(DomainError) as error:
+        service.recent(
+            ActorContext(actor_id=other, request_id="other-fixture"), SOURCE, RULE, max_messages=128
+        )
+    assert error.value.code == "PERMISSION_DENIED"
+    original = source.page_in_transaction
+
+    def revoke(session, query):
+        value = original(session, query)
+        with source.sessions.begin() as other_session:
+            other_session.execute(
+                delete(RolePermission).where(
+                    RolePermission.role_id == ids["role"],
+                    RolePermission.permission_id == ids["all"],
+                )
+            )
+        return value
+
+    monkeypatch.setattr(source, "page_in_transaction", revoke)
+    with pytest.raises(DomainError) as error:
+        read(preview_source)
+    assert error.value.code == "PERMISSION_DENIED"
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("own-only permission read original activity bodies")
+
+    monkeypatch.setattr(source, "head_in_transaction", forbidden)
+    with pytest.raises(DomainError) as error:
+        read(preview_source)
+    assert error.value.code == "PERMISSION_DENIED"
+
+
+def test_activity_archive_gap_and_corruption_do_not_become_complete_or_idle(preview_source):
+    _, source, _, _ = preview_source
+    broad = read(preview_source, max_messages=128)
+    assert broad.missing_seq == 1 and broad.source_packets == 0
+    with source.sessions.begin() as session:
+        session.execute(delete(AgentMessage).where(AgentMessage.seq == 4))
+    gap = read(preview_source)
+    assert gap.missing_seq == 4 and not gap.range_complete and gap.source_packets == 1
+    assert gap.groups[0].state == "reported_busy"
+    with source.sessions.begin() as session:
+        session.execute(
+            update(AgentMessage).where(AgentMessage.seq == 3).values(fingerprint="f" * 64)
+        )
+    with pytest.raises(DomainError) as error:
+        read(preview_source)
+    assert error.value.code == "DEPENDENCY_UNAVAILABLE"
+
+
+def test_postgresql_activity_preview_fixed_snapshot_ignores_later_gap_fill_and_recovers_after_lock(
+    preview_source, monkeypatch
+):
+    _, source, _, readings = preview_source
+    if source.sessions.kw["bind"].dialect.name != "postgresql":
+        pytest.skip("requires PostgreSQL repeatable source snapshot and real lock")
+    with source.sessions.begin() as session:
+        original_payload = session.scalar(select(AgentMessage.payload).where(AgentMessage.seq == 4))
+        session.execute(delete(AgentMessage).where(AgentMessage.seq == 4))
+    original_head = source.head_in_transaction
+    first = True
+
+    def restored(session, query):
+        nonlocal first
+        assert session.scalar(text("SHOW transaction_read_only")) == "on"
+        assert session.scalar(text("SHOW transaction_isolation")) == "repeatable read"
+        value = original_head(session, query)
+        if first:
+            first = False
+            assert beat(readings[0][4], original_payload).status_code == 200
+        return value
+
+    monkeypatch.setattr(source, "head_in_transaction", restored)
+    gap = read(preview_source)
+    assert gap.missing_seq == 4 and not gap.range_complete
+    assert read(preview_source).range_complete
+    before = counts(readings[0])
+    with source.sessions() as blocker:
+        blocker.execute(text("LOCK TABLE agent_messages IN ACCESS EXCLUSIVE MODE"))
+        with pytest.raises(DomainError) as error:
+            read(preview_source)
+        assert error.value.code == "RETRYABLE_DATABASE_ERROR"
+        blocker.rollback()
+    assert read(preview_source).range_complete and counts(readings[0]) == before
