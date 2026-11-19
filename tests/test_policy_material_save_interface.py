@@ -1,3 +1,4 @@
+import json
 from uuid import UUID
 
 import pytest
@@ -8,6 +9,7 @@ from aris.core.access.models import RoleBinding
 from aris.core.commands.gateway_schemas import UserCommandInput
 from aris.core.commands.models import CommandRecord
 from aris.core.db import session_factory
+from aris.interfaces.policy.materials import PolicyMaterialTextInput
 from aris.interfaces.policy.service import PolicyReadSurface
 from aris.modules.nova.models import PolicyReviewMaterialRow
 from aris.modules.nova.policy_catalog_service import PolicyCatalogService
@@ -211,3 +213,85 @@ def test_postgresql_material_preview_accepts_read_only_session(material_editor):
         and not result.approval_performed
         and count(material_editor) == 0
     )
+    parameters_text = parameters(material_editor)
+    parameters_text["scenarios_text"] = json.dumps(parameters_text.pop("scenarios"))
+    replay = view.materials_validate_text(
+        "Bearer " + TOKEN,
+        "readonly-material-text",
+        PolicyMaterialTextInput.model_validate(parameters_text),
+    )
+    assert replay == result
+
+
+def test_complete_example_text_import_preserves_inputs_and_rejects_ambiguous_json(
+    material_editor, settings
+):
+    surface, graph, state = material_editor
+    params = parameters(material_editor)
+    params["scenarios"] = [
+        scenario(name="exact-full-case", used_microseconds=(1 << 44) + 1).model_dump(mode="json"),
+        scenario(name="unknown-full-case", include_usage=False).model_dump(mode="json"),
+    ]
+    query = {key: value for key, value in params.items() if key != "scenarios"}
+    raw = json.dumps(params["scenarios"])
+    query["scenarios_text"] = raw
+    path = "/internal/policy/materials/validate-text"
+    readonly_surface = PolicyReadSurface(
+        surface.catalog,
+        surface.authenticator,
+        surface.policy_names,
+        review_materials=surface.review_materials,
+    )
+    with client_for((readonly_surface, graph, state), settings) as readonly_client:
+        assert readonly_client.post(path, headers=headers(), json=query).status_code == 404
+    with state[2]() as session:
+        before = session.scalar(select(func.count()).select_from(CommandRecord))
+    with client_for(material_editor, settings) as client:
+        imported = client.post(path, headers=headers(), json=query)
+        assert imported.status_code == 200 and imported.headers["cache-control"] == "no-store"
+        value = imported.json()
+        assert value["request"] == params and count(material_editor) == 0
+        assert value["results"][0]["assumed_used_gpu_seconds"] == {
+            "numerator": str((1 << 44) + 1),
+            "denominator": "1000000",
+        }
+        assert value["results"][1]["assumed_used_gpu_seconds"] is None
+        malformed = (
+            raw[:-1],
+            "{}",
+            "[]",
+            json.dumps([params["scenarios"][0]] * 2),
+            json.dumps([{**params["scenarios"][0], "private-field": "private-marker"}]),
+            raw.replace('"projected_concurrent_gpus": 1', '"projected_concurrent_gpus": 1.0'),
+            raw.replace('"projected_concurrent_gpus": 1', '"projected_concurrent_gpus": NaN'),
+            raw.replace('"projected_concurrent_gpus": 1', '"projected_concurrent_gpus": true'),
+            raw.replace('"name": "exact-full-case"', '"name":"private-marker","name":"other"'),
+            raw.replace('"quality": "complete"', '"quality":"unknown","quality":"complete"'),
+            json.dumps([{**params["scenarios"][0], "name": "case-" + str(i)} for i in range(9)]),
+            "[" * 1500 + "]" * 1500,
+            raw + " " * 16000,
+            raw + "　" * 6000,
+        )
+        for text in malformed:
+            result = client.post(path, headers=headers(), json={**query, "scenarios_text": text})
+            assert result.status_code == 422 and "private-marker" not in result.text
+        for field in ("expected_source_fingerprint", "expected_implementation_ref"):
+            changed = {**query, field: "f" * 64 if field.endswith("fingerprint") else "changed"}
+            assert client.post(path, headers=headers(), json=changed).status_code == 409
+        assert (
+            client.post(
+                path,
+                headers=headers(),
+                json={**query, "source": {"name": "outside-policy", "version": 1}},
+            ).status_code
+            == 403
+        )
+        assert client.post(path + "?extra=1", headers=headers(), json=query).status_code == 422
+        assert client.post(path, json=query).status_code == 401
+        with state[2]() as session:
+            assert session.scalar(select(func.count()).select_from(CommandRecord)) == before
+        assert count(material_editor) == 0
+        with state[2].begin() as session:
+            session.execute(delete(RoleBinding))
+        denied = client.post(path, headers=headers(), json=query)
+        assert denied.status_code == 403 and "exact-full-case" not in denied.text

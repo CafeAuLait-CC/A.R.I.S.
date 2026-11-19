@@ -10,6 +10,8 @@ window.ARISPolicyMaterialSave = ({$,text,request,commands,run,onState,latest,cas
     $('material-save-tools').hidden=implementation===null || source===null;
     $('material-copy-scenario').disabled=busy || held() || (prepared?.scenarios.length || 0)>=8;
     $('material-cases-clear').disabled=busy || held();
+    for(const control of $('material-import').querySelectorAll('textarea,input,button'))control.disabled=busy || held();
+    $('material-import-current').disabled=busy || held() || !prepared;
     for(const control of $('material-case-list').querySelectorAll('input,button'))control.disabled=busy || held();
     $('material-recover-id').disabled=$('material-recover').disabled=busy || held();
     $('material-save-form').hidden=prepared===null;
@@ -28,7 +30,7 @@ window.ARISPolicyMaterialSave = ({$,text,request,commands,run,onState,latest,cas
   }
   function changed(){controls();onState();}
   function clearPreview(){validated=null;$('material-save-preview').replaceChildren();$('material-save-preview').hidden=true;}
-  function reset(view=null){source=view;prepared=null;renderCases();intent=null;clearPreview();$('material-save-reason').value='';$('material-recover-id').value='';$('material-save-target').textContent='';$('material-command-state').textContent='';$('material-confirm-preview').replaceChildren();$('material-confirm-expires').textContent='';if(dialog.open)dialog.close();note('');controls();}
+  function reset(view=null){source=view;prepared=null;renderCases();intent=null;clearPreview();$('material-save-reason').value='';$('material-import-text').value='';$('material-import-reason').value='';$('material-import-note').textContent='';$('material-import').open=false;$('material-recover-id').value='';$('material-save-target').textContent='';$('material-command-state').textContent='';$('material-confirm-preview').replaceChildren();$('material-confirm-expires').textContent='';if(dialog.open)dialog.close();note('');controls();}
   function target(parameters){return `${parameters.source.name} · 版本 ${parameters.source.version} · ${parameters.scenarios.length} 个原始假设`;}
   function previewInto(element,value){
     element.replaceChildren(text('p',target(value.request),'material-save-target'),text('p',`保存原因：${value.request.reason}`,'material-reason'),text('p','输入均为手动假设；保存材料不批准、发布规则，也不授权预约。','material-assumption'),...value.request.scenarios.map((input,index)=>caseCard(input,value.results[index])));
@@ -89,6 +91,13 @@ window.ARISPolicyMaterialSave = ({$,text,request,commands,run,onState,latest,cas
     renderCases();basketChanged('已添加原假设及原参考时间。可继续试算其他条件并添加到同一份材料。');
   });
   $('material-cases-clear').addEventListener('click',()=>{if(busy || held())return;prepared=null;renderCases();basketChanged('待保存组合已清空。');});
+  $('material-import-current').addEventListener('click',()=>{if(busy || held() || !prepared)return;$('material-import-text').value=JSON.stringify(prepared.scenarios,null,2);$('material-import-reason').value=$('material-save-reason').value;$('material-import-note').textContent='已复制当前组合。编辑此文本后，须经服务器校验才会替换组合。';});
+  for(const id of ['material-import-text','material-import-reason'])$(id).addEventListener('input',()=>{$('material-import-note').textContent='导入文本尚未应用，当前组合不受影响。';});
+  $('material-import-form').addEventListener('submit',event=>{event.preventDefault();run(async()=>{
+    if(!source || !implementation || held())return;
+    const value=await request('materials/validate-text',{source:{name:source.source.metadata.name,version:source.source.metadata.version},expected_source_fingerprint:source.fingerprint,expected_implementation_ref:implementation,scenarios_text:$('material-import-text').value,reason:$('material-import-reason').value.trim()});
+    intent=null;prepared=structuredClone(value.request);validated=value;$('material-save-reason').value=prepared.reason;renderCases();$('material-save-target').textContent=target(prepared);previewInto($('material-save-preview'),value);$('material-save-preview').hidden=false;$('material-import-note').textContent=`已校验并替换为 ${prepared.scenarios.length} 个完整假设，尚未保存材料。`;note('服务器已按原参考时间重新试算；可以核对后申请保存。');changed();
+  },'正在校验完整假设 JSON…');});
   $('material-save-reason').addEventListener('input',()=>{if(!held()){intent=null;clearPreview();note('原因已更改，请重新预览。');changed();}});
   $('material-save-form').addEventListener('submit',event=>{event.preventDefault();run(async()=>{
     if(!prepared || held())return;

@@ -32,6 +32,7 @@ from aris.interfaces.policy.materials import (
     PolicyMaterialComparisonView,
     PolicyMaterialDetailInput,
     PolicyMaterialDetailView,
+    PolicyMaterialTextInput,
     PolicyMaterialValidation,
 )
 from aris.modules.lyra.quota_evidence_schemas import QuotaEvidencePage
@@ -207,6 +208,11 @@ class PolicyReadSurface:
             )
 
         return self._run(authorization, request_id, validate, names=(query.source.name,))
+
+    def materials_validate_text(
+        self, authorization: str | None, request_id: str, query: PolicyMaterialTextInput
+    ) -> PolicyMaterialValidation:
+        return self.materials_validate(authorization, request_id, query.parsed())
 
     def materials_list(
         self, authorization: str | None, request_id: str, query: PolicyMaterialListQuery

@@ -13,6 +13,7 @@ from aris.interfaces.policy.material_report import REPORT_CSP, comparison_report
 from aris.interfaces.policy.materials import (
     PolicyMaterialComparisonInput,
     PolicyMaterialDetailInput,
+    PolicyMaterialTextInput,
 )
 from aris.interfaces.policy.service import PolicyDetailInput, PolicyReadSurface
 from aris.modules.nova.policy_catalog_schemas import (
@@ -80,6 +81,19 @@ def build_router(service: PolicyReadSurface) -> APIRouter:
             query = await bounded_input(request, RecordPolicyReviewMaterial)
             result = await run_in_threadpool(
                 service.materials_validate, authorization(request), request.state.request_id, query
+            )
+            return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
+
+        @router.post("/materials/validate-text")
+        async def materials_validate_text(request: Request) -> JSONResponse:
+            if request.query_params:
+                raise DomainError("VALIDATION_ERROR", "Unexpected material query parameters", 422)
+            query = await bounded_input(request, PolicyMaterialTextInput)
+            result = await run_in_threadpool(
+                service.materials_validate_text,
+                authorization(request),
+                request.state.request_id,
+                query,
             )
             return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
 

@@ -33,4 +33,5 @@
 @media(max-width:600px){.material-comparison-controls{align-items:stretch}.material-comparison-controls label{flex:1;min-width:120px}.material-comparison-controls button{align-self:end}.material-comparison-picker{max-width:none}}
 
 .layout>div{min-width:0}.material-comparison-panel,.material-comparison-panel .table-scroll{min-width:0}
+.material-import{margin:20px 0;padding:16px;border:1px solid var(--line);border-radius:10px;min-width:0}.material-import summary{cursor:pointer;font-size:13px}.material-import p{font-size:12px}.material-import form{display:grid;gap:8px;margin-top:14px}.material-import label{font-size:12px;color:var(--muted)}.material-import textarea{width:100%;min-width:0;min-height:260px;resize:vertical;font:12px/1.6 ui-monospace,monospace;padding:12px;border:1px solid var(--line);border-radius:7px}.material-import form button{justify-self:start;margin-top:6px}
 @media(max-width:900px){.material-comparison-detail{grid-template-columns:minmax(0,1fr)}}

@@ -1,11 +1,13 @@
 """Read projection keeps example authority explicit and large fractions exact over JSON."""
 
-from typing import Literal
+import json
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import Field, model_validator
 
 from aris.core.access.schemas import AccessContract
+from aris.core.contracts import DomainError
 from aris.interfaces.policy.history import ExactSecondsView
 from aris.modules.nova.policy_catalog_schemas import PolicySourceReference
 from aris.modules.nova.policy_material_schemas import (
@@ -135,3 +137,49 @@ class PolicyMaterialValidation(AccessContract):
     request: RecordPolicyReviewMaterial
     results: tuple[PolicyExampleResultView, ...]
     inline_bytes: int = Field(ge=1, le=16384)
+
+
+def _unique_example_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for name, value in pairs:
+        if name in result:
+            raise ValueError("duplicate example field")
+        result[name] = value
+    return result
+
+
+def _reject_example_number(value: str) -> None:
+    raise ValueError("example numeric fields require integers")
+
+
+class PolicyMaterialTextInput(AccessContract):
+    source: PolicySourceReference
+    expected_source_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    expected_implementation_ref: ImplementationReference
+    scenarios_text: str = Field(min_length=1, max_length=16384, repr=False)
+    reason: str = Field(min_length=1, max_length=256, repr=False)
+
+    def parsed(self) -> RecordPolicyReviewMaterial:
+        """Preserve integer inputs; reject duplicates before browser normalization."""
+        try:
+            if len(self.scenarios_text.encode("utf-8")) > 16384:
+                raise ValueError("example text exceeds byte budget")
+            scenarios = json.loads(
+                self.scenarios_text,
+                object_pairs_hook=_unique_example_fields,
+                parse_float=_reject_example_number,
+                parse_constant=_reject_example_number,
+            )
+            return RecordPolicyReviewMaterial.model_validate(
+                {
+                    "source": self.source,
+                    "expected_source_fingerprint": self.expected_source_fingerprint,
+                    "expected_implementation_ref": self.expected_implementation_ref,
+                    "scenarios": scenarios,
+                    "reason": self.reason,
+                }
+            )
+        except (ValueError, RecursionError):
+            raise DomainError(
+                "VALIDATION_ERROR", "Invalid hypothetical example JSON", 422
+            ) from None
