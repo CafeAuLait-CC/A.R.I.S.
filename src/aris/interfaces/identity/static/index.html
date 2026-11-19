@@ -22,11 +22,16 @@
   </section>
   <section class="directory-panel" aria-labelledby="directory-heading">
     <div class="section-heading"><div><h2 id="directory-heading">Members</h2><p class="muted">Identity registration grants no reservation roles.</p></div>
-      <div class="toolbar"><button id="load-slack" type="button" disabled>Load Slack members</button><button id="load-registered" type="button" class="quiet" disabled>Registered identities</button></div></div>
+      <div class="toolbar"><button id="load-slack" type="button" disabled>Load Slack members</button><button id="load-registered" type="button" class="quiet" disabled>Registered identities</button><button id="load-node-users" type="button" class="quiet" disabled>Observed Linux users</button></div></div>
     <div id="notice" class="notice" role="status" aria-live="polite">Set a user credential, then choose a directory to load.</div>
     <div class="table-controls"><label for="filter">Filter current page<input id="filter" type="search" placeholder="Name or Member ID" autocomplete="off"></label>
       <label for="reason">Reason for changes<input id="reason" maxlength="256" placeholder="Why are these mappings changing?" autocomplete="off"></label></div>
     <p id="snapshot" class="muted small"></p>
+    <section id="observed-users" class="observed-users" aria-label="Observed Linux usernames" hidden>
+      <p class="muted small">Suggestions from current GPU compute processes, not verified Slack identities. Idle accounts may not appear. Choose the correct member explicitly.</p>
+      <div id="observed-user-list"></div>
+    </section>
+    <div id="observed-user-options"></div>
     <div class="table-scroll"><table><thead id="members-head"></thead><tbody id="members-body"></tbody></table></div>
     <div class="page-controls"><button id="resume-request" type="button" hidden>Resume request</button><button id="next-page" type="button" class="quiet" disabled>Next page</button></div>
   </section>

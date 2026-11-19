@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-const state = { token: "", epoch: 0, busy: false, source: null, page: null, next: null, stale: false, intent: null };
+const state = { token: "", epoch: 0, busy: false, source: null, page: null, next: null, stale: false, intent: null, observations: null };
 const requests = new Set();
 function element(tag, text, className) {
   const item = document.createElement(tag);
@@ -13,6 +13,7 @@ function notice(message, error = false, target = "notice") {
 }
 function buttons() {
   $("load-slack").disabled = $("load-registered").disabled = !state.token || state.busy;
+  $("load-node-users").disabled = !state.token || state.busy;
   $("next-page").disabled = !state.token || state.busy || !state.next;
   $("resume-request").hidden = !state.intent;
   document.querySelectorAll(".member-review").forEach((button) => {
@@ -22,11 +23,12 @@ function buttons() {
 function clearAccess(message) {
   state.epoch += 1;
   requests.forEach((request) => request.abort());
-  Object.assign(state, { token: "", busy: false, page: null, source: null, next: null, stale: false, intent: null });
+  Object.assign(state, { token: "", busy: false, page: null, source: null, next: null, stale: false, intent: null, observations: null });
   $("credential").value = "";
   $("reason").value = ""; $("filter").value = "";
   $("members-head").replaceChildren(); $("members-body").replaceChildren();
   $("snapshot").textContent = ""; $("review-content").replaceChildren();
+  $("observed-users").hidden = true; $("observed-user-list").replaceChildren(); $("observed-user-options").replaceChildren();
   $("review-dialog").close(); notice(message); buttons();
 }
 async function api(path, method = "POST", body = {}, key = null) {
@@ -77,6 +79,38 @@ function input(value, placeholder, max = 128) {
   const field = element("input"); field.value = value; field.placeholder = placeholder;
   field.maxLength = max; field.autocomplete = "off"; field.spellcheck = false; return field;
 }
+function userHints() {
+  const options = $("observed-user-options"), ids = new Map(); options.replaceChildren();
+  for (const [index, node] of (state.observations?.nodes || []).entries()) {
+    if (!["current", "partial"].includes(node.state) || !node.usernames.length) continue;
+    const list = element("datalist"); list.id = "observed-linux-users-" + index;
+    node.usernames.forEach((username) => { const option = element("option"); option.value = username; list.append(option); });
+    options.append(list); ids.set(node.node_id, list.id);
+  }
+  document.querySelectorAll("input[data-node-user]").forEach((field) => {
+    const id = ids.get(field.dataset.nodeUser);
+    if (id) field.setAttribute("list", id); else field.removeAttribute("list");
+  });
+}
+async function loadNodeUsers() {
+  if (state.busy) return;
+  state.busy = true; buttons(); notice("Reading current node username suggestions…");
+  try {
+    state.observations = await api("/internal/identity/node-users/query", "POST", {});
+    const labels = { current: "Current observation", partial: "Some owners unresolved", stale: "Stale observation", offline: "Node offline", missing: "No current observation", unavailable: "Username observation unavailable" };
+    $("observed-user-list").replaceChildren(...state.observations.nodes.map((node) => {
+      const block = element("div", undefined, "observed-node");
+      block.append(element("strong", node.node_id), element("span", labels[node.state] || "Unavailable", "muted small"));
+      const available = ["current", "partial"].includes(node.state);
+      block.append(element("p", available ? (node.usernames.length ? node.usernames.join(" · ") : "No named GPU compute users in this observation.") : "No current username suggestions.", "observed-names"));
+      if (node.observed_at) block.append(element("p", "Sampled " + stamp(node.observed_at), "muted small"));
+      if (available && node.unresolved_processes) block.append(element("p", node.unresolved_processes + " process username(s) unresolved.", "muted small"));
+      return block;
+    }));
+    $("observed-users").hidden = false; userHints(); notice("Username suggestions loaded. Existing input values are unchanged.");
+  } catch (error) { if (!error.stale) notice(error.message, true); }
+  finally { state.busy = false; buttons(); }
+}
 function renderRows() {
   const page = state.page;
   const heading = element("tr");
@@ -108,6 +142,7 @@ function renderRows() {
       const cell = element("td"), links = (registered?.mappings || []).filter((mapping) => mapping.node_id === node);
       const field = input(links.length === 1 ? links[0].os_username : "", "Linux username");
       field.setAttribute("aria-label", memberId + " " + node + " Linux username");
+      field.dataset.nodeUser = node;
       if (links.length > 1) {
         multiple = true; field.disabled = true;
         cell.append(element("div", links.map((mapping) => mapping.os_username).join(", ")),
@@ -125,6 +160,7 @@ function renderRows() {
     review.addEventListener("click", () => beginReview(row, fields, nameInput, zoneInput));
     action.append(review); tr.append(action); $("members-body").append(tr);
   }
+  userHints();
   buttons();
 }
 function beginReview(row, fields, nameInput, zoneInput) {
@@ -249,6 +285,7 @@ $("use-credential").addEventListener("click", () => {
 $("sign-out").addEventListener("click", () => clearAccess("Access cleared."));
 $("load-slack").addEventListener("click", () => load("slack"));
 $("load-registered").addEventListener("click", () => load("registered"));
+$("load-node-users").addEventListener("click", loadNodeUsers);
 $("next-page").addEventListener("click", () => load(state.source, state.next));
 $("filter").addEventListener("input", () => {
   const filter = $("filter").value.trim().toLowerCase();

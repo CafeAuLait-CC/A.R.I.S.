@@ -10,6 +10,10 @@ from aris.core.commands.budgets import transaction_budget
 from aris.core.commands.gateway_schemas import ExternalCommandActor
 from aris.core.contracts import DomainError
 from aris.interfaces.commands.service import UserCommandSurface
+from aris.interfaces.identity.node_observations import (
+    NodeUserObservationProvider,
+    NodeUserObservations,
+)
 from aris.interfaces.identity.slack_directory import (
     SlackDirectoryProvider,
     SlackRosterMember,
@@ -57,6 +61,7 @@ class IdentityAdminSurface:
         provider: SlackDirectoryProvider,
         node_ids: tuple[str, ...],
         limits: IdentityQueryLimits,
+        observations: NodeUserObservationProvider | None = None,
     ) -> None:
         DirectoryQuery(node_ids=node_ids)
         if directory.administration.namespace.provider != "slack":
@@ -65,6 +70,7 @@ class IdentityAdminSurface:
             raise ValueError("identity mapping requires confirmation")
         self.commands, self.directory, self.provider = commands, directory, provider
         self.node_ids, self.limits = node_ids, limits
+        self.observations = observations
 
     def validate_workspace(self, settings: SlackSettings) -> None:
         if (
@@ -119,6 +125,26 @@ class IdentityAdminSurface:
         return self._page(
             context, DirectoryQuery(node_ids=self.node_ids, limit=query.limit, after=query.after)
         )[1]
+
+    def node_users(self, authorization: str | None, request_id: str) -> NodeUserObservations:
+        context = self.commands.actor(authorization, request_id)
+        query = DirectoryQuery(node_ids=self.node_ids, external_ids=())
+        actor_id, _ = self._page(context, query)
+        if self.observations is None:
+            raise DomainError("DEPENDENCY_UNAVAILABLE", "Node observations are unavailable", 503)
+        try:
+            result = self.observations.read(self.node_ids)
+            result = NodeUserObservations.model_validate(result.model_dump(mode="json"))
+        except DomainError:
+            raise
+        except Exception:
+            raise DomainError(
+                "DEPENDENCY_UNAVAILABLE", "Node observations are unavailable", 503
+            ) from None
+        if tuple(value.node_id for value in result.nodes) != self.node_ids:
+            raise DomainError("DEPENDENCY_UNAVAILABLE", "Node observation scope differs", 503)
+        self._page(context, query, expected_actor=actor_id)
+        return result
 
     def roster(
         self, authorization: str | None, request_id: str, query: SlackRosterQuery

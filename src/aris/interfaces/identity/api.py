@@ -43,6 +43,19 @@ def build_router(service: IdentityAdminSurface) -> APIRouter:
         )
         return JSONResponse(page.model_dump(mode="json"), headers={"Cache-Control": "no-store"})
 
+    @router.post("/node-users/query")
+    async def node_users(request: Request) -> JSONResponse:
+        if request.query_params:
+            raise DomainError("VALIDATION_ERROR", "Unexpected identity query parameters", 422)
+        # No caller-selected node IDs or identity are accepted.
+        from aris.core.access.schemas import AccessContract
+
+        await bounded_input(request, AccessContract)
+        result = await run_in_threadpool(
+            service.node_users, authorization(request), request.state.request_id
+        )
+        return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
+
     @router.get("/ui", response_class=HTMLResponse)
     def page() -> HTMLResponse:
         return HTMLResponse((ASSETS / "index.html").read_text(), headers=PAGE_HEADERS)

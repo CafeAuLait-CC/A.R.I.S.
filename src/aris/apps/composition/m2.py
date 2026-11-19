@@ -31,6 +31,7 @@ from aris.core.relay.schemas import RelayLimits
 from aris.core.relay.service import EventRelay
 from aris.interfaces.commands.auth import BoundSubjectTokens, UserTokenBinding
 from aris.interfaces.commands.service import UserCommandSurface
+from aris.interfaces.identity.node_observations import VegaNodeUserObservations
 from aris.interfaces.identity.service import IdentityAdminSurface, IdentityQueryLimits
 from aris.interfaces.identity.slack_directory import SlackDirectoryClient, SlackDirectoryProvider
 from aris.interfaces.notifications.service import NotificationAdminSurface
@@ -350,6 +351,7 @@ def build_m2_components(
                 identity_directory or SlackDirectoryClient(slack, clock=clock),
                 config.identity_nodes,
                 config.identity_query_limits,
+                observations=VegaNodeUserObservations(VegaService(sessions, settings)),
             )
             if config.identity_admin and user_api is not None
             else None
