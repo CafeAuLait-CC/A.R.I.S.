@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>使用记录 · ARIS</title>
+  <link rel="stylesheet" href="/internal/usage/ui/assets/usage.css">
+  <script src="/internal/usage/ui/assets/usage.js" defer></script>
+</head>
+<body>
+<main>
+  <header class="page-head"><div><p class="eyebrow">ARIS / USAGE</p><h1>使用记录</h1><p class="subtitle">查看 GPU 使用历史，了解时间花在了哪里。</p></div><span id="identity" class="identity">本地只读查询</span></header>
+  <section id="connect-panel" class="panel connect-panel" aria-labelledby="connect-title">
+    <div><h2 id="connect-title">连接使用记录</h2><p>使用你的开发访问凭据。凭据仅保留在当前页面内存中。</p></div>
+    <form id="connect-form"><label for="credential" class="sr-only">开发访问凭据</label><input id="credential" type="password" autocomplete="off" placeholder="开发访问凭据" required><button type="submit">连接</button></form>
+  </section>
+  <div id="message" role="status" aria-live="polite" hidden></div>
+  <section id="workspace" hidden>
+    <section class="panel filters" aria-label="查询条件">
+      <div class="filter-row">
+        <label>节点<select id="node"></select></label>
+        <label>视图<select id="mode"><option value="mine">我的用量</option><option value="node">节点用量</option></select></label>
+        <label>时间范围<select id="range"><option value="week">本周</option><option value="seven">近 7 天</option><option value="custom">自定义</option></select></label>
+        <label>开始日期<input id="start" type="date" required></label>
+        <label>结束日期<input id="end" type="date" required></label>
+        <button id="query" type="button">查询</button>
+      </div>
+      <div class="filter-bottom"><span id="timezone"></span><label id="owner-filter" hidden>用户<select id="owner"><option value="">全部用户</option></select></label><button id="disconnect" class="text-button" type="button">断开连接</button></div>
+    </section>
+    <div id="results" hidden>
+      <div class="summary-grid">
+        <section class="panel metric"><p>已记录 GPU 小时</p><strong id="total">—</strong><span>多张 GPU 的驻留时间累加</span></section>
+        <section class="panel metric"><p>使用过的 GPU</p><strong id="gpu-count">—</strong><span>查询时段内有记录的显卡</span></section>
+        <section class="panel metric"><p>使用记录段</p><strong id="segment-count">—</strong><span>按计量区间整理的记录</span></section>
+      </div>
+      <div class="chart-grid">
+        <section class="panel trend-panel"><div class="section-head"><h2>每日用量</h2><span>GPU 小时</span></div><div id="trend" role="img" aria-label="每日已记录 GPU 用量"></div><p id="trend-note" class="muted"></p></section>
+        <section class="panel owners-panel"><div class="section-head"><h2>用户汇总</h2><span>已记录 GPU 小时</span></div><div id="owner-summary"></div></section>
+      </div>
+      <section class="panel records-panel">
+        <div class="section-head"><div><h2>逐段记录</h2><p id="snapshot-note" class="muted"></p></div><button id="export" class="secondary" type="button">导出 CSV</button></div>
+        <div class="table-scroll"><table><thead><tr><th>用户</th><th>GPU</th><th>开始</th><th>结束</th><th class="number">已记录时长</th></tr></thead><tbody id="records"></tbody></table></div>
+        <div id="empty" class="empty" hidden><h3>这段时间还没有使用记录</h3><p>可以切换节点或日期再查看。没有记录不代表 GPU 未被使用。</p></div>
+        <div class="pagination"><span id="page-note"></span><div><button id="previous" class="secondary" type="button">上一页</button><button id="next" class="secondary" type="button">下一页</button></div></div>
+      </section>
+      <p class="coverage-note">这里只汇总已进入账本的记录；尚未确认完整观测覆盖，因此不代表全部实际用量，也不用于配额扣减。撤销的记录已从当前汇总中扣除。</p>
+    </div>
+  </section>
+</main>
+</body></html>

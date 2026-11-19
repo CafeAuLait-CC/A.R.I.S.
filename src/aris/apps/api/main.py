@@ -38,6 +38,8 @@ from aris.interfaces.slack.reservation_drafts import SlackReservationDrafts
 from aris.interfaces.slack.reservations import SlackReservationQueries
 from aris.interfaces.slack.service import SlackService
 from aris.interfaces.slack.user_commands import SlackCommandAdapter
+from aris.interfaces.usage.api import build_router as build_usage_router
+from aris.interfaces.usage.service import UsageHistorySurface
 from aris.modules.vega.api import build_router
 from aris.modules.vega.live import LiveHub
 from aris.modules.vega.live_api import build_live_router
@@ -71,10 +73,22 @@ def create_app(
     home_reservations: HomeReservationSource | None = None,
     identity_admin: IdentityAdminSurface | None = None,
     notification_admin: NotificationAdminSurface | None = None,
+    usage_history: UsageHistorySurface | None = None,
     m2_config: M2RuntimeConfig | None = None,
 ) -> FastAPI:
     config = settings or Settings()
     slack_config = slack_settings or SlackSettings()
+    if usage_history is not None:
+        if config.environment not in {"development", "test"}:
+            raise ValueError("bound usage credentials are development-only")
+        usage_history.authenticator.ensure_distinct_credentials(
+            [
+                config.read_token,
+                slack_config.bot_token,
+                slack_config.signing_secret,
+                *(credential.token for credential in config.agent_credentials.values()),
+            ]
+        )
     if m2_config is not None:
         if any(
             surface is not None
@@ -176,6 +190,8 @@ def create_app(
         app.include_router(build_identity_router(identity_admin))
     if notification_admin is not None:
         app.include_router(build_notification_router(notification_admin))
+    if usage_history is not None:
+        app.include_router(build_usage_router(usage_history))
 
     @app.middleware("http")
     async def request_context(

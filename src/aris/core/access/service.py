@@ -9,6 +9,8 @@ from aris.core.access.schemas import (
     ExternalUserLookup,
     ExternalUserTarget,
     NodeUserLookup,
+    UserLabel,
+    UserLabelQuery,
     UserPrincipal,
 )
 from aris.core.contracts import DomainError
@@ -40,6 +42,17 @@ class AccessService:
     def resolve_external(self, subject: ExternalSubject) -> UserPrincipal | None:
         with self.sessions() as session:
             return self.resolve_external_in_transaction(session, subject)
+
+    def labels_in_transaction(
+        self, session: Session, query: UserLabelQuery
+    ) -> tuple[UserLabel, ...]:
+        """Bounded labels, not identity resolution or an authorization decision."""
+        query = UserLabelQuery.model_validate(query.model_dump(mode="json"))
+        with session.no_autoflush:
+            return tuple(
+                UserLabel(user_id=user.id, display_name=user.display_name)
+                for user in AccessRepository(session).user_labels(query)
+            )
 
     def resolve_external_in_transaction(
         self, session: Session, subject: ExternalSubject

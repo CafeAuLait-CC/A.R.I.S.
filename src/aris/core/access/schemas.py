@@ -68,3 +68,14 @@ class UserPrincipal(AccessContract):
         except (ValueError, ZoneInfoNotFoundError):
             raise ValueError("user timezone must be a known IANA timezone") from None
         return value
+
+
+class UserLabelQuery(AccessContract):
+    """Presentation only; callers must authorize their domain read first."""
+
+    user_ids: tuple[UUID, ...] = Field(max_length=128)
+
+
+class UserLabel(AccessContract):
+    user_id: UUID
+    display_name: str = Field(min_length=1, max_length=128)

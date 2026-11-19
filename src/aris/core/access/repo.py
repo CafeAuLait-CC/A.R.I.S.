@@ -16,12 +16,21 @@ from aris.core.access.schemas import (
     ExternalSubject,
     ExternalUserLookup,
     NodeUserLookup,
+    UserLabelQuery,
 )
 
 
 class AccessRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
+
+    def user_labels(self, query: UserLabelQuery) -> Sequence[User]:
+        # Historical owners keep a display label even after their account is disabled.
+        return self.session.scalars(
+            select(User)
+            .where(User.id.in_([str(value) for value in query.user_ids]))
+            .execution_options(populate_existing=True)
+        ).all()
 
     def external_targets(self, lookup: ExternalUserLookup) -> Sequence[ExternalIdentity]:
         return self.session.scalars(
