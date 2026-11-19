@@ -310,3 +310,21 @@ def test_source_chain_fingerprints_and_budgets_fail_before_truncated_success():
     assert error.value.code == "ACTIVITY_PREVIEW_TOO_LARGE"
     with pytest.raises(ValidationError):
         ActivityPreviewRule(source_ref="fixture", max_gap_seconds=True)
+
+
+def test_fixed_older_window_has_its_own_complete_range_below_the_current_source_head():
+    from aris.modules.vega.usage_archive_schemas import archive_head_fingerprint
+
+    items = [fact(seq, seq * 15) for seq in range(1, 7)]
+    head, pages, maximum = source(items, highest=6, max_messages=3)
+    head = head.model_copy(update={"highest_committed_seq": 9})
+    head = type(head).model_validate(
+        {**head.model_dump(mode="json"), "fingerprint": archive_head_fingerprint(head)}
+    )
+    value = group_compute_observations(head, pages, RULE, max_messages=maximum, through_seq=6)
+    assert value.highest_committed_seq == 9 and value.selected_through_seq == 6
+    assert value.requested_after_seq == 3 and value.last_read_seq == 6
+    assert value.range_complete and value.source_packets == 3 and value.missing_seq is None
+    for end in (0, True, 10, 7):
+        with pytest.raises(DomainError):
+            group_compute_observations(head, pages, RULE, max_messages=maximum, through_seq=end)

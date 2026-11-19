@@ -101,6 +101,7 @@ class ActivityPreview(IntervalContract):
     rule_fingerprint: str
     source_ceiling_fingerprint: str
     highest_committed_seq: int
+    selected_through_seq: int
     requested_after_seq: int
     last_read_seq: int
     missing_seq: int | None
@@ -127,8 +128,13 @@ class ActivityPreview(IntervalContract):
             or self.input_gpu_facts + self.missing_inventory_markers
             != sum(group.envelopes for group in self.groups)
             or self.source_characters != sum(page.source_characters for page in self.source_pages)
-            or not 0 <= self.requested_after_seq <= self.last_read_seq <= self.highest_committed_seq
-            or self.range_complete != (self.last_read_seq == self.highest_committed_seq)
+            or not 0
+            <= self.requested_after_seq
+            <= self.last_read_seq
+            <= self.selected_through_seq
+            <= self.highest_committed_seq
+            or self.source_packets != self.last_read_seq - self.requested_after_seq
+            or self.range_complete != (self.last_read_seq == self.selected_through_seq)
             or self.distinct_compute_frames + self.repeated_compute_frames > self.telemetry_packets
             or self.rule_fingerprint != self.rule.fingerprint
             or self.fingerprint != preview_fingerprint(self)
@@ -203,6 +209,7 @@ def group_compute_observations(
     rule: ActivityPreviewRule,
     *,
     max_messages: int,
+    through_seq: int | None = None,
 ) -> ActivityPreview:
     ceiling = UsageArchiveHead.model_validate(ceiling.model_dump(mode="json"))
     rule = ActivityPreviewRule.model_validate(rule.model_dump(mode="json"))
@@ -212,7 +219,14 @@ def group_compute_observations(
         or len(pages) > 8
     ):
         raise _limit()
-    after = max(0, ceiling.highest_committed_seq - max_messages)
+    selected = ceiling.highest_committed_seq if through_seq is None else through_seq
+    if (
+        type(selected) is not int
+        or not 0 <= selected <= ceiling.highest_committed_seq
+        or (through_seq is not None and selected == 0)
+    ):
+        raise DomainError("VALIDATION_ERROR", "Select an existing committed source range", 422)
+    after = max(0, selected - max_messages)
     cursor = after
     source_characters = 0
     items: list[ArchivedUsageItem] = []
@@ -226,7 +240,7 @@ def group_compute_observations(
             page.query.node_id,
             page.query.after_seq,
             page.query.through_seq,
-        ) != (ceiling.query.agent_id, ceiling.query.node_id, cursor, ceiling.highest_committed_seq):
+        ) != (ceiling.query.agent_id, ceiling.query.node_id, cursor, selected):
             raise DomainError(
                 "VALIDATION_ERROR",
                 "Activity pages do not form the requested fixed source range",
@@ -250,12 +264,7 @@ def group_compute_observations(
                 source_characters=page.source_characters,
             )
         )
-    if (
-        ceiling.highest_committed_seq > 0
-        and not pages
-        or ceiling.highest_committed_seq == 0
-        and pages
-    ):
+    if selected > 0 and not pages or selected == 0 and pages:
         raise DomainError(
             "VALIDATION_ERROR",
             "Activity source range is absent or differs from its empty ceiling",
@@ -424,10 +433,11 @@ def group_compute_observations(
         rule_fingerprint=rule.fingerprint,
         source_ceiling_fingerprint=ceiling.fingerprint,
         highest_committed_seq=ceiling.highest_committed_seq,
+        selected_through_seq=selected,
         requested_after_seq=after,
         last_read_seq=cursor,
         missing_seq=missing,
-        range_complete=cursor == ceiling.highest_committed_seq,
+        range_complete=cursor == selected,
         source_pages=tuple(references),
         source_packets=len(items),
         source_characters=source_characters,

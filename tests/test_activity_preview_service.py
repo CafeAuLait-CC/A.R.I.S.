@@ -155,3 +155,31 @@ def test_postgresql_activity_preview_fixed_snapshot_ignores_later_gap_fill_and_r
         assert error.value.code == "RETRYABLE_DATABASE_ERROR"
         blocker.rollback()
     assert read(preview_source).range_complete and counts(readings[0]) == before
+
+
+def test_selected_older_window_is_stable_when_new_packets_arrive_and_gaps_are_not_skipped(
+    preview_source, client
+):
+    from aris.modules.vega.gpu_hardware_service import VegaGpuHardwareObservations
+    from tests.test_resource_telemetry import put, resource_batch
+
+    reader, source, actor, _ = preview_source
+    old = reader.recent(actor, SOURCE, RULE, max_messages=3, through_seq=5)
+    assert old.highest_committed_seq == 7 and old.selected_through_seq == 5
+    assert old.requested_after_seq == 2 and old.last_read_seq == 5 and old.range_complete
+    assert old.telemetry_packets == 2 and old.heartbeat_packets == 1
+    assert put(client, resource_batch(seq=8)).status_code == 200
+    fixed = reader.recent(actor, SOURCE, RULE, max_messages=3, through_seq=5)
+    assert fixed.highest_committed_seq == 8 and fixed.selected_through_seq == 5
+    assert fixed.groups == old.groups and fixed.source_packets == 3
+    latest = reader.recent(actor, SOURCE, RULE, max_messages=3)
+    assert latest.selected_through_seq == 8 and latest.requested_after_seq == 5
+    reader.hardware_source = VegaGpuHardwareObservations(source.sessions)
+    combined = reader.recent_with_hardware(actor, SOURCE, RULE, max_messages=3, through_seq=5)
+    assert combined.preview.groups == old.groups and combined.hardware.telemetry_frames == 2
+    gap = reader.recent(actor, SOURCE, RULE, max_messages=3, through_seq=2)
+    assert gap.missing_seq == 1 and gap.source_packets == 0 and not gap.range_complete
+    for end in (0, True, 9, 9223372036854775808):
+        with pytest.raises(DomainError) as error:
+            reader.recent(actor, SOURCE, RULE, max_messages=3, through_seq=end)
+        assert error.value.code == "VALIDATION_ERROR"

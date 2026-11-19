@@ -56,8 +56,11 @@ class ActivityPreviewService:
         rule: ActivityPreviewRule,
         *,
         max_messages: int,
+        through_seq: int | None = None,
     ) -> ActivityPreview:
-        value = self._recent(actor, source, rule, max_messages=max_messages, hardware=False)
+        value = self._recent(
+            actor, source, rule, max_messages=max_messages, hardware=False, through_seq=through_seq
+        )
         assert isinstance(value, ActivityPreview)
         return value
 
@@ -68,8 +71,11 @@ class ActivityPreviewService:
         rule: ActivityPreviewRule,
         *,
         max_messages: int,
+        through_seq: int | None = None,
     ) -> ActivityHardwarePreview:
-        value = self._recent(actor, source, rule, max_messages=max_messages, hardware=True)
+        value = self._recent(
+            actor, source, rule, max_messages=max_messages, hardware=True, through_seq=through_seq
+        )
         assert isinstance(value, ActivityHardwarePreview)
         return value
 
@@ -88,6 +94,7 @@ class ActivityPreviewService:
         *,
         max_messages: int,
         hardware: bool,
+        through_seq: int | None,
     ) -> ActivityPreview | ActivityHardwarePreview:
         if hardware and self.hardware_source is None:
             raise DomainError("USAGE_NOT_CONFIGURED", "GPU hardware preview is not configured", 503)
@@ -96,6 +103,10 @@ class ActivityPreviewService:
         rule = ActivityPreviewRule.model_validate(rule.model_dump(mode="json"))
         if type(max_messages) is not int or not 1 <= max_messages <= MAX_PREVIEW_MESSAGES:
             raise DomainError("VALIDATION_ERROR", "Select a bounded recent source range", 422)
+        if through_seq is not None and (
+            type(through_seq) is not int or not 1 <= through_seq <= 9223372036854775807
+        ):
+            raise DomainError("VALIDATION_ERROR", "Archive range end is invalid", 422)
         request = AccessRequest(
             user_id=actor.actor_id,
             permission="usage.read_all",
@@ -112,11 +123,14 @@ class ActivityPreviewService:
                 transaction_budget(session, 100, 750, self.timeout_ms)
                 self.access.require_in_transaction(session, request)
                 ceiling = self.source.head_in_transaction(session, source)
-                cursor = max(0, ceiling.highest_committed_seq - max_messages)
+                selected = ceiling.highest_committed_seq if through_seq is None else through_seq
+                if selected > ceiling.highest_committed_seq:
+                    raise DomainError("VALIDATION_ERROR", "Archive range end is not committed", 422)
+                cursor = max(0, selected - max_messages)
                 pages: list[UsageArchivePage] = []
                 hardware_batches: list[GpuHardwareBatch] = []
                 characters = 0
-                while cursor < ceiling.highest_committed_seq:
+                while cursor < selected:
                     if len(pages) >= 8 or characters >= MAX_PREVIEW_CHARACTERS:
                         raise DomainError(
                             "ACTIVITY_PREVIEW_TOO_LARGE",
@@ -131,8 +145,8 @@ class ActivityPreviewService:
                         agent_id=source.agent_id,
                         node_id=source.node_id,
                         after_seq=cursor,
-                        through_seq=ceiling.highest_committed_seq,
-                        limit=min(128, ceiling.highest_committed_seq - cursor),
+                        through_seq=selected,
+                        limit=min(128, selected - cursor),
                         source_character_budget=min(
                             MAX_ARCHIVE_SOURCE_CHARACTERS, MAX_PREVIEW_CHARACTERS - characters
                         ),
@@ -154,7 +168,7 @@ class ActivityPreviewService:
                     if page.state == "gap":
                         break
                 preview = group_compute_observations(
-                    ceiling, tuple(pages), rule, max_messages=max_messages
+                    ceiling, tuple(pages), rule, max_messages=max_messages, through_seq=through_seq
                 )
                 result: ActivityPreview | ActivityHardwarePreview = (
                     ActivityHardwarePreview(

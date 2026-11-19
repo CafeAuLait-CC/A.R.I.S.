@@ -112,8 +112,9 @@
     </section>
     <section id="activity-results" role="tabpanel" aria-labelledby="tab-activity" hidden>
       <section class="panel activity-controls">
-        <div><h2>计算进程观测分组</h2><p class="muted">按最近的归档包查看，不使用日期筛选；点击上方查询读取一次。</p></div>
-        <label>最近原包数量<select id="activity-limit"><option value="128">128</option><option value="256">256</option><option value="512">512</option><option value="1024">1024</option></select></label>
+        <div><h2>计算进程观测分组</h2><p class="muted">按原包分段查看，不使用日期筛选；点击查询读取当前窗口。</p></div>
+        <label>每段原包数量<select id="activity-limit"><option value="128">128</option><option value="256">256</option><option value="512">512</option><option value="1024">1024</option></select></label>
+        <div class="activity-window-navigation" aria-label="归档窗口浏览"><button id="activity-older" class="secondary" type="button" disabled>更早一段</button><button id="activity-newer" class="secondary" type="button" disabled>较新一段</button><button id="activity-latest" class="secondary" type="button" disabled>返回最新</button></div>
       </section>
       <div id="activity-data" hidden>
         <div class="summary-grid">

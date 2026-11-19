@@ -72,6 +72,14 @@ def test_optional_archive_route_is_absent_by_default_and_reads_real_fixed_source
         assert value["source_packets"] == 5 and value["heartbeat_packets"] == 2
         assert value["highest_committed_seq"] == "7" and value["requested_after_seq"] == "2"
         assert value["groups"][0]["first_source"]["seq"] == "3"
+        fixed = client.post(
+            "/internal/usage/activity/query",
+            headers=HEADERS,
+            json={**QUERY, "max_messages": 3, "through_seq": "5"},
+        )
+        assert fixed.status_code == 200
+        assert fixed.json()["selected_through_seq"] == "5"
+        assert fixed.json()["highest_committed_seq"] == "7" and fixed.json()["range_complete"]
         assert value["groups"][0]["state"] == "reported_busy" and value["range_complete"]
         assert not value["continuous_usage_established"] and not value["retention_enabled"]
         assert "private-fixture-name" not in result.text and "username" not in result.text
@@ -99,6 +107,13 @@ def test_archive_http_binding_input_and_current_all_permission_are_required_befo
             {"rule": {}},
             {"max_messages": True},
             {"max_messages": 1025},
+            {"through_seq": 5},
+            {"through_seq": True},
+            {"through_seq": "0"},
+            {"through_seq": "01"},
+            {"through_seq": "5.0"},
+            {"through_seq": "9223372036854775808"},
+            {"through_seq": "8"},
         ):
             assert (
                 client.post(
@@ -167,6 +182,7 @@ def test_archive_projection_keeps_long_sequences_exact_and_does_not_disclose_raw
     view = activity_view(grouped([fact(first, 0), fact(first + 1, 15)], max_messages=2))
     raw = view.model_dump(mode="json")
     assert raw["highest_committed_seq"] == str(first + 1)
+    assert raw["selected_through_seq"] == str(first + 1)
     assert raw["requested_after_seq"] == str(first - 1)
     assert raw["groups"][0]["first_source"]["seq"] == str(first)
     assert raw["groups"][0]["last_source"]["seq"] == str(first + 1)
