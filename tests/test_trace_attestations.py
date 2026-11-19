@@ -436,12 +436,15 @@ def test_postgresql_locked_original_source_is_retryable_and_then_recovers(attest
 
 def test_over_1024_observations_remain_one_open_residency_across_bounded_proof_restarts(consumer):
     from aris.modules.lyra.residency_evidence_service import ResidencyRunEvidenceService
+    from aris.modules.lyra.residency_segment_service import ResidencySegmentService
+    from aris.modules.lyra.residency_segments import ResidencySegmentQuery
 
     state = consumer
     state.base -= timedelta(hours=8)
     points = 1030
     seed(state, times=tuple(10 + 15 * i for i in range(points)))
     parent, first_run, final, max_queries = None, None, None, 0
+    local_segments = []
     for _ in range((points * 2 + 127) // 128):
         final = state.service.consume(CONTEXT, request(state, through_seq=points * 2))
         statements = []
@@ -457,6 +460,18 @@ def test_over_1024_observations_remain_one_open_residency_across_bounded_proof_r
             event.remove(engine, "before_cursor_execute", capture)
         assert value.previous_id == parent and value.source_count <= 128
         parent = value.request.id
+        local_segments.extend(
+            ResidencySegmentService(
+                state.sessions, service(state), state.archive, state.observations, clock=state.now
+            )
+            .analyze(
+                ResidencySegmentQuery(
+                    attestation_id=value.request.id,
+                    expected_attestation_fingerprint=value.fingerprint,
+                )
+            )
+            .segments
+        )
         max_queries = max(max_queries, len(statements))
         run = final.position.residency.open_runs[0]
         first_run = first_run or run.id
@@ -464,6 +479,12 @@ def test_over_1024_observations_remain_one_open_residency_across_bounded_proof_r
         state.service = rebuild(state)
     assert run.intervals == points - 1 and run.observed_microseconds == (points - 1) * 15000000
     assert snapshot(state)[-1] == 17 and max_queries <= 35
+    assert sum(item.intervals for item in local_segments) == points - 1
+    assert sum(item.observed_microseconds for item in local_segments) == run.observed_microseconds
+    assert all(
+        a.last == b.first and a.interval_offset + a.intervals == b.interval_offset
+        for a, b in zip(local_segments, local_segments[1:], strict=False)
+    )
     # The old whole-window read limit remains intact; no cap was silently raised.
     from aris.modules.lyra.residency_evidence_schemas import ResidencyVerificationLimits
 
