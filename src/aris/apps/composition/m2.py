@@ -48,7 +48,9 @@ from aris.interfaces.slack.reservation_drafts import (
     SlackReservationDrafts,
 )
 from aris.interfaces.slack.reservations import SlackReservationQueries
+from aris.interfaces.slack.usage import SlackUsageQueries
 from aris.interfaces.slack.user_commands import SlackCommandAdapter
+from aris.interfaces.usage.personal import PersonalUsageQueries
 from aris.modules.nova.administration import ReservationAdministrationService
 from aris.modules.nova.availability import AvailabilityService
 from aris.modules.nova.availability_schemas import BasicReservationRules, MaintenanceCoverage
@@ -109,6 +111,7 @@ class M2RuntimeConfig(AccessContract):
         default_factory=NotificationQueryLimits
     )
     reservation_query_limits: ReservationQueryLimits = Field(default_factory=ReservationQueryLimits)
+    slack_usage_nodes: tuple[Identifier, ...] = Field(default=(), max_length=8)
 
     @model_validator(mode="after")
     def explicit_authorities(self) -> "M2RuntimeConfig":
@@ -116,6 +119,8 @@ class M2RuntimeConfig(AccessContract):
             raise ValueError("M2 requires an explicit Slack namespace and unique commands")
         if len(set(self.identity_nodes)) != len(self.identity_nodes):
             raise ValueError("identity nodes must be unique")
+        if len(set(self.slack_usage_nodes)) != len(self.slack_usage_nodes):
+            raise ValueError("Slack usage nodes must be unique")
         if self.identity_admin and (
             not self.identity_nodes
             or not self.user_tokens
@@ -186,6 +191,7 @@ def validate_m2_configuration(
         or config.reservation_home
         or config.identity_admin
         or config.notification_admin
+        or config.slack_usage_nodes
     ) and (not slack.configured or slack.team_id != config.namespace.namespace):
         raise ValueError("Slack callbacks require the configured identity workspace")
     if config.notification_delivery and (
@@ -209,6 +215,7 @@ class M2Components:
     home: SlackDispatcher | None
     identity_admin: IdentityAdminSurface | None
     notification_admin: NotificationAdminSurface | None
+    slack_usage: SlackUsageQueries | None
 
     def run_once(self, mode: WorkerMode) -> dict[str, JsonValue]:
         if mode not in {"commands", "events", "notifications", "home", "all"}:
@@ -343,6 +350,11 @@ def build_m2_components(
     )
     return M2Components(
         intake=intake,
+        slack_usage=SlackUsageQueries(
+            PersonalUsageQueries(sessions, config.namespace, config.slack_usage_nodes, clock=clock)
+        )
+        if config.slack_usage_nodes
+        else None,
         user_api=user_api,
         identity_admin=(
             IdentityAdminSurface(

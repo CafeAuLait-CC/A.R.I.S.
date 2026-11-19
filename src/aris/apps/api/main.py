@@ -39,6 +39,7 @@ from aris.interfaces.slack.home_reservations import HomeReservationSource
 from aris.interfaces.slack.reservation_drafts import SlackReservationDrafts
 from aris.interfaces.slack.reservations import SlackReservationQueries
 from aris.interfaces.slack.service import SlackService
+from aris.interfaces.slack.usage import SlackUsageQueries
 from aris.interfaces.slack.user_commands import SlackCommandAdapter
 from aris.interfaces.usage.api import build_router as build_usage_router
 from aris.interfaces.usage.service import UsageHistorySurface
@@ -77,6 +78,7 @@ def create_app(
     notification_admin: NotificationAdminSurface | None = None,
     usage_history: UsageHistorySurface | None = None,
     policy_sources: PolicyReadSurface | None = None,
+    slack_usage: SlackUsageQueries | None = None,
     m2_config: M2RuntimeConfig | None = None,
 ) -> FastAPI:
     config = settings or Settings()
@@ -120,6 +122,7 @@ def create_app(
                 home_reservations,
                 identity_admin,
                 notification_admin,
+                slack_usage,
             )
         ):
             raise ValueError("M2 configuration and explicit command surfaces cannot be combined")
@@ -128,6 +131,8 @@ def create_app(
         slack_commands.validate_configuration(slack_config)
     if slack_reservations is not None:
         slack_reservations.validate_configuration(slack_config)
+    if slack_usage is not None:
+        slack_usage.validate_configuration(slack_config)
     if slack_drafts is not None:
         slack_drafts.validate_configuration(slack_config)
     if home_reservations is not None:
@@ -183,6 +188,7 @@ def create_app(
         home_reservations = components.home_reservations
         identity_admin = components.identity_admin
         notification_admin = components.notification_admin
+        slack_usage = components.slack_usage
     app.state.m2 = components
     vega = VegaService(sessions, config)
     app.include_router(build_router(vega, config))
@@ -198,6 +204,7 @@ def create_app(
                 reservation_queries=slack_reservations,
                 reservation_drafts=slack_drafts,
                 home_reservations=home_reservations,
+                usage_queries=slack_usage,
             )
         )
     )

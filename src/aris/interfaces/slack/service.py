@@ -37,6 +37,7 @@ from aris.interfaces.slack.schemas import (
     SlashCommand,
 )
 from aris.interfaces.slack.security import require_workspace, verify_request
+from aris.interfaces.slack.usage import SlackUsageQueries
 from aris.interfaces.slack.user_commands import SlackCommandAdapter
 from aris.modules.vega.service import VegaService
 
@@ -69,6 +70,7 @@ class SlackService:
         reservation_queries: SlackReservationQueries | None = None,
         reservation_drafts: SlackReservationDrafts | None = None,
         home_reservations: HomeReservationSource | None = None,
+        usage_queries: SlackUsageQueries | None = None,
     ) -> None:
         self.sessions = sessions
         self.config = config
@@ -78,6 +80,9 @@ class SlackService:
         self.reservation_queries = reservation_queries
         self.reservation_drafts = reservation_drafts
         self.home_reservations = home_reservations
+        self.usage_queries = usage_queries
+        if usage_queries is not None:
+            usage_queries.validate_configuration(config)
         if home_reservations is not None:
             home_reservations.validate_configuration(config)
         if command_adapter is not None:
@@ -98,6 +103,12 @@ class SlackService:
             raise DomainError("VALIDATION_ERROR", "Invalid Slack command", 422) from exc
         require_workspace(self.config, command.team_id)
         operation = command.text.split(maxsplit=1)
+        if command.command == "/gpu" and operation and operation[0].lower() == "usage":
+            if self.usage_queries is None:
+                raise DomainError(
+                    "DEPENDENCY_UNAVAILABLE", "Personal usage queries are not enabled", 503
+                )
+            return self.usage_queries.read(command, request_id)
         if (
             command.command == "/gpu"
             and operation
