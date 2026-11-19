@@ -32,6 +32,7 @@
       </div>
       <div class="filter-bottom"><span id="timezone"></span><label id="owner-filter" hidden>用户<select id="owner"><option value="">全部用户</option></select></label><button id="disconnect" class="text-button" type="button">断开连接</button></div>
     </section>
+    <div class="trend-return"><button id="trend-back" type="button" class="secondary" hidden>返回先前日期范围</button></div>
     <div class="view-tabs" role="tablist" aria-label="用量内容">
       <button id="tab-records" type="button" role="tab" aria-controls="results" aria-selected="true">已记录用量</button>
       <button id="tab-saved" type="button" role="tab" aria-controls="saved-results" aria-selected="false" hidden>统计快照</button>
@@ -46,7 +47,7 @@
         <section class="panel metric"><p>使用记录段</p><strong id="segment-count">—</strong><span>按计量区间整理的记录</span></section>
       </div>
       <div class="chart-grid">
-        <section class="panel trend-panel"><div class="section-head"><h2>每日用量</h2><span>GPU 小时</span></div><div id="trend" role="img" aria-label="每日已记录 GPU 用量"></div><p id="trend-note" class="muted"></p></section>
+        <section class="panel trend-panel"><div class="section-head"><h2>每日用量</h2><span>GPU 小时</span></div><div id="trend" role="group" aria-label="每日已记录 GPU 用量"></div><p id="trend-note" class="muted"></p></section>
         <section class="panel owners-panel"><div class="section-head"><h2>用户汇总</h2><span>已记录 GPU 小时</span></div><div id="owner-summary"></div></section>
       </div>
       <section class="panel records-panel">
