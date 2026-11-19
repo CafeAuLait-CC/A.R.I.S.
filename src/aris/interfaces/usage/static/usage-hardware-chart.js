@@ -1,8 +1,19 @@
 "use strict";
 window.createHardwareCharts = ({el:$,text,stamp,ratio}) => {
-  let values=[], busy=false;
+  let values=[], busy=false, selected=0;
   const ns='http://www.w3.org/2000/svg';
-  function reset(){values=[];$('hardware-charts').hidden=true;$('hardware-series').replaceChildren();$('hardware-chart-note').textContent='';['utilization','memory','temperature'].forEach(name=>$(`hardware-chart-${name}`).replaceChildren());}
+  function reset(){values=[];selected=0;$('hardware-sample-inspector').hidden=true;$('hardware-sample-values').replaceChildren();$('hardware-sample-position').textContent='';$('hardware-sample-time').textContent='';$('hardware-sample-index').value='0';$('hardware-sample-index').max='0';$('hardware-sample-index').removeAttribute('aria-valuetext');$('hardware-charts').hidden=true;$('hardware-series').replaceChildren();$('hardware-chart-note').textContent='';['utilization','memory','temperature'].forEach(name=>$(`hardware-chart-${name}`).replaceChildren());}
+  const current=()=>values[Number($('hardware-series').value)];
+  function controls(){const count=current()?.points.length || 0;$('hardware-sample-index').disabled=busy || count<2;$('hardware-sample-previous').disabled=busy || !count || selected<=0;$('hardware-sample-next').disabled=busy || !count || selected>=count-1;}
+  function inspect(series){
+    const count=series.points.length;$('hardware-sample-inspector').hidden=!count;if(!count){$('hardware-sample-values').replaceChildren();$('hardware-sample-position').textContent='';$('hardware-sample-time').textContent='';$('hardware-sample-index').max='0';$('hardware-sample-index').value='0';$('hardware-sample-index').removeAttribute('aria-valuetext');controls();return;}
+    selected=Math.max(0,Math.min(selected,count-1));const point=series.points[selected],range=$('hardware-sample-index');range.max=String(count-1);range.value=String(selected);range.setAttribute('aria-valuetext',`第 ${selected+1} 个，共 ${count} 个，原序号 ${point.seq}`);
+    $('hardware-sample-position').textContent=`${selected+1} / ${count}`;$('hardware-sample-time').textContent=`原 GPU 时刻 UTC · ${point.gpu_observed_at}${point.break_before?' · 该点前不连接曲线':''}`;
+    const memory=text('dd',`${ratio(point.memory_used_mib,'1',1024n)} / ${ratio(series.memory_total_mib,'1',1024n)} GB`);memory.append(text('small',`${point.memory_used_mib} MB used / ${series.memory_total_mib} MB`));
+    const pairs=[['GPU 利用率',text('dd',`${point.utilization_percent}%`)],['显存',memory],['温度',text('dd',point.temperature_c===null?'未知':`${point.temperature_c} °C`)],['原包序号',text('dd',point.seq)]];
+    $('hardware-sample-values').replaceChildren(...pairs.map(([label,value])=>{const row=text('div','');row.append(text('dt',label),value);return row;}));controls();
+  }
+  function choose(index){const series=current();if(busy || !series?.points.length)return;selected=Math.max(0,Math.min(index,series.points.length-1));render();}
   function chart(series,key,title,unit,minimum,maximum,divisor=1n){
     const holder=$(`hardware-chart-${key}`);holder.replaceChildren();
     const points=series.points, numbers=points.filter(point=>point[title]!==null);
@@ -17,14 +28,18 @@ window.createHardwareCharts = ({el:$,text,stamp,ratio}) => {
     const unitTitle=document.createElementNS(ns,'title');unitTitle.textContent=`${unit}；仅连接相邻可用原采样，非连续使用证据。`;svg.append(unitTitle);
     let segment=[];
     function flush(){if(!segment.length)return;const line=segment.map((point,index)=>`${index?'L':'M'}${point.x.toFixed(2)},${point.y.toFixed(2)}`).join(' ');if(segment.length>1){item('path',{d:`${line} L${segment[segment.length-1].x.toFixed(2)},${top+plot} L${segment[0].x.toFixed(2)},${top+plot} Z`,class:'hardware-chart-area'});item('path',{d:line,class:'hardware-chart-line',fill:'none'});}else{const dot=item('circle',{cx:segment[0].x,cy:segment[0].y,r:2.8,class:'hardware-chart-point'});const description=document.createElementNS(ns,'title');description.textContent=`seq ${segment[0].seq} · ${segment[0].at}`;dot.append(description);}segment=[];}
-    points.forEach(point=>{if(point.break_before || point[title]===null)flush();if(point[title]===null)return;const value=BigInt(point[title]);segment.push({x:left+(Date.parse(point.gpu_observed_at)-start)/Math.max(1,end-start)*(width-left-right),y:top+plot*(1-Number((value-minimum)*100000n/(maximum-minimum))/100000),seq:point.seq,at:stamp(point.gpu_observed_at)});});flush();holder.append(svg);
+    points.forEach(point=>{if(point.break_before || point[title]===null)flush();if(point[title]===null)return;const value=BigInt(point[title]);segment.push({x:left+(Date.parse(point.gpu_observed_at)-start)/Math.max(1,end-start)*(width-left-right),y:top+plot*(1-Number((value-minimum)*100000n/(maximum-minimum))/100000),seq:point.seq,at:stamp(point.gpu_observed_at)});});flush();
+    const active=points[selected];if(active){const x=left+(Date.parse(active.gpu_observed_at)-start)/Math.max(1,end-start)*(width-left-right);item('line',{x1:x,x2:x,y1:top,y2:top+plot,class:'hardware-chart-cursor'});if(active[title]!==null){const value=BigInt(active[title]);item('circle',{cx:x,cy:top+plot*(1-Number((value-minimum)*100000n/(maximum-minimum))/100000),r:3.4,class:'hardware-chart-selected'});}}
+    svg.addEventListener('click',event=>{if(busy)return;const matrix=svg.getScreenCTM();if(!matrix)return;const location=new DOMPoint(event.clientX,event.clientY).matrixTransform(matrix.inverse()),fraction=Math.max(0,Math.min(1,(location.x-left)/(width-left-right))),at=start+fraction*(end-start);let nearest=-1,distance=Infinity;points.forEach((point,index)=>{if(point[title]===null)return;const delta=Math.abs(Date.parse(point.gpu_observed_at)-at);if(delta<distance){nearest=index;distance=delta;}});if(nearest>=0)choose(nearest);});holder.append(svg);
   }
-  function render(){const series=values[Number($('hardware-series').value)];if(!series)return;$('hardware-chart-note').textContent=series.points.length?`${series.points.length} 个独立原采样 · ${stamp(series.points[0].gpu_observed_at)} 至 ${stamp(series.points[series.points.length-1].gpu_observed_at)}；缺口和未知采样处断线。`:'没有可用于绘图的独立采样。';
+  function render(){const series=current();if(!series)return;inspect(series);$('hardware-chart-note').textContent=series.points.length?`${series.points.length} 个独立原采样 · ${stamp(series.points[0].gpu_observed_at)} 至 ${stamp(series.points[series.points.length-1].gpu_observed_at)}；缺口和未知采样处断线。`:'没有可用于绘图的独立采样。';
     chart(series,'utilization','utilization_percent','%',0n,100n);
     chart(series,'memory','memory_used_mib','GB',0n,BigInt(series.memory_total_mib),1024n);
     const temperatures=series.points.filter(point=>point.temperature_c!==null).map(point=>point.temperature_c);
     chart(series,'temperature','temperature_c','°C',BigInt(temperatures.length?Math.min(...temperatures)-2:0),BigInt(temperatures.length?Math.max(...temperatures)+2:1));
   }
-  $('hardware-series').addEventListener('change',render);
-  return {reset,configure(series){if(series.length===values.length && series.every((item,index)=>item===values[index]))return;values=series;$('hardware-charts').hidden=!values.length;$('hardware-series').replaceChildren(...values.map((item,index)=>new Option(`GPU ${item.index} · ${item.model} · ${ratio(item.memory_total_mib,'1',1024n)} GB`,String(index))));$('hardware-series').disabled=busy;render();},setBusy(value){busy=value;$('hardware-series').disabled=value;}};
+  $('hardware-series').addEventListener('change',()=>{selected=Math.max(0,(current()?.points.length || 0)-1);render();});
+  $('hardware-sample-index').addEventListener('input',event=>choose(Number(event.target.value)));
+  $('hardware-sample-previous').addEventListener('click',()=>choose(selected-1));$('hardware-sample-next').addEventListener('click',()=>choose(selected+1));
+  return {reset,configure(series){if(!series.length){reset();controls();return;}if(series.length===values.length && series.every((item,index)=>item===values[index]))return;values=series;$('hardware-charts').hidden=!values.length;$('hardware-series').replaceChildren(...values.map((item,index)=>new Option(`GPU ${item.index} · ${item.model} · ${ratio(item.memory_total_mib,'1',1024n)} GB`,String(index))));selected=Math.max(0,(current()?.points.length || 0)-1);$('hardware-series').disabled=busy;render();},setBusy(value){busy=value;$('hardware-series').disabled=value;controls();}};
 };

@@ -133,6 +133,11 @@
               <div><h3>已用显存 <small>GB</small></h3><div id="hardware-chart-memory" class="hardware-chart"></div></div>
               <div><h3>温度 <small>°C</small></h3><div id="hardware-chart-temperature" class="hardware-chart"></div></div>
             </div>
+            <section id="hardware-sample-inspector" class="hardware-sample-inspector" hidden aria-labelledby="hardware-sample-heading">
+              <div class="section-head"><h3 id="hardware-sample-heading">查看原采样</h3><span id="hardware-sample-position" class="muted"></span></div>
+              <div class="hardware-sample-controls"><button id="hardware-sample-previous" type="button" class="secondary">前一个</button><label class="sr-only" for="hardware-sample-index">原采样位置</label><input id="hardware-sample-index" type="range" min="0" max="0" value="0" step="1"><button id="hardware-sample-next" type="button" class="secondary">后一个</button></div>
+              <p id="hardware-sample-time" class="muted"></p><dl id="hardware-sample-values" class="hardware-sample-values" aria-live="polite"></dl><p class="muted">点击曲线选择附近的原采样，或用滑块和方向键逐点查看；不会在采样之间插值。</p>
+            </section>
           </section>
           <div class="table-scroll"><table><thead><tr><th>GPU</th><th>利用率</th><th>已用显存</th><th>温度</th><th>原采样</th></tr></thead><tbody id="hardware-rows"></tbody></table></div>
           <p id="hardware-empty" class="empty" hidden>这次范围没有报告 GPU 硬件样本，不能解释为 0 利用率。</p>
