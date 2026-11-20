@@ -138,8 +138,14 @@ class MemberAdministrationService:
                         revoked_when_member=tuple(
                             binding
                             for binding in bindings
-                            if binding.role_name in {"admin", "member"}
-                            or binding.role_name in privileged
+                            if (
+                                binding.role_name in {"admin", "member"}
+                                or binding.role_name in privileged
+                            )
+                            and not (
+                                binding.role_name == "member"
+                                and binding.scope == AccessScope(type="global", id="*")
+                            )
                         ),
                         credential_generation=credential.generation if credential else None,
                         credential_available=credential is not None
@@ -218,6 +224,7 @@ class MemberAdministrationService:
                     ):
                         raise DomainError("CONFLICT", "Member access changed; review again", 409)
                     privileged = repo.privileged_roles(self.privileged_permissions)
+                    target_scope = AccessScope(type="global", id="*")
                     changes.extend(
                         BindRole(
                             user_id=item.user_id,
@@ -226,17 +233,24 @@ class MemberAdministrationService:
                             present=False,
                         )
                         for binding in previous
-                        if binding.role_name in {"admin", "member"}
-                        or (item.role == "member" and binding.role_name in privileged)
-                    )
-                    changes.append(
-                        BindRole(
-                            user_id=item.user_id,
-                            role_name=item.role,
-                            scope=AccessScope(type="global", id="*"),
-                            present=True,
+                        if (
+                            binding.role_name in {"admin", "member"}
+                            or (item.role == "member" and binding.role_name in privileged)
                         )
+                        and not (binding.role_name == item.role and binding.scope == target_scope)
                     )
+                    if not any(
+                        binding.role_name == item.role and binding.scope == target_scope
+                        for binding in previous
+                    ):
+                        changes.append(
+                            BindRole(
+                                user_id=item.user_id,
+                                role_name=item.role,
+                                scope=target_scope,
+                                present=True,
+                            )
+                        )
                 if item.profile is not None or item.active is not None:
                     changes.append(
                         UpdateUser(

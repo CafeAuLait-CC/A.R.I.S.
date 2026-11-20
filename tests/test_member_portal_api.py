@@ -4,6 +4,7 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
+from sqlalchemy import select
 
 from aris.apps.api.main import create_app
 from aris.apps.composition.members import MemberRuntimeConfig, build_member_components
@@ -15,6 +16,7 @@ from aris.core.access.admin_schemas import (
 )
 from aris.core.access.member_repo import MemberRepository
 from aris.core.access.member_schemas import EditMember
+from aris.core.access.models import Role, RoleBinding
 from aris.core.access.schemas import AccessRequest, AccessScope
 from aris.core.access.sessions import secret_digest
 from aris.core.contracts import DomainError
@@ -423,11 +425,37 @@ def test_role_downgrade_retains_unrelated_business_role_and_removes_full_statist
                 ),
                 DefineRole(name="legacy-all", permissions=("usage.read_all",)),
                 BindRole(user_id=user, role_name="legacy-all", scope=GLOBAL, present=True),
+                BindRole(
+                    user_id=user,
+                    role_name="member",
+                    scope=AccessScope(type="node", id="node-a"),
+                    present=True,
+                ),
+                BindRole(
+                    user_id=user,
+                    role_name="admin",
+                    scope=AccessScope(type="node", id="node-a"),
+                    present=True,
+                ),
             )
         ),
     )
     with manager.sessions() as session:
         bindings = MemberRepository(session).bindings(str(user))
+        previous_ids = {
+            (name, kind, scope): identifier
+            for identifier, name, kind, scope in session.execute(
+                select(RoleBinding.id, Role.name, RoleBinding.scope_type, RoleBinding.scope_id)
+                .join(Role, Role.id == RoleBinding.role_id)
+                .where(RoleBinding.user_id == str(user))
+            )
+        }
+    revoked = manager.summaries(admin, (user,))[0].revoked_when_member
+    assert {(binding.role_name, binding.scope.type) for binding in revoked} == {
+        ("legacy-all", "global"),
+        ("admin", "node"),
+        ("member", "node"),
+    }
     apply(manager, admin, [EditMember(user_id=user, role="member", previous_bindings=bindings)])
     manager.access.require_permission(
         AccessRequest(
@@ -443,4 +471,16 @@ def test_role_downgrade_retains_unrelated_business_role_and_removes_full_statist
     assert {binding.role_name for binding in manager.summaries(admin, (user,))[0].bindings} == {
         "member",
         "booking",
+    }
+    with manager.sessions() as session:
+        remaining_ids = {
+            (name, kind, scope): identifier
+            for identifier, name, kind, scope in session.execute(
+                select(RoleBinding.id, Role.name, RoleBinding.scope_type, RoleBinding.scope_id)
+                .join(Role, Role.id == RoleBinding.role_id)
+                .where(RoleBinding.user_id == str(user))
+            )
+        }
+    assert remaining_ids == {
+        key: previous_ids[key] for key in (("member", "global", "*"), ("booking", "node", "node-a"))
     }

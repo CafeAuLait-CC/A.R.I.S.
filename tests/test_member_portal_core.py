@@ -24,7 +24,7 @@ from aris.core.access.member_commands import ManageMembersCommand
 from aris.core.access.member_repo import MemberRepository
 from aris.core.access.member_schemas import EditMember, IssueLoginCredential, ManageMembersRequest
 from aris.core.access.members import MemberAdministrationService
-from aris.core.access.models import User
+from aris.core.access.models import Role, RoleBinding, User
 from aris.core.access.schemas import AccessRequest, AccessScope, ExternalSubject
 from aris.core.access.session_models import LoginCredential, LoginSession
 from aris.core.access.sessions import LoginSessionService, secret_digest
@@ -185,6 +185,45 @@ def test_new_member_role_has_own_and_general_access_without_other_user_detail(me
             )
     summaries = service.summaries(admin, (user,))
     assert summaries[0].role == "member" and summaries[0].bindings[0].role_name == "member"
+
+
+@pytest.mark.parametrize("role", ("admin", "member"))
+def test_reapplying_same_global_role_preserves_bindings_permissions_and_revision(members, role):
+    service, admin, _, _ = members
+    user = admin if role == "admin" else register(service, admin)
+
+    def binding_ids():
+        with service.sessions() as session:
+            return tuple(
+                session.execute(
+                    select(RoleBinding.id, Role.name, RoleBinding.scope_type, RoleBinding.scope_id)
+                    .join(Role, Role.id == RoleBinding.role_id)
+                    .where(RoleBinding.user_id == str(user))
+                    .order_by(Role.name, RoleBinding.scope_type, RoleBinding.scope_id)
+                )
+            )
+
+    original_ids, original_revision = binding_ids(), revision(service, admin)
+    expected_permissions = next(item.permissions for item in ROLES if item.name == role)
+    for _ in range(2):
+        with service.sessions() as session:
+            bindings = MemberRepository(session).bindings(str(user))
+        outcome = apply(
+            service, admin, [EditMember(user_id=user, role=role, previous_bindings=bindings)]
+        )
+        assert not outcome["directory"]["changed"]
+        assert outcome["revision"] == original_revision == revision(service, admin)
+        assert binding_ids() == original_ids
+        for permission in expected_permissions:
+            service.access.require_permission(
+                AccessRequest(user_id=user, permission=permission, scope=GLOBAL)
+            )
+        if role == "member":
+            for permission in ("identity.manage", "usage.read_all"):
+                with pytest.raises(DomainError):
+                    service.access.require_permission(
+                        AccessRequest(user_id=user, permission=permission, scope=GLOBAL)
+                    )
 
 
 def test_batch_conflict_rolls_back_all_registrations_and_cannot_remove_last_admin(members):
