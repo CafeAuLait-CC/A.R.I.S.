@@ -5,6 +5,7 @@ from uuid import UUID
 from sqlalchemy import and_, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.engine import RowMapping
 from sqlalchemy.orm import Session
 
 from aris.core.contracts import DomainError
@@ -12,6 +13,7 @@ from aris.core.time import utc
 from aris.modules.nova.models import PolicySourceApprovalRevocationRow, PolicySourceApprovalRow
 from aris.modules.nova.policy_approval_schemas import (
     MAX_APPROVAL_BYTES,
+    PolicyApprovalCursor,
     PolicyApprovalListQuery,
     PolicyApprovalSummary,
     StoredPolicyApproval,
@@ -77,6 +79,9 @@ class PolicyApprovalRepository:
         )
         if row is None:
             return None
+        return self._decode(row)
+
+    def _decode(self, row: RowMapping) -> StoredPolicyApproval:
         try:
             raw = row["canonical_approval"]
             if len(raw.encode()) > MAX_APPROVAL_BYTES:
@@ -93,19 +98,23 @@ class PolicyApprovalRepository:
         except (ValueError, TypeError, KeyError, RecursionError):
             raise inconsistent_approval() from None
 
-    def page(
-        self, query: PolicyApprovalListQuery, source_id: UUID, owner_id: UUID
+    def _metadata_page(
+        self,
+        source_id: UUID,
+        owner_id: UUID | None,
+        before: PolicyApprovalCursor | None,
+        limit: int,
     ) -> tuple[PolicyApprovalSummary, ...]:
         row = PolicySourceApprovalRow
         revoked = PolicySourceApprovalRevocationRow
-        clauses = [row.source_id == str(source_id), row.approved_by == str(owner_id)]
-        if query.before is not None:
+        clauses = [row.source_id == str(source_id)]
+        if owner_id is not None:
+            clauses.append(row.approved_by == str(owner_id))
+        if before is not None:
             clauses.append(
                 or_(
-                    row.approved_at < query.before.approved_at,
-                    and_(
-                        row.approved_at == query.before.approved_at, row.id < str(query.before.id)
-                    ),
+                    row.approved_at < before.approved_at,
+                    and_(row.approved_at == before.approved_at, row.id < str(before.id)),
                 )
             )
         values = self.session.execute(
@@ -126,7 +135,7 @@ class PolicyApprovalRepository:
             .outerjoin(revoked, revoked.approval_id == row.id)
             .where(*clauses)
             .order_by(row.approved_at.desc(), row.id.desc())
-            .limit(query.limit + 1)
+            .limit(limit + 1)
         )
         try:
             return tuple(
@@ -147,3 +156,29 @@ class PolicyApprovalRepository:
             )
         except (ValueError, TypeError, KeyError):
             raise inconsistent_approval() from None
+
+    def page(
+        self, query: PolicyApprovalListQuery, source_id: UUID, owner_id: UUID
+    ) -> tuple[PolicyApprovalSummary, ...]:
+        return self._metadata_page(source_id, owner_id, query.before, query.limit)
+
+    def review_candidates(self, source_id: UUID) -> tuple[PolicyApprovalSummary, ...]:
+        # One look-ahead proves truncation; only the review service can use this
+        # internal cross-signer metadata query, after its own current authority check.
+        return self._metadata_page(source_id, None, None, 128)
+
+    def review_originals(
+        self, source_id: UUID, candidates: tuple[PolicyApprovalSummary, ...]
+    ) -> dict[UUID, StoredPolicyApproval]:
+        if not candidates:
+            return {}
+        if len(candidates) > 128 or len({item.id for item in candidates}) != len(candidates):
+            raise ValueError("approval body read exceeds the review budget")
+        rows = self.session.execute(
+            select(*PolicySourceApprovalRow.__table__.c).where(
+                PolicySourceApprovalRow.source_id == str(source_id),
+                PolicySourceApprovalRow.id.in_([str(item.id) for item in candidates]),
+            )
+        ).mappings()
+        values = tuple(self._decode(row) for row in rows)
+        return {item.id: item for item in values}

@@ -28,6 +28,8 @@ from aris.interfaces.policy.history import PolicyHistoricalUsage
 from aris.interfaces.policy.service import PolicyReadSurface
 from aris.interfaces.slack.config import SlackSettings
 from aris.modules.lyra.quota_evidence_service import HistoricalQuotaEvidenceService
+from aris.modules.nova.policy_approval_review_schemas import PolicyApprovalReviewRequirements
+from aris.modules.nova.policy_approval_review_service import PolicyApprovalReviewService
 from aris.modules.nova.policy_approval_schemas import PolicyApprovalRequirements
 from aris.modules.nova.policy_approval_service import PolicyApprovalService
 from aris.modules.nova.policy_catalog_service import PolicyCatalogService
@@ -54,6 +56,7 @@ class LocalPolicyConfig(AccessContract):
     historical_review_implementation_ref: ImplementationReference | None = None
     historical_review_records_read: bool = Field(default=False, strict=True)
     approval_requirements: PolicyApprovalRequirements | None = None
+    approval_review: PolicyApprovalReviewRequirements | None = None
 
     def settings(self) -> Settings:
         url = make_url(self.database_url.get_secret_value())
@@ -143,6 +146,20 @@ def main(argv: list[str] | None = None) -> int:
             and config.draft_commands.source_approval != config.approval_requirements
         ):
             raise ValueError("source approval writing and reading requirements must match")
+        if config.approval_review is not None and (
+            config.approval_review.approval != config.approval_requirements
+            or any(
+                (binding.subject.provider, binding.subject.namespace)
+                != (
+                    config.approval_review.namespace.provider,
+                    config.approval_review.namespace.namespace,
+                )
+                for binding in config.user_tokens
+            )
+        ):
+            raise ValueError(
+                "approval review requires matching individual requirements and workspace"
+            )
         if args.validate:
             summary: dict[str, object] = {
                 "result": "valid",
@@ -176,6 +193,12 @@ def main(argv: list[str] | None = None) -> int:
                 summary["historical_review_records_read"] = True
             if config.approval_requirements is not None:
                 summary["source_approval_read"] = True
+            if config.approval_review is not None:
+                summary["approval_review_read"] = True
+                summary["minimum_distinct_approvers"] = (
+                    config.approval_review.minimum_distinct_approvers
+                )
+
             if config.material_comparison_implementation_ref is not None:
                 summary["material_comparison_read"] = True
             print(json.dumps(summary))
@@ -224,6 +247,17 @@ def main(argv: list[str] | None = None) -> int:
                     catalog, history.assessments, review_configuration
                 )
             )
+        approvals = (
+            (
+                drafts.approvals
+                if drafts is not None and drafts.approvals is not None
+                else PolicyApprovalService(
+                    catalog, historical_reviews, config.approval_requirements
+                )
+            )
+            if config.approval_requirements is not None and historical_reviews is not None
+            else None
+        )
         surface = PolicyReadSurface(
             catalog,
             auth,
@@ -237,14 +271,9 @@ def main(argv: list[str] | None = None) -> int:
             feedback=PolicyFeedbackService(catalog) if config.feedback_read else None,
             historical_review_implementation_ref=config.historical_review_implementation_ref,
             historical_reviews=historical_reviews,
-            approvals=(
-                drafts.approvals
-                if drafts is not None and drafts.approvals is not None
-                else PolicyApprovalService(
-                    catalog, historical_reviews, config.approval_requirements
-                )
-            )
-            if config.approval_requirements is not None and historical_reviews is not None
+            approvals=approvals,
+            approval_summary=PolicyApprovalReviewService(approvals, config.approval_review)
+            if approvals is not None and config.approval_review is not None
             else None,
         )
         uvicorn.run(

@@ -1,6 +1,6 @@
 from collections.abc import Sequence
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from aris.core.access.models import (
@@ -13,6 +13,7 @@ from aris.core.access.models import (
 )
 from aris.core.access.schemas import (
     AccessRequest,
+    AuthorizedUsersQuery,
     ExternalSubject,
     ExternalUserLookup,
     NodeUserLookup,
@@ -91,3 +92,44 @@ class AccessRepository:
             )
             .limit(1)
         )
+
+    def permitted_users(self, query: AuthorizedUsersQuery) -> Sequence[tuple[str, str, str, int]]:
+        targets = (
+            select(func.count())
+            .select_from(ExternalIdentity)
+            .where(
+                ExternalIdentity.user_id == User.id,
+                ExternalIdentity.provider == query.provider,
+                ExternalIdentity.namespace == query.namespace,
+            )
+            .correlate(User)
+            .scalar_subquery()
+        )
+        clauses = [
+            User.id.in_([str(value) for value in query.user_ids]),
+            User.status == "active",
+            targets > 0,
+        ]
+        for requirement in query.requirements:
+            clauses.append(
+                select(RoleBinding.id)
+                .join(RolePermission, RolePermission.role_id == RoleBinding.role_id)
+                .join(Permission, Permission.id == RolePermission.permission_id)
+                .where(
+                    RoleBinding.user_id == User.id,
+                    Permission.name == requirement.permission,
+                    or_(
+                        and_(RoleBinding.scope_type == "global", RoleBinding.scope_id == "*"),
+                        and_(
+                            RoleBinding.scope_type == requirement.scope.type,
+                            RoleBinding.scope_id == requirement.scope.id,
+                        ),
+                    ),
+                )
+                .correlate(User)
+                .exists()
+            )
+        rows = self.session.execute(
+            select(User.id, User.display_name, User.timezone, targets).where(*clauses)
+        ).all()
+        return [(row[0], row[1], row[2], row[3]) for row in rows]

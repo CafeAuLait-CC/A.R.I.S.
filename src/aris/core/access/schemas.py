@@ -50,6 +50,28 @@ class AccessRequest(AccessContract):
     scope: AccessScope
 
 
+class AccessRequirement(AccessContract):
+    permission: PermissionName
+    scope: AccessScope
+
+
+class AuthorizedUsersQuery(AccessContract):
+    """Current active users in one namespace holding every exact requirement."""
+
+    user_ids: tuple[UUID, ...] = Field(max_length=128)
+    provider: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_.-]*$")
+    namespace: Identifier
+    requirements: tuple[AccessRequirement, ...] = Field(min_length=1, max_length=16)
+
+    @model_validator(mode="after")
+    def unique_inputs(self) -> "AuthorizedUsersQuery":
+        if len(set(self.user_ids)) != len(self.user_ids) or len(
+            {(item.permission, item.scope.type, item.scope.id) for item in self.requirements}
+        ) != len(self.requirements):
+            raise ValueError("batch access requires unique users and exact requirements")
+        return self
+
+
 class NodeUserLookup(AccessContract):
     node_id: Identifier
     os_username: Identifier

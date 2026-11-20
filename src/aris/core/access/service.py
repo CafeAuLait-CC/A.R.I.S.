@@ -5,6 +5,7 @@ from aris.core.access.models import User
 from aris.core.access.repo import AccessRepository
 from aris.core.access.schemas import (
     AccessRequest,
+    AuthorizedUsersQuery,
     ExternalSubject,
     ExternalUserLookup,
     ExternalUserTarget,
@@ -93,3 +94,31 @@ class AccessService:
         if user is None:
             raise DomainError("PERMISSION_DENIED", "Permission is not granted", 403)
         return user
+
+    def permitted_users_in_transaction(
+        self, session: Session, query: AuthorizedUsersQuery
+    ) -> tuple[UserPrincipal, ...]:
+        """One bounded SQL query, no implicit grants or cached authorization ticket.
+
+        Domain services own the transaction and still authorize their requester.
+        Namespace ambiguity is a dependency error, not a silently missing user.
+        """
+        query = AuthorizedUsersQuery.model_validate(query.model_dump(mode="json"))
+        if not query.user_ids:
+            return ()
+        with session.no_autoflush:
+            rows = AccessRepository(session).permitted_users(query)
+            if any(count != 1 for *_, count in rows):
+                raise DomainError("IDENTITY_AMBIGUOUS", "External user identity is ambiguous", 503)
+            try:
+                principals = {
+                    id: UserPrincipal(user_id=id, display_name=name, timezone=zone)
+                    for id, name, zone, _ in rows
+                }
+            except ValidationError:
+                raise DomainError(
+                    "DEPENDENCY_UNAVAILABLE", "Identity configuration is invalid", 503
+                ) from None
+            return tuple(
+                value for id in query.user_ids if (value := principals.get(str(id))) is not None
+            )

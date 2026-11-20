@@ -42,6 +42,12 @@ from aris.interfaces.policy.materials import (
     PolicyMaterialValidation,
 )
 from aris.modules.lyra.quota_evidence_schemas import QuotaEvidencePage
+from aris.modules.nova.policy_approval_review_schemas import (
+    PolicyApprovalReview,
+    PolicyApprovalReviewExport,
+    PolicyApprovalReviewQuery,
+)
+from aris.modules.nova.policy_approval_review_service import PolicyApprovalReviewService
 from aris.modules.nova.policy_approval_revocation_service import PolicyApprovalRevocationService
 from aris.modules.nova.policy_approval_schemas import (
     ApprovePolicySource,
@@ -113,6 +119,11 @@ class PolicyCatalogSession(AccessContract):
         default=None, pattern=r"^[a-f0-9]{64}$"
     )
     source_approval_writing_available: bool = False
+    source_approval_review_available: bool = False
+    source_approval_review_requirements_fingerprint: str | None = Field(
+        default=None, pattern=r"^[a-f0-9]{64}$"
+    )
+    source_approval_review_minimum_distinct_approvers: int | None = Field(default=None, ge=1, le=16)
 
 
 class PolicyDetailInput(AccessContract):
@@ -135,6 +146,7 @@ class PolicyReadSurface:
         historical_review_implementation_ref: str | None = None,
         historical_reviews: PolicyHistoricalReviewService | None = None,
         approvals: PolicyApprovalService | None = None,
+        approval_summary: PolicyApprovalReviewService | None = None,
     ) -> None:
         if not 1 <= len(policy_names) <= 32 or len(set(policy_names)) != len(policy_names):
             raise ValueError("policy interface requires explicit unique policy names")
@@ -218,6 +230,21 @@ class PolicyReadSurface:
                 "source approval writing requires its matching reader and requirements"
             )
         self.approvals = approvals
+        if approval_summary is not None and (
+            approval_summary.approvals is not approvals
+            or any(
+                (subject.provider, subject.namespace)
+                != (
+                    approval_summary.requirements.namespace.provider,
+                    approval_summary.requirements.namespace.namespace,
+                )
+                for _, subject in authenticator.bindings
+            )
+        ):
+            raise ValueError(
+                "approval review requires the same approval reader and configured workspace"
+            )
+        self.approval_summary = approval_summary
 
     def _approval_requirements(
         self, session: Session, actor: ActorContext
@@ -306,6 +333,32 @@ class PolicyReadSurface:
             names=(query.source.name,),
         )
 
+    def approval_review_read(
+        self, authorization: str | None, request_id: str, query: PolicyApprovalReviewQuery
+    ) -> PolicyApprovalReview:
+        service = self.approval_summary
+        if service is None:
+            raise DomainError(
+                "POLICY_APPROVAL_REVIEW_NOT_CONFIGURED", "Approval review is not configured", 503
+            )
+        return self._run(
+            authorization,
+            request_id,
+            lambda session, actor, principal: service.review(actor, query),
+            names=(query.source.name,),
+        )
+
+    def approval_review_export(
+        self, authorization: str | None, request_id: str, query: PolicyApprovalReviewExport
+    ) -> PolicyApprovalReview:
+        original = PolicyApprovalReviewQuery.model_validate(
+            query.model_dump(mode="json", exclude={"expected_result_fingerprint"})
+        )
+        value = self.approval_review_read(authorization, request_id, original)
+        if value.fingerprint != query.expected_result_fingerprint:
+            raise DomainError("CONFLICT", "Approval review changed; refresh before exporting", 409)
+        return value
+
     def _run(
         self,
         authorization: str | None,
@@ -378,6 +431,14 @@ class PolicyReadSurface:
                 source_approval_writing_available=requirements is not None
                 and self.draft_commands is not None
                 and self.draft_commands.source_approval is not None,
+                source_approval_review_available=requirements is not None
+                and self.approval_summary is not None,
+                source_approval_review_requirements_fingerprint=self.approval_summary.requirements.fingerprint
+                if requirements is not None and self.approval_summary is not None
+                else None,
+                source_approval_review_minimum_distinct_approvers=self.approval_summary.requirements.minimum_distinct_approvers
+                if requirements is not None and self.approval_summary is not None
+                else None,
             ),
         )
 

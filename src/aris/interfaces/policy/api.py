@@ -7,6 +7,7 @@ from starlette.responses import HTMLResponse, JSONResponse, Response
 
 from aris.core.contracts import DomainError
 from aris.interfaces.commands.api import authorization, bounded_input
+from aris.interfaces.policy.approval_review_report import approval_review_report
 from aris.interfaces.policy.drafts import PolicyDraftInput
 from aris.interfaces.policy.history import (
     PolicyHistoryAssessmentInput,
@@ -22,6 +23,10 @@ from aris.interfaces.policy.materials import (
     PolicyMaterialTextInput,
 )
 from aris.interfaces.policy.service import PolicyDetailInput, PolicyReadSurface
+from aris.modules.nova.policy_approval_review_schemas import (
+    PolicyApprovalReviewExport,
+    PolicyApprovalReviewQuery,
+)
 from aris.modules.nova.policy_approval_schemas import (
     ApprovePolicySource,
     PolicyApprovalDetailQuery,
@@ -54,6 +59,41 @@ PAGE_HEADERS = {
 
 def build_router(service: PolicyReadSurface) -> APIRouter:
     router = APIRouter(prefix="/internal/policy", tags=["policy-source-review"])
+
+    if service.approval_summary is not None:
+
+        @router.post("/approvals/review")
+        async def approval_review(request: Request) -> JSONResponse:
+            if request.query_params:
+                raise DomainError("VALIDATION_ERROR", "Unexpected approval review parameters", 422)
+            query = await bounded_input(request, PolicyApprovalReviewQuery)
+            result = await run_in_threadpool(
+                service.approval_review_read,
+                authorization(request),
+                request.state.request_id,
+                query,
+            )
+            return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
+
+        @router.post("/approvals/review/report")
+        async def approval_report(request: Request) -> HTMLResponse:
+            if request.query_params:
+                raise DomainError("VALIDATION_ERROR", "Unexpected approval report parameters", 422)
+            query = await bounded_input(request, PolicyApprovalReviewExport)
+            result = await run_in_threadpool(
+                service.approval_review_export,
+                authorization(request),
+                request.state.request_id,
+                query,
+            )
+            return HTMLResponse(
+                approval_review_report(result),
+                headers={
+                    **PAGE_HEADERS,
+                    "Content-Security-Policy": REPORT_CSP + "; frame-ancestors 'none'",
+                    "Content-Disposition": 'attachment; filename="aris-approval-review.html"',
+                },
+            )
 
     if service.approvals is not None:
 
@@ -403,6 +443,7 @@ def build_router(service: PolicyReadSurface) -> APIRouter:
             "policy-history.js",
             "policy-history-records.js",
             "policy-approvals.js",
+            "policy-approval-review.js",
             "policy-materials.js",
             "policy-material-save.js",
             "policy-material-compare.js",

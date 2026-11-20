@@ -7,7 +7,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from pydantic import ValidationError
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, event, func, select, text
 from sqlalchemy.exc import IntegrityError
 
 from aris.core.access.models import (
@@ -19,7 +19,14 @@ from aris.core.access.models import (
     RolePermission,
     User,
 )
-from aris.core.access.schemas import AccessRequest, AccessScope, ExternalSubject, NodeUserLookup
+from aris.core.access.schemas import (
+    AccessRequest,
+    AccessRequirement,
+    AccessScope,
+    AuthorizedUsersQuery,
+    ExternalSubject,
+    NodeUserLookup,
+)
 from aris.core.access.service import AccessService
 from aris.core.contracts import DomainError
 from aris.core.db import SCHEMA_REVISION, build_engine, session_factory
@@ -109,6 +116,121 @@ def request(ids, user="alice", permission="reservation.create", kind="node", sco
     return AccessRequest(
         user_id=ids[user], permission=permission, scope=AccessScope(type=kind, id=scope)
     )
+
+
+def test_batch_current_access_requires_every_scope_and_exact_active_namespace(access):
+    service, sessions, ids = access
+    with sessions.begin() as db:
+        db.add(RolePermission(role_id=ids["admin"], permission_id=ids["create"]))
+        db.add(
+            ExternalIdentity(
+                id=str(uuid4()),
+                provider="slack",
+                namespace="TONE",
+                external_id="UBSECOND",
+                user_id=ids["bob"],
+            )
+        )
+
+    def query(nodes, namespace="TONE"):
+        return AuthorizedUsersQuery(
+            user_ids=(ids["alice"], ids["bob"]),
+            provider="slack",
+            namespace=namespace,
+            requirements=tuple(
+                AccessRequirement(
+                    permission="reservation.create", scope=AccessScope(type="node", id=node)
+                )
+                for node in nodes
+            ),
+        )
+
+    with sessions() as db:
+        both = service.permitted_users_in_transaction(db, query(("node-a",)))
+        assert {str(value.user_id) for value in both} == {ids["alice"], ids["bob"]}
+        strict = service.permitted_users_in_transaction(db, query(("node-a", "node-b")))
+        assert tuple(str(value.user_id) for value in strict) == (ids["bob"],)
+        assert service.require_in_transaction(db, request(ids, "bob", scope="node-b")) == strict[0]
+        with pytest.raises(DomainError):
+            service.require_in_transaction(db, request(ids, scope="node-b"))
+        assert tuple(
+            str(value.user_id)
+            for value in service.permitted_users_in_transaction(db, query(("node-a",), "TTWO"))
+        ) == (ids["bob"],)
+    with sessions.begin() as db:
+        db.get(User, ids["bob"]).status = "suspended"
+        db.add(
+            RoleBinding(
+                id=str(uuid4()),
+                user_id=ids["alice"],
+                role_id=ids["member"],
+                scope_type="node",
+                scope_id="node-b",
+            )
+        )
+    with sessions() as db:
+        assert tuple(
+            str(value.user_id)
+            for value in service.permitted_users_in_transaction(db, query(("node-a", "node-b")))
+        ) == (ids["alice"],)
+        assert service.permitted_users_in_transaction(db, query(("node-a",), "TTWO")) == ()
+
+
+def test_batch_access_is_one_read_without_flushing_or_refreshing_owner_work_and_rejects_ambiguity(
+    access,
+):
+    service, sessions, ids = access
+    query = AuthorizedUsersQuery(
+        user_ids=(ids["alice"],),
+        provider="slack",
+        namespace="TONE",
+        requirements=(
+            AccessRequirement(
+                permission="reservation.create", scope=AccessScope(type="node", id="node-a")
+            ),
+        ),
+    )
+    engine = sessions.kw["bind"]
+    statements = []
+
+    def observe(connection, cursor, statement, parameters, context, many):
+        statements.append(statement)
+
+    with sessions() as db:
+        if engine.dialect.name == "postgresql":
+            db.execute(text("SET TRANSACTION READ ONLY"))
+        owner = db.get(User, ids["alice"])
+        original = owner.display_name
+        owner.display_name = "Uncommitted owner edit"
+        pending = User(
+            id=str(uuid4()), display_name="Must not be flushed", status="active", timezone="UTC"
+        )
+        db.add(pending)
+        event.listen(engine, "before_cursor_execute", observe)
+        try:
+            result = service.permitted_users_in_transaction(db, query)
+        finally:
+            event.remove(engine, "before_cursor_execute", observe)
+        assert len(statements) == 1 and statements[0].lstrip().startswith("SELECT")
+        assert (
+            result[0].display_name == original
+            and owner.display_name == "Uncommitted owner edit"
+            and pending in db.new
+        )
+        db.rollback()
+    with sessions.begin() as db:
+        db.add(
+            ExternalIdentity(
+                id=str(uuid4()),
+                provider="slack",
+                namespace="TONE",
+                external_id="UALIAS",
+                user_id=ids["alice"],
+            )
+        )
+    with sessions() as db, pytest.raises(DomainError) as failure:
+        service.permitted_users_in_transaction(db, query)
+    assert failure.value.code == "IDENTITY_AMBIGUOUS"
 
 
 def denied(service, query):
