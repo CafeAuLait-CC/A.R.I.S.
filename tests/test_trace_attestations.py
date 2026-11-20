@@ -462,6 +462,9 @@ def test_long_residency_pipeline_preserves_open_state_then_records_every_closed_
     from aris.modules.lyra.reservation_links import ResidencyReservationService
     from aris.modules.lyra.residency_attribution import ResidencyAttributionService
     from aris.modules.lyra.residency_evidence_service import ResidencyRunEvidenceService
+    from aris.modules.lyra.residency_observed_window_schemas import (
+        ResidencyObservedWindowReference,
+    )
     from aris.modules.lyra.residency_partition_schemas import (
         ResidencyPartitionMethod,
         ResidencyPartitionReference,
@@ -573,16 +576,6 @@ def test_long_residency_pipeline_preserves_open_state_then_records_every_closed_
             clock=state.now,
         ).verify(reference(state, final))
     assert error.value.code == "USAGE_EVIDENCE_TOO_LARGE"
-    idle = resource_batch(
-        seq=points * 2 + 1, observed_at=state.base + timedelta(seconds=10 + 15 * points)
-    )
-    idle["resources"]["compute"].update(reported_processes=0, gpus=[])
-    assert put(state.client, idle).status_code == 200
-    assert beat(state.client, heartbeat(seq=points * 2 + 2)).status_code == 200
-    closed = state.service.consume(CONTEXT, request(state, through_seq=points * 2 + 2))
-    end = service(state).record(CONTEXT, incoming(state, closed)).attestation
-    assert end.previous_id == parent and closed.closed_run_count == 1
-    assert state.service.exact(closed.id).closed_runs[0].run == run
     method = ResidencyPartitionMethod(max_intervals=128)
     partition_service = ResidencyPartitionService(
         state.sessions,
@@ -593,6 +586,46 @@ def test_long_residency_pipeline_preserves_open_state_then_records_every_closed_
         method=method,
         clock=state.now,
     )
+    # Read a bounded middle window while the 1,029-interval run is still open.
+    # Reuse this large fixture rather than seeding another long stream.
+    open_request = ResidencyObservedWindowReference(
+        reference=reference(state, final),
+        attestation_id=value.request.id,
+        expected_attestation_fingerprint=value.fingerprint,
+        expected_trace_configuration_fingerprint=state.config.fingerprint,
+        after_interval=512,
+        through_interval=640,
+    )
+    open_window = partition_service.observed_window(open_request)
+    assert open_window.state_at_record == "open"
+    assert open_window.parent_run.intervals == 1029
+    assert len(open_window.candidate.evidence) == 128
+    assert open_window.candidate.observed_microseconds == 128 * 15_000_000
+    assert open_window.source_count <= 8192 and len(open_window.sources) <= 1024
+    assert open_window.platform_owner_id is None and not open_window.formal_usage_available
+    idle = resource_batch(
+        seq=points * 2 + 1, observed_at=state.base + timedelta(seconds=10 + 15 * points)
+    )
+    idle["resources"]["compute"].update(reported_processes=0, gpus=[])
+    assert put(state.client, idle).status_code == 200
+    assert beat(state.client, heartbeat(seq=points * 2 + 2)).status_code == 200
+    closed = state.service.consume(CONTEXT, request(state, through_seq=points * 2 + 2))
+    end = service(state).record(CONTEXT, incoming(state, closed)).attestation
+    assert end.previous_id == parent and closed.closed_run_count == 1
+    assert state.service.exact(closed.id).closed_runs[0].run == run
+    assert partition_service.observed_window(open_request).fingerprint == open_window.fingerprint
+    closed_window = partition_service.observed_window(
+        open_request.model_copy(
+            update={
+                "reference": reference(state, closed),
+                "attestation_id": end.request.id,
+                "expected_attestation_fingerprint": end.fingerprint,
+            }
+        )
+    )
+    assert closed_window.state_at_record == "closed"
+    assert closed_window.candidate == open_window.candidate
+    assert closed_window.sources == open_window.sources
     parent_reference = ResidencyPartitionReference(
         reference=reference(state, closed),
         closing_attestation_id=end.request.id,
