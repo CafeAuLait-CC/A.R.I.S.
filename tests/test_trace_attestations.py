@@ -626,6 +626,43 @@ def test_long_residency_pipeline_preserves_open_state_then_records_every_closed_
     assert closed_window.state_at_record == "closed"
     assert closed_window.candidate == open_window.candidate
     assert closed_window.sources == open_window.sources
+    from aris.modules.lyra.residency_layout import (
+        StableResidencyLayoutMethod,
+        plan_residency_windows,
+    )
+
+    layout_method = StableResidencyLayoutMethod(max_intervals=128)
+    open_layout = plan_residency_windows(open_window, layout_method)
+    closed_layout = plan_residency_windows(closed_window, layout_method)
+    tail_layout = plan_residency_windows(
+        closed_window, layout_method, first_window=closed_layout.next_window
+    )
+    assert open_layout.stable_prefix_windows == 7 and open_layout.unplanned_tail_intervals == 133
+    assert len(open_layout.windows) == 7 and open_layout.next_window is None
+    assert closed_layout.total_planned_windows == 9 and closed_layout.next_window == 8
+    assert open_layout.layout_key == closed_layout.layout_key
+    assert [item.key for item in open_layout.windows] == [
+        item.key for item in closed_layout.windows[:7]
+    ]
+    planned = (*closed_layout.windows, *tail_layout.windows)
+    assert [item.original.through_interval - item.original.after_interval for item in planned] == [
+        *([128] * 7),
+        66,
+        67,
+    ]
+    original_parts = [partition_service.observed_window(item.original) for item in planned]
+    assert (
+        sum(item.candidate.observed_microseconds for item in original_parts)
+        == run.observed_microseconds
+    )
+    assert all(
+        a.candidate.evidence[-1].current == b.candidate.evidence[0].previous
+        for a, b in zip(original_parts, original_parts[1:], strict=False)
+    )
+    assert all(
+        item.platform_owner_id is None and not item.formal_usage_available
+        for item in original_parts
+    )
     parent_reference = ResidencyPartitionReference(
         reference=reference(state, closed),
         closing_attestation_id=end.request.id,
