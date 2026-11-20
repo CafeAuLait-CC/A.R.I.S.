@@ -234,7 +234,7 @@ def test_session_remembers_refresh_expires_and_logout_revokes_without_plaintext_
 
 
 def test_suspension_disables_old_login_and_sessions_even_after_reactivation(members):
-    service, admin, _, _ = members
+    service, admin, _, clock = members
     user = register(service, admin)
     issue(service, admin, user)
     grant = service.login.login(SecretStr(MEMBER_TOKEN), remember=True)
@@ -249,6 +249,22 @@ def test_suspension_disables_old_login_and_sessions_even_after_reactivation(memb
     rotated = "fresh-rotated-member-fixture-credential-123456789"
     issue(service, admin, user, rotated, generation=1)
     assert service.login.login(SecretStr(rotated), remember=True).principal.user_id == user
+    legacy_user = register(service, admin, "ULEGACY", "legacy-linux")
+    legacy_token = "fixture-legacy-member-personal-credential-123456789"
+    legacy_subject = ExternalSubject(provider="slack", namespace="TDEMO", external_id="ULEGACY")
+    service.login = LoginSessionService(
+        service.sessions,
+        service.administration.namespace,
+        {**service.login.legacy, secret_digest(legacy_token): legacy_subject},
+        clock=lambda: clock[0],
+    )
+    old_session = service.login.login(SecretStr(legacy_token), remember=True)
+    apply(service, admin, [EditMember(user_id=legacy_user, active=False)])
+    apply(service, admin, [EditMember(user_id=legacy_user, active=True)])
+    with pytest.raises(DomainError):
+        service.login.login(SecretStr(legacy_token), remember=True)
+    with pytest.raises(DomainError):
+        service.login.current(old_session.token.get_secret_value())
 
 
 def test_cookie_csrf_is_bound_to_one_session_and_legacy_removal_invalidates_session(members):

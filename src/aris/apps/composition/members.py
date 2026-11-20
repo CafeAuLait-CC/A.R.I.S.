@@ -13,7 +13,6 @@ from aris.core.access.admin_schemas import DefineRole, IdentityNamespace, Regist
 from aris.core.access.administration import AccessAdministrationService
 from aris.core.access.directory import AccessDirectoryQueries
 from aris.core.access.guards import GuardedAccessService
-from aris.core.access.mapping_command import IdentityMappingCommand
 from aris.core.access.member_commands import EditOwnProfileCommand, ManageMembersCommand
 from aris.core.access.members import MemberAdministrationService
 from aris.core.access.schemas import AccessContract, AccessScope, Identifier
@@ -208,7 +207,6 @@ def build_member_components(
     definitions = [
         ManageMembersCommand(manager),
         EditOwnProfileCommand(manager),
-        IdentityMappingCommand(administration),
     ]
     commands = CommandService(
         sessions,
@@ -264,6 +262,7 @@ def build_member_components(
             directory_provider or SlackDirectoryClient(slack),
             config.node_ids,
             IdentityQueryLimits(),
+            directory_command="identity.manage_members",
         )
     portal = MemberPortalSurface(
         manager,

@@ -80,7 +80,6 @@ def main(argv: list[str] | None = None) -> int:
                         "commands": [
                             "identity.manage_members",
                             "identity.edit_own_profile",
-                            "identity.map_users",
                         ],
                         "autostart": False,
                         "cookie_authentication": True,

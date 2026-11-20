@@ -120,6 +120,8 @@ class LoginSessionService:
                         if hmac.compare_digest(expected, candidate):
                             subject = bound_subject
                     identity = repo.identity(subject) if subject is not None else None
+                    if identity is not None and repo.user_credential(identity.user_id) is not None:
+                        raise authentication_required()
                 if identity is None or subject is None:
                     raise authentication_required()
                 principal = self.access.resolve_external_in_transaction(session, subject)
@@ -182,7 +184,10 @@ class LoginSessionService:
                     external_id=identity.external_id,
                 )
                 if stored.credential_generation is None:
-                    if self.legacy.get(stored.credential_digest) != subject:
+                    if (
+                        self.legacy.get(stored.credential_digest) != subject
+                        or repo.user_credential(stored.user_id) is not None
+                    ):
                         raise authentication_required()
                 else:
                     credential = repo.user_credential(stored.user_id)

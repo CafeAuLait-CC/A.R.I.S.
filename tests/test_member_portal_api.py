@@ -142,6 +142,10 @@ def window():
 
 def test_browser_cookie_restores_without_reentering_credential_and_logout_revokes(portal):
     app, components, _, _ = portal
+    assert set(components.worker.commands.commands) == {
+        "identity.manage_members",
+        "identity.edit_own_profile",
+    }
     with TestClient(app) as client:
         response, view = login(client)
         cookie = response.headers["set-cookie"]

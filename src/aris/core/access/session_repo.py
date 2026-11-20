@@ -1,3 +1,4 @@
+import secrets
 from datetime import datetime
 
 from sqlalchemy import select, update
@@ -76,8 +77,16 @@ class LoginRepository:
             .values(revoked_at=now)
         )
         if credential:
-            self.session.execute(
-                update(LoginCredential)
-                .where(LoginCredential.user_id == user_id)
-                .values(disabled_at=now)
-            )
+            stored = self.user_credential(user_id)
+            if stored is None:
+                self.session.add(
+                    LoginCredential(
+                        user_id=user_id,
+                        token_digest=secrets.token_hex(32),
+                        generation=1,
+                        issued_at=now,
+                        disabled_at=now,
+                    )
+                )
+            else:
+                stored.disabled_at = now
