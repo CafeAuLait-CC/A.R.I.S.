@@ -21,6 +21,11 @@ class IdentityNamespace(AccessContract):
     namespace: Identifier
 
 
+class RegistrationRoleGrant(AccessContract):
+    role_name: RoleName
+    scope: AccessScope
+
+
 class DirectoryProfile(AccessContract):
     display_name: str = Field(min_length=1, max_length=128)
     timezone: str = Field(min_length=1, max_length=128)

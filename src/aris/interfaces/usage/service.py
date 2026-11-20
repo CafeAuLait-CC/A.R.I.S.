@@ -20,7 +20,7 @@ from aris.core.access.schemas import (
 from aris.core.commands.budgets import transaction_budget
 from aris.core.commands.schemas import ActorContext
 from aris.core.contracts import DomainError
-from aris.interfaces.commands.auth import BoundSubjectTokens
+from aris.interfaces.commands.auth import UserCommandAuthenticator
 from aris.interfaces.usage.activity_service import ActivityPreviewAccess
 from aris.interfaces.usage.report import history_report
 from aris.modules.lyra.ledger_schemas import UsageLedgerHead
@@ -93,7 +93,7 @@ class UsageNodeAccess(AccessContract):
 class UsageSession(AccessContract):
     actor: UserPrincipal
     nodes: tuple[UsageNodeAccess, ...]
-    credential_mode: Literal["development_bound_user"] = "development_bound_user"
+    credential_mode: Literal["development_bound_user", "member_session"] = "development_bound_user"
     saved_snapshots_available: bool = False
     weekly_reports_available: bool = False
     weekly_plans_available: bool = False
@@ -169,7 +169,7 @@ class UsageHistorySurface:
     def __init__(
         self,
         history: UsageHistoryService,
-        authenticator: BoundSubjectTokens,
+        authenticator: UserCommandAuthenticator,
         node_ids: tuple[str, ...],
         *,
         saved_windows: UsageWindowReader | None = None,
@@ -224,6 +224,9 @@ class UsageHistorySurface:
                     raise DomainError("PERMISSION_DENIED", "Usage read permission is required", 403)
                 return UsageSession(
                     actor=principal,
+                    credential_mode="member_session"
+                    if getattr(self.authenticator, "browser_sessions", False)
+                    else "development_bound_user",
                     nodes=tuple(nodes),
                     saved_snapshots_available=self.saved_windows is not None,
                     weekly_reports_available=self.weekly_reports is not None,

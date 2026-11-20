@@ -25,6 +25,7 @@ from aris.core.access.admin_schemas import (
     IdentityNamespace,
     RegisterIdentity,
     RegistrationMapping,
+    RegistrationRoleGrant,
     RemoveNodeUser,
     UpdateUser,
 )
@@ -62,12 +63,14 @@ class AccessAdministrationService:
         permission_catalog: Sequence[str] = (),
         scopes: RegisteredScopes | None = None,
         clock: Callable[[], datetime] | None = None,
+        registration_roles: Sequence[RegistrationRoleGrant] = (),
     ) -> None:
         if operator_key is not None and not 32 <= len(operator_key.get_secret_value()) <= 256:
             raise ValueError("operator key must be 32–256 characters")
         self.sessions, self.namespace, self.operator_key = sessions, namespace, operator_key
         self.scopes, self.clock = scopes, clock or (lambda: datetime.now(UTC))
         self.access = AccessService(sessions)
+        self.registration_roles = tuple(registration_roles)
         validate = TypeAdapter(PermissionName)
         self.catalog = frozenset(validate.validate_python(name) for name in permission_catalog) | {
             MANAGE_IDENTITIES
@@ -343,6 +346,13 @@ class AccessAdministrationService:
             if user is None:
                 raise DomainError("DEPENDENCY_UNAVAILABLE", "Identity user is missing", 503)
             changed = created
+            if created:
+                for grant in self.registration_roles:
+                    self._scope(session, grant.scope)
+                    role = repo.role(grant.role_name)
+                    if role is None:
+                        raise DomainError("VALIDATION_ERROR", "Registration role is missing", 422)
+                    repo.bind_role(user.id, role.id, grant.scope, True)
             mapping_changes: list[JsonValue] = []
             for mapping in item.mappings:
                 mapping_changed, detail = self._assign(session, repo, mapping, user.id)
@@ -356,6 +366,15 @@ class AccessAdministrationService:
                     "created": created,
                     "subject_fingerprint": subject_fingerprint(item.subject),
                     "mappings": mapping_changes,
+                    **(
+                        {
+                            "default_roles": [
+                                grant.model_dump(mode="json") for grant in self.registration_roles
+                            ]
+                        }
+                        if created and self.registration_roles
+                        else {}
+                    ),
                 },
             )
         if isinstance(item, DefineRole):

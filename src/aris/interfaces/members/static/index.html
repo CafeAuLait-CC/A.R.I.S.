@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ARIS · Members &amp; access</title>
+  <link rel="stylesheet" href="/internal/members/ui/assets/members.css">
+  <script src="/internal/members/ui/assets/members.js" defer></script>
+</head>
+<body>
+<main>
+  <header class="page-header"><div><p class="eyebrow">ARIS · Workspace</p><h1>Members &amp; access</h1><p class="subtitle">Manage your profile, members and resource statistics.</p></div><div id="account" hidden><span id="actor-name"></span><span id="actor-role" class="badge"></span><button id="sign-out" type="button" class="quiet">Sign out</button></div></header>
+  <section id="login-panel" class="panel login-panel" aria-labelledby="login-title">
+    <h2 id="login-title">Sign in</h2><p class="muted">Use your personal development credential.</p>
+    <form id="login-form"><label for="credential">Personal credential<input id="credential" type="password" autocomplete="current-password" required spellcheck="false"></label><label class="check"><input id="remember" type="checkbox" checked> Keep me signed in for 7 days</label><button id="sign-in" type="submit">Sign in</button></form>
+  </section>
+  <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+  <section id="workspace" hidden>
+    <nav class="page-nav" aria-label="Workspace"><button id="members-tab" type="button">Members</button><button id="profile-tab" type="button" class="quiet">Your profile</button><button id="general-tab" type="button" class="quiet">General statistics</button><a href="/internal/usage/ui" class="button-link">Usage statistics</a></nav>
+    <section id="members-panel" class="panel" aria-labelledby="members-title">
+      <div class="section-heading"><div><h2 id="members-title">Members</h2><p class="muted">New members receive the Member role. Access changes require review.</p></div><div class="toolbar"><button id="load-members" type="button" class="quiet">Load registered members</button><button id="load-slack" type="button" class="quiet" hidden>Load Slack members</button><button id="add-member" type="button">Add member</button></div></div>
+      <div class="table-controls"><label for="filter">Filter loaded members<input id="filter" type="search" placeholder="Name or Slack Member ID" autocomplete="off"></label><label for="reason">Reason for changes<input id="reason" maxlength="256" placeholder="Why are these members changing?" autocomplete="off"></label></div>
+      <label class="check"><input id="active-only" type="checkbox" checked> Active members only</label>
+      <div class="bulk-controls"><label class="check"><input id="select-visible" type="checkbox"> Select visible members</label><span id="selection-count">0 selected</span><button id="bulk-member" type="button" class="quiet">Set selected to Member</button><button id="bulk-admin" type="button" class="quiet">Set selected to Admin</button><button id="bulk-remove" type="button" class="quiet danger">Remove selected</button><button id="clear-selection" type="button" class="quiet">Clear selection</button><button id="review-selected" type="button">Review selected changes</button></div>
+      <p id="directory-snapshot" class="muted small"></p>
+      <div class="table-scroll"><table><thead id="members-head"></thead><tbody id="members-body"></tbody></table></div>
+      <div class="page-controls"><span id="draft-note" class="muted small">Edits stay in this page until you review and confirm them.</span><button id="resume-review" type="button" class="quiet" hidden>Resume request</button><button id="next-page" type="button" class="quiet" disabled>Load next page</button></div>
+      <p class="muted small">Removing a member disables login and keeps their reservation and usage history. Lowering a role removes old directory-admin/full-statistics bindings while retaining unrelated business roles.</p>
+    </section>
+    <section id="profile-panel" class="panel" aria-labelledby="profile-title" hidden>
+      <h2 id="profile-title">Your profile</h2><form id="profile-form"><div class="profile-fields"><label for="profile-name">Display name<input id="profile-name" maxlength="128" required></label><label for="profile-zone">Timezone<input id="profile-zone" maxlength="128" placeholder="America/Vancouver" required></label></div><p class="muted small">Profile updates cannot change your role or account status.</p><button type="submit">Review profile changes</button></form>
+    </section>
+    <section id="general-panel" class="panel" aria-labelledby="general-title" hidden>
+      <div class="section-heading"><div><h2 id="general-title">General statistics</h2><p class="muted">Hardware and recorded totals, without individual usage details.</p><p class="muted small">Recorded totals do not establish complete actual usage. Accounting is enabled separately from hardware collection.</p></div><button id="refresh-general" type="button">Refresh</button></div>
+      <div class="profile-fields"><label for="general-node">Node<select id="general-node"></select></label><label for="general-start">From<input id="general-start" type="date"></label><label for="general-end">Through<input id="general-end" type="date"></label></div><div id="general-data"></div>
+    </section>
+  </section>
+</main>
+<dialog id="review-dialog" aria-labelledby="review-title"><div class="dialog-header"><h2 id="review-title">Review changes</h2><button id="close-review" type="button" class="quiet">Close</button></div><div id="review-content" class="review-content"></div><p id="review-status" class="notice" role="status" aria-live="polite"></p><div class="dialog-actions"><button id="refresh-review" type="button" class="quiet">Refresh status</button><button id="withdraw-review" type="button" class="quiet">Withdraw</button><button id="confirm-review" type="button">Confirm changes</button></div></dialog>
+<dialog id="add-dialog" aria-labelledby="add-title"><div class="dialog-header"><h2 id="add-title">Add member</h2><button id="close-add" type="button" class="quiet">Close</button></div><form id="add-form"><label for="new-id">Slack Member ID<input id="new-id" pattern="[UW][A-Za-z0-9]+" placeholder="U0123456789" required></label><label for="new-name">Display name<input id="new-name" maxlength="128" required></label><label for="new-zone">Timezone<input id="new-zone" placeholder="America/Vancouver" required></label><p class="muted small">Verify the Member ID in Slack. The new member will receive the Member role after confirmation.</p><button type="submit">Add to selection</button></form></dialog>
+</body>
+</html>

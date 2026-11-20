@@ -62,11 +62,13 @@ class IdentityAdminSurface:
         node_ids: tuple[str, ...],
         limits: IdentityQueryLimits,
         observations: NodeUserObservationProvider | None = None,
+        *,
+        directory_command: str = "identity.map_users",
     ) -> None:
         DirectoryQuery(node_ids=node_ids)
         if directory.administration.namespace.provider != "slack":
             raise ValueError("identity roster requires the Slack namespace")
-        if not commands.gateway.definition("identity.map_users").requires_confirmation:
+        if not commands.gateway.definition(directory_command).requires_confirmation:
             raise ValueError("identity mapping requires confirmation")
         self.commands, self.directory, self.provider = commands, directory, provider
         self.node_ids, self.limits = node_ids, limits

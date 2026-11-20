@@ -2,6 +2,7 @@ from alembic import context
 
 from aris.core import audit, events  # noqa: F401
 from aris.core.access import models as access_models  # noqa: F401
+from aris.core.access import session_models as access_session_models  # noqa: F401
 from aris.core.commands import models as command_models  # noqa: F401
 from aris.core.config import Settings
 from aris.core.db import Base, build_engine

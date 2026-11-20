@@ -116,6 +116,7 @@ def count(sessions, model):
 def test_identity_ui_is_available_only_with_explicit_module_and_has_private_static_assets(
     identity_api, client
 ):
+    assert set(identity_api[1].commands.commands.commands) == {"identity.map_users"}
     assert client.get("/internal/identity/ui").status_code == 404
     app_client = identity_api[0]
     for path in ("/ui", "/ui/assets/admin.css", "/ui/assets/admin.js"):

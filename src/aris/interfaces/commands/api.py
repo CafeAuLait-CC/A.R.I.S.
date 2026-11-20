@@ -70,6 +70,8 @@ def request_key(request: Request) -> str:
 
 
 def authorization(request: Request) -> str | None:
+    if member := getattr(request.state, "member_authorization", None):
+        return str(member)
     values = request.headers.getlist("authorization")
     return values[0] if len(values) == 1 else None
 
