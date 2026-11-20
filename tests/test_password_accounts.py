@@ -99,6 +99,11 @@ def test_invitation_attempts_expiration_resend_and_unknown_user(accounts):
         "unregistered", "activate", peer="peer", request_id="unknown"
     )
     assert not sender.sent and unknown.message.startswith("If this username")
+    with pytest.raises(DomainError) as repeated_unknown:
+        service.request_invitation(
+            "unregistered", "activate", peer="peer", request_id="unknown-again"
+        )
+    assert repeated_unknown.value.status == 429
     data = invitation(service, sender)
     wrong = data.model_copy(
         update={

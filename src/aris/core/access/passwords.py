@@ -76,10 +76,10 @@ class PasswordAccountService:
         # No proxy headers: the trusted HTTP adapter supplies its direct peer.
         with self.sessions.begin() as session:
             repo = PasswordRepository(session)
-            for scope, seconds, limit in (
-                ("peer:" + peer, 60, 30),
-                ("account:" + username, 900, 10),
-            ):
+            windows = [("peer:" + peer, 60, 30), ("account:" + username, 900, 10)]
+            if action == "invitation-send":
+                windows.append(("resend:" + username, 60, 1))
+            for scope, seconds, limit in windows:
                 digest = hashlib.sha256((action + ":" + scope).encode()).hexdigest()
                 repo.take_rate_window(digest, now, seconds=seconds, limit=limit)
 

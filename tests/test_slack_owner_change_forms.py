@@ -121,7 +121,7 @@ def test_native_owner_action_ack_form_canonical_confirm_worker_and_replay(
     click(changes, actions(review)[CONFIRM_ACTION])
     assert changes[1].run_once("all")["commands"] is None
     assert submit(changes, form).status_code == 200
-    assert "has completed" in json.dumps(changes[2].updates[-1][1])
+    assert "saved successfully" in json.dumps(changes[2].updates[-1][1])
     with changes[3][2]() as session:
         record = session.get(CommandRecord, original_id)
         assert record.confirmation_expires_at == expiry and record.parameters == parameters

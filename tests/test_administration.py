@@ -738,8 +738,8 @@ def test_user_administration_composes_with_confirmed_idempotent_commands(admin_s
 
 
 def test_administration_history_refuses_destructive_downgrade(admin_state):
-    command.downgrade(Config("alembic.ini"), "0010")
     actor = initialized(admin_state)
+    command.downgrade(Config("alembic.ini"), "0010")
     with pytest.raises(RuntimeError, match="identity administration history"):
         command.downgrade(Config("alembic.ini"), "0009")
     with admin_state[1]() as session:

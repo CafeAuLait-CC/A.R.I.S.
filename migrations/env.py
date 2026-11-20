@@ -31,7 +31,19 @@ if context.is_offline_mode():
 else:
     engine = build_engine(Settings().database_url)
     with engine.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)
+        sqlite = connection.dialect.name == "sqlite"
+        if sqlite:
+            # pysqlite's legacy mode does not BEGIN for DDL. Make a failed
+            # multi-revision downgrade roll back added/dropped columns too.
+            connection.exec_driver_sql("BEGIN")
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            compare_type=True,
+            transactional_ddl=True,
+        )
         with context.begin_transaction():
             context.run_migrations()
+        if sqlite:
+            connection.commit()
     engine.dispose()

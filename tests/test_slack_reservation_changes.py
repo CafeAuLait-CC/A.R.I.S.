@@ -96,7 +96,7 @@ def test_changes_review_confirm_worker_and_replayed_body_preserve_original_inten
             == 2
         )
     assert change(changes, operation, reservation_id, end=end).status_code == 200
-    assert "has completed" in json.dumps(changes[2].updates[-1][1])
+    assert "saved successfully" in json.dumps(changes[2].updates[-1][1])
     assert count(state[2], CommandRecord) == 2
     with state[2]() as session:
         record = session.get(CommandRecord, original_id)

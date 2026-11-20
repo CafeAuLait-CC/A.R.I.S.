@@ -286,10 +286,7 @@
       }
       for(const group of groups.values()){content.append(el('h3',group.title));const list=el('ul');group.lines.forEach(line=>list.append(el('li',line)));content.append(list);}
     }
-    const visible=JSON.parse(JSON.stringify(parameters));delete visible.reason;
-    if(visible.profile)delete visible.profile.timezone;
-    visible.changes?.forEach(change=>{if(change.profile)delete change.profile.timezone;});
-    const details=el('details',undefined,'request-details');details.append(el('summary','Request details'),el('p','Request ID: '+intent.commandId,'muted small'),el('pre',JSON.stringify(visible,null,2)));content.append(details);
+
   }
   async function applySavedChanges(intent) {
     intent.needsRefresh=true;

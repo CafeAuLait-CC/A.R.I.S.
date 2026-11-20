@@ -109,6 +109,9 @@ def drafts(booking, settings, slack_settings):
     graph = build_m2_components(
         sessions, settings, slack_settings, cfg, clock=lambda: clock["now"], modal_publisher=modal
     )
+    # These admission tests intentionally run the worker after the HTTP reply.
+    # Automatic in-flight worker/result following has its own integration tests.
+    graph.slack_callbacks.follow_seconds = 0
     app = create_app(
         settings,
         slack_settings,
