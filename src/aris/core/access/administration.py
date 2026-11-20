@@ -434,10 +434,11 @@ class AccessAdministrationService:
                 },
             )
         assert isinstance(item, UpdateUser)
-        changed = (user.display_name, user.timezone, user.status) != (
+        changed = (user.display_name, user.timezone, user.status, user.email) != (
             item.profile.display_name,
             item.profile.timezone,
             item.status,
+            item.profile.email,
         )
         details = {
             "previous_status": user.status,
@@ -447,9 +448,11 @@ class AccessAdministrationService:
             "previous_name_sha256": hashlib.sha256(user.display_name.encode()).hexdigest(),
             "name_sha256": hashlib.sha256(item.profile.display_name.encode()).hexdigest(),
         }
-        user.display_name, user.timezone, user.status = (
+        details["email_changed"] = user.email != item.profile.email
+        user.display_name, user.timezone, user.status, user.email = (
             item.profile.display_name,
             item.profile.timezone,
             item.status,
+            item.profile.email,
         )
         return ChangeOutcome(type=item.type, entity_id=user.id, changed=changed, details=details)

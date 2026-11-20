@@ -22,6 +22,7 @@ class User(Base):
     display_name: Mapped[str] = mapped_column(String(128))
     status: Mapped[Literal["active", "suspended"]] = mapped_column(String(16))
     timezone: Mapped[str] = mapped_column(String(128))
+    email: Mapped[str | None] = mapped_column(String(254), nullable=True)
 
 
 class ExternalIdentity(Base):

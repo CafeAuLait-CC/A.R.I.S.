@@ -64,7 +64,12 @@ class AccessAdministrationRepository:
     ) -> tuple[DirectoryMember, ...]:
         statement = (
             select(
-                User.id, ExternalIdentity.external_id, User.display_name, User.timezone, User.status
+                User.id,
+                ExternalIdentity.external_id,
+                User.display_name,
+                User.timezone,
+                User.status,
+                User.email,
             )
             .join(ExternalIdentity, ExternalIdentity.user_id == User.id)
             .where(
@@ -83,7 +88,7 @@ class AccessAdministrationRepository:
             DirectoryMember(
                 user_id=row[0],
                 external_id=row[1],
-                profile=DirectoryProfile(display_name=row[2], timezone=row[3]),
+                profile=DirectoryProfile(display_name=row[2], timezone=row[3], email=row[5]),
                 status=row[4],
             )
             for row in rows
@@ -133,6 +138,7 @@ class AccessAdministrationRepository:
             display_name=profile.display_name,
             status="active",
             timezone=profile.timezone,
+            email=profile.email,
         )
         self.session.add(user)
         self.session.flush()

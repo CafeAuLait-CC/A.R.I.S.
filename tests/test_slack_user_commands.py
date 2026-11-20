@@ -16,6 +16,7 @@ from aris.core.commands.queue_schemas import DurableCommandContext
 from aris.core.commands.worker import CommandWorker
 from aris.interfaces.slack.client import SlackDeliveryError
 from aris.interfaces.slack.models import SlackHomeJob, SlackReceipt
+from aris.interfaces.slack.schemas import Interaction
 from aris.interfaces.slack.user_commands import (
     CONFIRM_ACTION,
     STATUS_ACTION,
@@ -61,7 +62,7 @@ def slack_commands(durable_state, settings, slack_settings):
     )
     gateway = UserCommandGateway(intake, ["profile.rename"], GATEWAY_LIMITS)
     modal = FakeModal(sessions)
-    adapter = SlackCommandAdapter(gateway, modal)
+    adapter = SlackCommandAdapter(gateway, modal, follow_seconds=0)
     app = create_app(settings, slack_settings, slack_commands=adapter)
     with TestClient(app, raise_server_exceptions=False) as client:
         yield client, intake, sessions, ids, action, clock, modal
@@ -135,13 +136,76 @@ def test_signed_confirmation_acks_persisted_queue_then_updates_modal_without_exe
     assert action.calls == 0 and modal.states == [["queued"]]
     assert record_counts(sessions) == (2, 1, 0, 0)
     text = json.dumps(modal.updates[-1][1])
-    assert "Confirmed and queued" in text and "completed" not in text
+    assert "Saving changes" in text and "successfully" not in text
     assert waiting.proof.get_secret_value() not in text and "private-trigger" not in text
     assert send(client, data).status_code == 200
     assert record_counts(sessions) == (2, 1, 0, 0)
     assert CommandWorker(intake, WORKER_LIMITS).run_once().state == "succeeded"
     assert send(client, data).status_code == 200 and action.calls == 1
-    assert "has completed" in json.dumps(modal.updates[-1][1])
+    assert "saved successfully" in json.dumps(modal.updates[-1][1])
+
+
+@pytest.mark.parametrize("fails", (False, True))
+def test_after_ack_tracks_real_worker_result_without_manual_refresh(slack_commands, fails):
+    _, intake, _, _, action, _, modal = slack_commands
+    action.fail = fails
+    waiting = pending(slack_commands)
+    data = payload(waiting)
+    ticks = [0.0]
+
+    def advance(seconds):
+        ticks[0] += seconds
+        assert CommandWorker(intake, WORKER_LIMITS).run_once().state == (
+            "failed" if fails else "succeeded"
+        )
+
+    adapter = SlackCommandAdapter(
+        UserCommandGateway(intake, ["profile.rename"], GATEWAY_LIMITS),
+        modal,
+        follow_seconds=2,
+        sleep=advance,
+        monotonic=lambda: ticks[0],
+    )
+    reply = adapter.interact(
+        b"signed fixture action", data, Interaction.model_validate(data), "automatic-result"
+    )
+    assert reply.payload == {} and not modal.updates and action.calls == 0
+    reply.after_ack()
+    assert action.calls == 1
+    assert "Saving changes" in json.dumps(modal.updates[0][1])
+    final = json.dumps(modal.updates[-1][1])
+    assert ("could not be saved" if fails else "saved successfully") in final
+    assert all(
+        marker not in final
+        for marker in ("Refresh", "Withdraw", "queued", "private-handler-detail")
+    )
+    assert modal.updates[-1][0].view_id == "V111"
+
+
+def test_bounded_automatic_wait_keeps_unknown_result_honest(slack_commands):
+    _, intake, _, _, action, _, modal = slack_commands
+    waiting = pending(slack_commands)
+    data = payload(waiting)
+    ticks = [0.0]
+
+    def advance(seconds):
+        ticks[0] += seconds
+
+    adapter = SlackCommandAdapter(
+        UserCommandGateway(intake, ["profile.rename"], GATEWAY_LIMITS),
+        modal,
+        follow_seconds=1,
+        sleep=advance,
+        monotonic=lambda: ticks[0],
+    )
+    reply = adapter.interact(
+        b"signed fixture action", data, Interaction.model_validate(data), "automatic-pending"
+    )
+    reply.after_ack()
+    assert action.calls == 0
+    final = json.dumps(modal.updates[-1][1])
+    assert "taking longer" in final and "Check result" in final
+    assert "successfully" not in final and "could not be saved" not in final
 
 
 @pytest.mark.parametrize(
@@ -226,7 +290,7 @@ def test_old_intent_after_permission_revocation_is_not_confirmed_but_can_be_with
     assert send(client, payload(waiting)).status_code == 200
     assert "not authorized" in json.dumps(modal.updates[-1][1])
     assert send(client, payload(waiting, action=WITHDRAW_ACTION)).status_code == 200
-    assert "unexecuted command was withdrawn" in json.dumps(modal.updates[-1][1])
+    assert "Cancelled. No changes were made." in json.dumps(modal.updates[-1][1])
     with sessions() as session:
         assert session.get(CommandRecord, str(waiting.command_id)).state == "cancelled"
     assert action.calls == 0

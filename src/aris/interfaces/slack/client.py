@@ -52,8 +52,16 @@ class SlackClient:
             payload["hash"] = handle.hash
         self._request("views.update", payload)
 
+    def send_direct_message(self, user_id: str, message: str) -> None:
+        self._request(
+            "chat.postMessage",
+            {"channel": user_id, "text": message, "unfurl_links": False, "unfurl_media": False},
+        )
+
     def _request(
-        self, method: Literal["views.publish", "views.open", "views.update"], body: dict[str, Any]
+        self,
+        method: Literal["views.publish", "views.open", "views.update", "chat.postMessage"],
+        body: dict[str, Any],
     ) -> dict[str, Any]:
         timeout = (
             httpx.Timeout(1.0, connect=0.5, write=0.5, pool=0.1)

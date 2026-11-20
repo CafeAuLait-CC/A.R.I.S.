@@ -15,6 +15,7 @@ from aris.core.access.directory import AccessDirectoryQueries
 from aris.core.access.guards import GuardedAccessService
 from aris.core.access.member_commands import EditOwnProfileCommand, ManageMembersCommand
 from aris.core.access.members import MemberAdministrationService
+from aris.core.access.passwords import InvitationSender, PasswordAccountService
 from aris.core.access.schemas import AccessContract, AccessScope, Identifier
 from aris.core.access.sessions import LoginSessionService, SessionBearerAuthenticator, secret_digest
 from aris.core.commands.gateway import UserCommandGateway
@@ -29,7 +30,9 @@ from aris.interfaces.commands.service import UserCommandSurface
 from aris.interfaces.identity.service import IdentityAdminSurface, IdentityQueryLimits
 from aris.interfaces.identity.slack_directory import SlackDirectoryClient, SlackDirectoryProvider
 from aris.interfaces.members.service import MemberPortalSurface
+from aris.interfaces.slack.client import SlackClient
 from aris.interfaces.slack.config import SlackSettings
+from aris.interfaces.slack.invitations import SlackInvitationSender
 from aris.interfaces.usage.activity_service import ActivityPreviewAccess, ActivityPreviewConfig
 from aris.interfaces.usage.service import UsageHistorySurface
 from aris.modules.lyra.activity_preview_service import ActivityPreviewService
@@ -170,6 +173,7 @@ def build_member_components(
     config: MemberRuntimeConfig,
     *,
     directory_provider: SlackDirectoryProvider | None = None,
+    invitation_sender: InvitationSender | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> MemberComponents:
     bindings = validate_member_configuration(settings, slack, config)
@@ -274,5 +278,17 @@ def build_member_components(
         config.node_ids,
         origin=config.origin,
         roster=roster,
+        accounts=PasswordAccountService(
+            sessions,
+            login,
+            config.confirmation_key,
+            invitation_sender
+            or (
+                SlackInvitationSender(SlackClient(slack), slack.team_id)
+                if slack.configured
+                else None
+            ),
+            clock=clock,
+        ),
     )
     return MemberComponents(portal=portal, worker=CommandWorker(intake, config.worker_limits))

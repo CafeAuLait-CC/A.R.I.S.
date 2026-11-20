@@ -5,11 +5,19 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 from fastapi import APIRouter, FastAPI, Request
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator, model_validator
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import HTMLResponse, JSONResponse, Response
 
+from aris.core.access.password_schemas import (
+    ActivatePasswordInput,
+    InvitationInput,
+    SetOwnPasswordInput,
+    Username,
+    normalize_username,
+)
 from aris.core.access.schemas import AccessContract
+from aris.core.access.sessions import SessionGrant
 from aris.core.contracts import DomainError, ErrorDetail, ErrorResponse
 from aris.interfaces.commands.api import authorization, bounded_input
 from aris.interfaces.identity.slack_directory import SlackRosterQuery
@@ -28,8 +36,24 @@ PAGE_HEADERS = {
 
 
 class LoginInput(AccessContract):
-    credential: SecretStr = Field(min_length=32, max_length=256, repr=False)
+    credential: SecretStr | None = Field(default=None, min_length=32, max_length=256, repr=False)
+    username: Username | None = None
+    password: SecretStr | None = Field(default=None, min_length=1, max_length=128, repr=False)
     remember: bool = Field(default=True, strict=True)
+
+    @field_validator("username", mode="before")
+    @classmethod
+    def username_normalized(cls, value: str | None) -> str | None:
+        return normalize_username(value) if value is not None else None
+
+    @model_validator(mode="after")
+    def single_proof(self) -> "LoginInput":
+        if not (
+            (self.credential is not None and self.username is None and self.password is None)
+            or (self.credential is None and self.username is not None and self.password is not None)
+        ):
+            raise ValueError("enter a username and password")
+        return self
 
 
 class PageInput(AccessContract):
@@ -77,10 +101,12 @@ def install_session_transport(app: FastAPI, surface: MemberPortalSurface) -> Non
                 if request.headers.getlist("authorization"):
                     raise DomainError("PERMISSION_DENIED", "Choose one authentication method", 401)
                 origin(request, surface.origin)
-                if (
-                    request.method not in ("GET", "HEAD", "OPTIONS")
-                    and request.url.path != "/internal/members/login"
-                ):
+                if request.method not in ("GET", "HEAD", "OPTIONS") and request.url.path not in {
+                    "/internal/members/login",
+                    "/internal/members/invitation",
+                    "/internal/members/register",
+                    "/internal/members/password-reset",
+                }:
                     tokens = request.headers.getlist("x-csrf-token")
                     if len(tokens) != 1:
                         raise DomainError("PERMISSION_DENIED", "The page token is required", 403)
@@ -106,19 +132,7 @@ def install_session_transport(app: FastAPI, surface: MemberPortalSurface) -> Non
 def build_router(surface: MemberPortalSurface) -> APIRouter:
     router = APIRouter(prefix="/internal/members", tags=["member-portal"])
 
-    @router.post("/login")
-    async def login(request: Request) -> JSONResponse:
-        if request.query_params:
-            raise DomainError("VALIDATION_ERROR", "Unexpected login query parameters", 422)
-        data = await bounded_input(request, LoginInput)
-        grant = await run_in_threadpool(
-            surface.login.login,
-            data.credential,
-            remember=data.remember,
-            request_id=request.state.request_id,
-        )
-        if previous := cookie(request):
-            await run_in_threadpool(surface.login.logout, previous)
+    def signed_in(grant: SessionGrant) -> JSONResponse:
         response = JSONResponse({"signed_in": True}, headers=PAGE_HEADERS)
         response.set_cookie(
             COOKIE,
@@ -130,6 +144,82 @@ def build_router(surface: MemberPortalSurface) -> APIRouter:
             samesite="strict",
         )
         return response
+
+    def peer(request: Request) -> str:
+        return request.client.host if request.client is not None else "unknown"
+
+    @router.post("/login")
+    async def login(request: Request) -> JSONResponse:
+        if request.query_params:
+            raise DomainError("VALIDATION_ERROR", "Unexpected login query parameters", 422)
+        data = await bounded_input(request, LoginInput)
+        if data.credential is not None:
+            grant = await run_in_threadpool(
+                surface.login.login,
+                data.credential,
+                remember=data.remember,
+                request_id=request.state.request_id,
+            )
+        else:
+            assert data.username is not None and data.password is not None
+            grant = await run_in_threadpool(
+                surface.accounts.login_password,
+                data.username,
+                data.password,
+                remember=data.remember,
+                peer=peer(request),
+                request_id=request.state.request_id,
+            )
+        if previous := cookie(request):
+            await run_in_threadpool(surface.login.logout, previous)
+        return signed_in(grant)
+
+    @router.post("/invitation")
+    async def invitation(request: Request) -> JSONResponse:
+        data = await bounded_input(request, InvitationInput)
+        result = await run_in_threadpool(
+            surface.accounts.request_invitation,
+            data.username,
+            data.purpose,
+            peer=peer(request),
+            request_id=request.state.request_id,
+        )
+        return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
+
+    @router.post("/register")
+    async def register(request: Request) -> JSONResponse:
+        data = await bounded_input(request, ActivatePasswordInput)
+        grant = await run_in_threadpool(
+            surface.accounts.activate,
+            data,
+            "activate",
+            peer=peer(request),
+            request_id=request.state.request_id,
+        )
+        return signed_in(grant)
+
+    @router.post("/password-reset")
+    async def reset_password(request: Request) -> JSONResponse:
+        data = await bounded_input(request, ActivatePasswordInput)
+        grant = await run_in_threadpool(
+            surface.accounts.activate,
+            data,
+            "reset",
+            peer=peer(request),
+            request_id=request.state.request_id,
+        )
+        return signed_in(grant)
+
+    @router.post("/password")
+    async def set_password(request: Request) -> JSONResponse:
+        data = await bounded_input(request, SetOwnPasswordInput)
+        raw = cookie(request)
+        if raw is None:
+            raise DomainError("PERMISSION_DENIED", "Sign in before setting your password", 401)
+        grant = await run_in_threadpool(
+            surface.accounts.set_own_password, raw, data, request_id=request.state.request_id
+        )
+        return signed_in(grant)
 
     @router.get("/session")
     async def session(request: Request) -> JSONResponse:
@@ -146,6 +236,9 @@ def build_router(surface: MemberPortalSurface) -> APIRouter:
                 "nodes": list(surface.node_ids),
                 "workspace_namespace": surface.members.administration.namespace.namespace,
                 "slack_roster_available": surface.roster_source is not None,
+                "account": (
+                    await run_in_threadpool(surface.accounts.summary, identity.user_id)
+                ).model_dump(mode="json"),
             },
             headers=PAGE_HEADERS,
         )

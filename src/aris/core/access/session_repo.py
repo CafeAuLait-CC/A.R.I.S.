@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from aris.core.access.admin_schemas import IdentityNamespace
 from aris.core.access.models import ExternalIdentity, User
+from aris.core.access.password_repo import PasswordRepository
 from aris.core.access.schemas import ExternalSubject
 from aris.core.access.session_models import LoginCredential, LoginSession
 
@@ -77,6 +78,9 @@ class LoginRepository:
             .values(revoked_at=now)
         )
         if credential:
+            account = PasswordRepository(self.session).user_account(user_id)
+            if account is not None:
+                account.challenge_version += 1
             stored = self.user_credential(user_id)
             if stored is None:
                 self.session.add(

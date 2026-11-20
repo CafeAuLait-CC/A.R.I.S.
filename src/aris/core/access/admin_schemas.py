@@ -28,7 +28,20 @@ class RegistrationRoleGrant(AccessContract):
 
 class DirectoryProfile(AccessContract):
     display_name: str = Field(min_length=1, max_length=128)
-    timezone: str = Field(min_length=1, max_length=128)
+    timezone: str = Field(default="UTC", min_length=1, max_length=128)
+    email: str | None = Field(default=None, max_length=254)
+
+    @field_validator("email")
+    @classmethod
+    def contact_email(cls, value: str | None) -> str | None:
+        import re
+
+        value = value.strip() if value is not None else None
+        if not value:
+            return None
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value):
+            raise ValueError("enter a valid email address")
+        return value
 
     @field_validator("display_name")
     @classmethod

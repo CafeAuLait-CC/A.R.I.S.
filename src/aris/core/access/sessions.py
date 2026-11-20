@@ -12,6 +12,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, sessionmaker
 
 from aris.core.access.admin_schemas import IdentityNamespace
+from aris.core.access.password_repo import PasswordRepository
 from aris.core.access.schemas import AccessContract, ExternalSubject, UserPrincipal
 from aris.core.access.service import AccessService
 from aris.core.access.session_models import LoginSession
@@ -46,7 +47,7 @@ class CurrentSession(AccessContract):
 
 
 def authentication_required() -> DomainError:
-    return DomainError("PERMISSION_DENIED", "Sign in with your personal credential", 401)
+    return DomainError("PERMISSION_DENIED", "Please sign in to continue", 401)
 
 
 class LoginSessionService:
@@ -99,6 +100,9 @@ class LoginSessionService:
                 stored = repo.credential(candidate)
                 generation = None
                 if stored is not None:
+                    account = PasswordRepository(session).user_account(stored.user_id)
+                    if account is not None and account.password_hash is not None:
+                        raise authentication_required()
                     if stored.disabled_at is not None or not hmac.compare_digest(
                         stored.token_digest, candidate
                     ):
@@ -127,45 +131,80 @@ class LoginSessionService:
                 principal = self.access.resolve_external_in_transaction(session, subject)
                 if principal is None:
                     raise authentication_required()
-                now = self.now()
-                token = secrets.token_urlsafe(32)
-                csrf = csrf_token(token)
-                seconds = 7 * 86400 if remember else 8 * 3600
-                expires = now + timedelta(seconds=seconds)
-                session.add(
-                    LoginSession(
-                        token_digest=secret_digest(token),
-                        user_id=identity.user_id,
-                        identity_id=identity.id,
-                        credential_generation=generation,
-                        credential_digest=candidate,
-                        csrf_digest=secret_digest(csrf),
-                        issued_at=now,
-                        expires_at=expires,
-                    )
-                )
-                session.add(
-                    AuditEntry(
-                        id=str(uuid4()),
-                        actor=str(principal.user_id),
-                        action="access.session.started",
-                        target="member-login",
-                        request_id=request_id or str(uuid4()),
-                        recorded_at=now,
-                        changes={"remember": remember, "expires_at": expires.isoformat()},
-                    )
-                )
-                session.flush()
-                return SessionGrant(
-                    token=token,
-                    csrf=csrf,
-                    principal=principal,
-                    subject=subject,
-                    expires_at=expires,
-                    max_age=seconds if remember else None,
+                return self.grant_in_transaction(
+                    session,
+                    subject,
+                    candidate,
+                    generation,
+                    remember=remember,
+                    request_id=request_id,
                 )
         except DBAPIError:
             raise DomainError("DEPENDENCY_UNAVAILABLE", "Login is unavailable", 503) from None
+
+    def grant_in_transaction(
+        self,
+        session: Session,
+        subject: ExternalSubject,
+        candidate: str,
+        generation: int | None,
+        *,
+        remember: bool,
+        request_id: str | None = None,
+    ) -> SessionGrant:
+        repo = LoginRepository(session)
+        identity = repo.identity(subject)
+        principal = self.access.resolve_external_in_transaction(session, subject)
+        if identity is None or principal is None:
+            raise authentication_required()
+        credential = repo.user_credential(identity.user_id)
+        if generation is None:
+            if self.legacy.get(candidate) != subject or credential is not None:
+                raise authentication_required()
+        elif (
+            credential is None
+            or credential.disabled_at is not None
+            or credential.generation != generation
+            or not hmac.compare_digest(credential.token_digest, candidate)
+        ):
+            raise authentication_required()
+        now = self.now()
+        token = secrets.token_urlsafe(32)
+        csrf = csrf_token(token)
+        seconds = 7 * 86400 if remember else 8 * 3600
+        expires = now + timedelta(seconds=seconds)
+        session.add(
+            LoginSession(
+                token_digest=secret_digest(token),
+                user_id=identity.user_id,
+                identity_id=identity.id,
+                credential_generation=generation,
+                credential_digest=candidate,
+                csrf_digest=secret_digest(csrf),
+                issued_at=now,
+                expires_at=expires,
+            )
+        )
+        session.add(
+            AuditEntry(
+                id=str(uuid4()),
+                actor=str(principal.user_id),
+                action="access.session.started",
+                target="member-login",
+                request_id=request_id or str(uuid4()),
+                recorded_at=now,
+                changes={"remember": remember, "expires_at": expires.isoformat()},
+            )
+        )
+        session.flush()
+        return SessionGrant(
+            token=token,
+            csrf=csrf,
+            principal=principal,
+            subject=subject,
+            expires_at=expires,
+            max_age=seconds if remember else None,
+        )
 
     def current(self, token: str | None, csrf: str | None = None) -> CurrentSession:
         raw = self._raw(token)

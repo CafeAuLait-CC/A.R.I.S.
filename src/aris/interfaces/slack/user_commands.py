@@ -1,8 +1,10 @@
 import hashlib
 import json
 import logging
+import time
 from collections.abc import Callable
 from functools import partial
+from threading import BoundedSemaphore
 from typing import Any, Literal, Protocol
 from uuid import UUID
 
@@ -27,6 +29,7 @@ COMMAND_PREFIX = "aris.command."
 CONFIRM_ACTION = COMMAND_PREFIX + "confirm"
 WITHDRAW_ACTION = COMMAND_PREFIX + "withdraw"
 STATUS_ACTION = COMMAND_PREFIX + "status"
+FOLLOW_SLOTS = BoundedSemaphore(8)
 
 
 class CommandReviewPresenter(Protocol):
@@ -41,56 +44,71 @@ class CommandModalSource(SlackPayload):
 
 
 def status_view(
-    command_id: UUID, outcome: CommandOutcome | None, error_code: str | None = None
+    command_id: UUID,
+    outcome: CommandOutcome | None,
+    error_code: str | None = None,
+    *,
+    recovery: bool = False,
 ) -> dict[str, Any]:
     if outcome is None:
         message = {
             "PERMISSION_DENIED": "This request is not authorized. No current result is available.",
             "COMMAND_ALREADY_FINISHED": (
-                "This command has already finished and cannot be withdrawn."
+                "This change has already finished and cannot be cancelled."
             ),
-        }.get(error_code or "", "The current result cannot be confirmed. Refresh this command.")
+        }.get(
+            error_code or "", "The result is temporarily unavailable. Please check again shortly."
+        )
     elif outcome.state == "queued":
         message = (
             "The execution deadline has passed. The final result is still being checked."
             if outcome.deadline_elapsed
-            else "Confirmed and queued. Waiting to run."
+            else "Saving changes…"
         )
     else:
         message = {
             "awaiting_confirmation": (
                 "Waiting for confirmation. Return to the original request to review it."
             ),
-            "succeeded": "This command has completed.",
+            "succeeded": "Changes saved successfully.",
             "expired": "The confirmation or execution deadline has passed.",
-            "cancelled": "The unexecuted command was withdrawn.",
-            "failed": "This command was not completed.",
+            "cancelled": "Cancelled. No changes were made.",
+            "failed": "The changes could not be saved. Please check the details and try again.",
         }[outcome.state]
-    actions = [
-        {
-            "type": "button",
-            "action_id": STATUS_ACTION,
-            "text": {"type": "plain_text", "text": "Refresh"},
-            "value": json.dumps({"command_id": str(command_id)}, separators=(",", ":")),
-        }
-    ]
-    if outcome is not None and outcome.state in {"queued", "awaiting_confirmation"}:
+    actions = []
+    if recovery:
+        if outcome is not None and outcome.state == "queued":
+            message = "Saving is taking longer than usual. Your changes are still being checked."
+        actions.append(
+            {
+                "type": "button",
+                "action_id": STATUS_ACTION,
+                "text": {"type": "plain_text", "text": "Check result"},
+                "value": json.dumps({"command_id": str(command_id)}, separators=(",", ":")),
+            }
+        )
+    if outcome is not None and outcome.state == "awaiting_confirmation":
         actions.append(
             {
                 "type": "button",
                 "action_id": WITHDRAW_ACTION,
-                "text": {"type": "plain_text", "text": "Withdraw request"},
+                "text": {"type": "plain_text", "text": "Cancel"},
                 "value": json.dumps({"command_id": str(command_id)}, separators=(",", ":")),
             }
         )
     return {
         "type": "modal",
         "callback_id": "aris.command.status",
-        "title": {"type": "plain_text", "text": "Command status"},
+        "title": {
+            "type": "plain_text",
+            "text": "Saving changes"
+            if outcome is not None and outcome.state == "queued"
+            else "Changes",
+        },
         "close": {"type": "plain_text", "text": "Close"},
         "blocks": [
             {"type": "section", "text": {"type": "plain_text", "text": message}},
-            {"type": "actions", "elements": actions},
+            *([{"type": "actions", "elements": actions}] if actions else []),
         ],
     }
 
@@ -103,9 +121,16 @@ class SlackCommandAdapter:
         gateway: UserCommandGateway,
         publisher: ModalPublisher,
         review_presenter: CommandReviewPresenter | None = None,
+        *,
+        follow_seconds: float = 60,
+        sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.gateway, self.publisher = gateway, publisher
         self.review_presenter = review_presenter
+        if not 0 <= follow_seconds <= 60:
+            raise ValueError("automatic Slack result tracking must be bounded to60 seconds")
+        self.follow_seconds, self.sleep, self.monotonic = follow_seconds, sleep, monotonic
 
     def validate_configuration(self, config: SlackSettings) -> None:
         namespace = self.gateway.intake.namespace
@@ -183,8 +208,68 @@ class SlackCommandAdapter:
         view = status_view(command_id, outcome, error_code)
         return SlackReply(
             {},
-            after_ack=partial(self._update, ModalHandle(source.id, source.hash), view, request_id),
+            after_ack=partial(
+                self._update_and_follow,
+                ModalHandle(source.id, source.hash),
+                view,
+                command_id,
+                outcome,
+                ExternalCommandActor(subject=context.subject, request_id=request_id),
+                request_id,
+            ),
         )
+
+    def _update_and_follow(
+        self,
+        handle: ModalHandle,
+        view: dict[str, Any],
+        command_id: UUID,
+        outcome: CommandOutcome | None,
+        context: ExternalCommandActor,
+        request_id: str,
+    ) -> None:
+        if not self._update(handle, view, request_id):
+            return
+        if outcome is None or outcome.state != "queued" or self.follow_seconds == 0:
+            return
+        if not FOLLOW_SLOTS.acquire(blocking=False):
+            self._update(
+                ModalHandle(handle.view_id),
+                status_view(command_id, outcome, recovery=True),
+                request_id,
+            )
+            return
+        try:
+            deadline = self.monotonic() + self.follow_seconds
+            delay = 0.25
+            while self.monotonic() < deadline:
+                self.sleep(min(delay, max(0, deadline - self.monotonic())))
+                delay = min(2, delay * 1.5)
+                try:
+                    # Read only: current signed owner/namespace and access are rechecked.
+                    review = self.gateway.review(context, command_id)
+                except DomainError as error:
+                    if error.code == "PERMISSION_DENIED":
+                        self._update(
+                            ModalHandle(handle.view_id),
+                            status_view(command_id, None, error.code),
+                            request_id,
+                        )
+                        return
+                    continue
+                outcome = review.outcome
+                if outcome.state != "queued":
+                    self._update(
+                        ModalHandle(handle.view_id), status_view(command_id, outcome), request_id
+                    )
+                    return
+            self._update(
+                ModalHandle(handle.view_id),
+                status_view(command_id, outcome, recovery=True),
+                request_id,
+            )
+        finally:
+            FOLLOW_SLOTS.release()
 
     def _review_update(
         self,
@@ -205,9 +290,10 @@ class SlackCommandAdapter:
             view = status_view(review.command_id, None)
         self._update(handle, view, request_id)
 
-    def _update(self, handle: ModalHandle, view: dict[str, Any], request_id: str) -> None:
+    def _update(self, handle: ModalHandle, view: dict[str, Any], request_id: str) -> bool:
         try:
             self.publisher.update_modal(handle, view)
+            return True
         except SlackDeliveryError as error:
             logger.warning(
                 "request_id=%s command_modal_update_failed code=%s", request_id, error.code
@@ -218,3 +304,4 @@ class SlackCommandAdapter:
                 request_id,
                 type(error).__name__,
             )
+        return False

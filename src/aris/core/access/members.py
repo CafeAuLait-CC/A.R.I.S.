@@ -32,6 +32,7 @@ from aris.core.access.member_schemas import (
     PortalIdentity,
     ProfileEditRequest,
 )
+from aris.core.access.password_repo import PasswordRepository
 from aris.core.access.schemas import AccessRequest, AccessScope, ExternalSubject
 from aris.core.access.session_models import LoginCredential
 from aris.core.access.session_repo import LoginRepository
@@ -93,8 +94,10 @@ class MemberAdministrationService:
             state = AccessAdministrationRepository(session).directory_snapshot()
             if state is None or not state[3]:
                 raise DomainError("DEPENDENCY_UNAVAILABLE", "Directory is unavailable", 503)
+            user = MemberRepository(session).user(principal.user_id)
             return PortalIdentity(
                 **principal.model_dump(),
+                email=user.email if user else None,
                 role=self._role(session, principal.user_id),
                 directory_revision=state[2],
                 role_policy=self.policy,
@@ -121,6 +124,7 @@ class MemberAdministrationService:
             all_bindings = repo.bindings_for(identifiers)
             administrators = repo.administrator_users(identifiers)
             credentials = LoginRepository(session).credentials_for(identifiers)
+            accounts = PasswordRepository(session).accounts_for(identifiers)
             privileged = repo.privileged_roles(self.privileged_permissions)
             result = []
             for user in users:
@@ -133,6 +137,15 @@ class MemberAdministrationService:
                 result.append(
                     MemberAccessSummary(
                         user_id=user,
+                        login_username=accounts[str(user)].username
+                        if str(user) in accounts
+                        else None,
+                        password_ready=bool(
+                            str(user) in accounts
+                            and accounts[str(user)].password_hash
+                            and credential
+                            and credential.disabled_at is None
+                        ),
                         role="admin" if str(user) in administrators else "member",
                         bindings=bindings,
                         revoked_when_member=tuple(
@@ -170,6 +183,7 @@ class MemberAdministrationService:
             repo, login = MemberRepository(session), LoginRepository(session)
             changes: list[DirectoryChange] = list(self.roles)
             credentials = []
+            username_changes: list[tuple[str, str]] = []
             disabled: set[str] = set()
             for item in request.changes:
                 if isinstance(item, RegisterIdentity):
@@ -210,6 +224,8 @@ class MemberAdministrationService:
                     credentials.append(item)
                     continue
                 assert isinstance(item, EditMember)
+                if item.login_username is not None:
+                    username_changes.append((str(item.user_id), item.login_username))
                 if item.role is not None:
                     previous = repo.bindings(user.id)
                     if previous != tuple(
@@ -257,7 +273,9 @@ class MemberAdministrationService:
                             user_id=item.user_id,
                             profile=item.profile
                             or DirectoryProfile(
-                                display_name=user.display_name, timezone=user.timezone
+                                display_name=user.display_name,
+                                timezone=user.timezone,
+                                email=user.email,
                             ),
                             status=("active" if item.active else "suspended")
                             if item.active is not None
@@ -287,6 +305,29 @@ class MemberAdministrationService:
                     expected_revision=request.expected_revision, changes=tuple(changes)
                 ),
             )
+            for item in request.changes:
+                if isinstance(item, RegisterIdentity) and item.login_username is not None:
+                    identity = login.identity(item.subject)
+                    if identity is None:
+                        raise DomainError(
+                            "CONFLICT", "Registered login identity is unavailable", 409
+                        )
+                    username_changes.append((identity.user_id, item.login_username))
+            account_outcomes = []
+            for user_id, username in username_changes:
+                if user_id in disabled:
+                    raise DomainError(
+                        "VALIDATION_ERROR", "Cannot enable login for a removed member", 422
+                    )
+                if PasswordRepository(session).reserve(user_id, username):
+                    account_outcomes.append(
+                        ChangeOutcome(
+                            type="reserve_login_username",
+                            entity_id=user_id,
+                            changed=True,
+                            details={"username": username},
+                        )
+                    )
             for user_id in disabled:
                 login.revoke_user(user_id, self.login.now(), credential=True)
             outcomes = []
@@ -307,7 +348,7 @@ class MemberAdministrationService:
                         details={"generation": generation},
                     )
                 )
-            if outcomes:
+            if outcomes or account_outcomes:
                 state.revision += 1
                 self.administration._emit(
                     session,
@@ -315,7 +356,7 @@ class MemberAdministrationService:
                     request_id=context.request_id,
                     operation_id=str(context.operation_id),
                     revision=state.revision,
-                    outcomes=tuple(outcomes),
+                    outcomes=tuple(outcomes + account_outcomes),
                     reason=context.reason,
                     changed=True,
                 )
@@ -324,6 +365,7 @@ class MemberAdministrationService:
                 "revision": state.revision,
                 "directory": result.model_dump(mode="json"),
                 "credentials_changed": len(outcomes),
+                "login_usernames_changed": len(account_outcomes),
             }
 
     def edit_profile_in_transaction(

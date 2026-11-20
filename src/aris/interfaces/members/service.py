@@ -9,6 +9,7 @@ from aris.core.access.directory import AccessDirectoryQueries
 from aris.core.access.directory_schemas import DirectoryPage, DirectoryQuery
 from aris.core.access.member_schemas import MemberAccessSummary, PortalIdentity
 from aris.core.access.members import MemberAdministrationService
+from aris.core.access.passwords import PasswordAccountService
 from aris.core.access.schemas import AccessContract, AccessRequest, AccessScope
 from aris.core.access.sessions import LoginSessionService, SessionBearerAuthenticator
 from aris.core.commands.schemas import ActorContext
@@ -75,9 +76,11 @@ class MemberPortalSurface:
         node_ids: tuple[str, ...],
         *,
         origin: str,
+        accounts: PasswordAccountService,
         roster: IdentityAdminSurface | None = None,
     ) -> None:
         self.members, self.authenticator, self.commands = members, authenticator, commands
+        self.accounts = accounts
         self.login: LoginSessionService = authenticator.service
         self.directory = AccessDirectoryQueries(members.administration)
         self.usage, self.general_usage, self.hardware = usage, general_usage, hardware
