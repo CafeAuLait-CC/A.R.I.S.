@@ -203,8 +203,14 @@ def build_router(service: UsageHistorySurface) -> APIRouter:
     @router.get("/ui", response_class=HTMLResponse)
     def page() -> HTMLResponse:
         html = (ASSETS / "index.html").read_text()
+        navigation = ""
         if getattr(service.authenticator, "browser_sessions", False):
             html = html.replace("<html ", '<html data-member-sessions="true" ', 1)
+            navigation = (
+                '<a id="portal-return" class="portal-return" href="/internal/members/ui">'
+                "Members &amp; profile</a>"
+            )
+        html = html.replace("<!-- member-portal-navigation -->", navigation, 1)
         return HTMLResponse(html, headers=PAGE_HEADERS)
 
     @router.get("/ui/assets/{name}")

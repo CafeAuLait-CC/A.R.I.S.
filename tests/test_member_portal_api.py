@@ -154,8 +154,13 @@ def test_browser_cookie_restores_without_reentering_credential_and_logout_revoke
         assert token not in response.text and ADMIN_TOKEN not in view.__repr__()
         assert client.get("/internal/members/ui").status_code == 200
         assert client.get("/internal/members/session").json()["actor"]["role"] == "admin"
-        assert client.get("/internal/usage/ui").status_code == 200
-        assert 'data-member-sessions="true"' in client.get("/internal/usage/ui").text
+        usage_page = client.get("/internal/usage/ui")
+        assert usage_page.status_code == 200
+        assert 'data-member-sessions="true"' in usage_page.text
+        heading = usage_page.text.split("</header>", 1)[0]
+        assert 'id="portal-return"' in heading
+        assert 'href="/internal/members/ui">Members &amp; profile</a>' in heading
+        assert 'id="connect-panel"' not in heading
         assert (
             post(client, "/internal/usage/session", None).json()["credential_mode"]
             == "member_session"

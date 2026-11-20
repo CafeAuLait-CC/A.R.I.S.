@@ -234,6 +234,10 @@ def test_authenticated_page_pagination_and_csv_keep_one_snapshot_during_new_post
     with TestClient(
         create_app(settings, SlackSettings(_env_file=None), usage_history=surface)
     ) as client:
+        usage_page = client.get("/internal/usage/ui")
+        assert usage_page.status_code == 200
+        assert 'id="portal-return"' not in usage_page.text
+        assert 'data-member-sessions="true"' not in usage_page.text
         headers = {"Authorization": "Bearer " + TOKEN}
         info = client.post("/internal/usage/session", headers=headers).json()
         assert info["actor"]["user_id"] == str(actor.actor_id)
