@@ -18,6 +18,7 @@ from aris.interfaces.usage.weekly_service import (
     weekly_plans,
     weekly_usage,
 )
+from aris.interfaces.web_paths import INTERNAL_PATHS, BrowserPaths
 
 ASSETS = Path(__file__).with_name("static")
 PAGE_HEADERS = {
@@ -29,12 +30,12 @@ PAGE_HEADERS = {
 }
 
 
-def build_router(service: UsageHistorySurface) -> APIRouter:
-    router = APIRouter(prefix="/internal/usage", tags=["recorded-usage"])
+def build_router(service: UsageHistorySurface, paths: BrowserPaths = INTERNAL_PATHS) -> APIRouter:
+    router = APIRouter(tags=["recorded-usage"])
 
     if service.activity is not None:
 
-        @router.post("/activity/query")
+        @router.post(paths.usage + "/activity/query")
         async def activity(request: Request) -> JSONResponse:
             if request.query_params:
                 raise DomainError("VALIDATION_ERROR", "Unexpected activity query parameters", 422)
@@ -44,9 +45,9 @@ def build_router(service: UsageHistorySurface) -> APIRouter:
             )
             return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
 
-    @router.post("/groups/query")
-    @router.post("/groups/report")
-    @router.post("/groups/csv")
+    @router.post(paths.usage + "/groups/query")
+    @router.post(paths.usage + "/groups/report")
+    @router.post(paths.usage + "/groups/csv")
     async def groups(request: Request) -> Response:
         if request.query_params:
             raise DomainError("VALIDATION_ERROR", "Unexpected selected-node query parameters", 422)
@@ -78,7 +79,7 @@ def build_router(service: UsageHistorySurface) -> APIRouter:
             )
         return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
 
-    @router.post("/weekly/plans")
+    @router.post(paths.usage + "/weekly/plans")
     async def plans(request: Request) -> JSONResponse:
         if request.query_params:
             raise DomainError("VALIDATION_ERROR", "Unexpected weekly plan query parameters", 422)
@@ -88,10 +89,10 @@ def build_router(service: UsageHistorySurface) -> APIRouter:
         )
         return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
 
-    @router.post("/weekly/query")
-    @router.post("/weekly/read")
-    @router.post("/weekly/report")
-    @router.post("/weekly/csv")
+    @router.post(paths.usage + "/weekly/query")
+    @router.post(paths.usage + "/weekly/read")
+    @router.post(paths.usage + "/weekly/report")
+    @router.post(paths.usage + "/weekly/csv")
     async def weekly(request: Request) -> Response:
         if request.query_params:
             raise DomainError("VALIDATION_ERROR", "Unexpected weekly report query parameters", 422)
@@ -126,8 +127,8 @@ def build_router(service: UsageHistorySurface) -> APIRouter:
             )
         return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
 
-    @router.post("/snapshots/query")
-    @router.post("/snapshots/read")
+    @router.post(paths.usage + "/snapshots/query")
+    @router.post(paths.usage + "/snapshots/read")
     async def snapshots(request: Request) -> JSONResponse:
         if request.query_params:
             raise DomainError(
@@ -143,7 +144,7 @@ def build_router(service: UsageHistorySurface) -> APIRouter:
         )
         return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
 
-    @router.post("/session")
+    @router.post(paths.usage + "/session")
     async def session(request: Request) -> JSONResponse:
         if request.query_params:
             raise DomainError("VALIDATION_ERROR", "Session request requires an empty body", 422)
@@ -153,7 +154,7 @@ def build_router(service: UsageHistorySurface) -> APIRouter:
         result = await run_in_threadpool(service.session, authorization(request))
         return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
 
-    @router.post("/query")
+    @router.post(paths.usage + "/query")
     async def query(request: Request) -> JSONResponse:
         if request.query_params:
             raise DomainError("VALIDATION_ERROR", "Unexpected usage query parameters", 422)
@@ -164,7 +165,7 @@ def build_router(service: UsageHistorySurface) -> APIRouter:
         assert not isinstance(result, bytes)
         return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
 
-    @router.post("/export")
+    @router.post(paths.usage + "/export")
     async def export(request: Request) -> Response:
         if request.query_params:
             raise DomainError("VALIDATION_ERROR", "Unexpected usage query parameters", 422)
@@ -182,7 +183,7 @@ def build_router(service: UsageHistorySurface) -> APIRouter:
             },
         )
 
-    @router.post("/report")
+    @router.post(paths.usage + "/report")
     async def report(request: Request) -> Response:
         if request.query_params:
             raise DomainError("VALIDATION_ERROR", "Unexpected usage query parameters", 422)
@@ -200,7 +201,7 @@ def build_router(service: UsageHistorySurface) -> APIRouter:
             },
         )
 
-    @router.get("/ui", response_class=HTMLResponse)
+    @router.get(paths.usage_page, response_class=HTMLResponse)
     def page() -> HTMLResponse:
         html = (ASSETS / "index.html").read_text()
         navigation = ""
@@ -211,9 +212,9 @@ def build_router(service: UsageHistorySurface) -> APIRouter:
                 "Members &amp; profile</a>"
             )
         html = html.replace("<!-- member-portal-navigation -->", navigation, 1)
-        return HTMLResponse(html, headers=PAGE_HEADERS)
+        return HTMLResponse(paths.render(html), headers=PAGE_HEADERS)
 
-    @router.get("/ui/assets/{name}")
+    @router.get(paths.usage_assets + "/{name}")
     def asset(
         name: Literal[
             "usage.js",
@@ -227,7 +228,7 @@ def build_router(service: UsageHistorySurface) -> APIRouter:
         ],
     ) -> Response:
         return Response(
-            (ASSETS / name).read_bytes(),
+            paths.render((ASSETS / name).read_text()),
             headers=PAGE_HEADERS,
             media_type="text/javascript" if name.endswith(".js") else "text/css",
         )

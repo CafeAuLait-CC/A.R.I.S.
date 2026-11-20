@@ -1,4 +1,4 @@
-"""Manual loopback development portal. Never migrates, enrolls, or grants on startup."""
+"""Manual loopback listener with optional public browser routes; no startup writes."""
 
 import argparse
 import json
@@ -6,11 +6,13 @@ import sys
 import time
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 import uvicorn
 from pydantic import Field, SecretStr, ValidationError
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
+from starlette.types import ASGIApp
 
 from aris.apps.api.main import create_app
 from aris.apps.composition.members import (
@@ -24,7 +26,9 @@ from aris.core.access.schemas import AccessContract
 from aris.core.config import Settings
 from aris.core.contracts import DomainError
 from aris.core.db import build_engine, check_database, session_factory
+from aris.interfaces.members.public import PublicPortalBoundary
 from aris.interfaces.slack.config import SlackSettings
+from aris.interfaces.web_paths import INTERNAL_PATHS, PUBLIC_PATHS
 
 
 class LocalMemberConfig(AccessContract):
@@ -60,7 +64,8 @@ def main(argv: list[str] | None = None) -> int:
     engine = None
     try:
         config = read_private(args.config, LocalMemberConfig)
-        if config.members.origin != f"http://127.0.0.1:{args.port}":
+        public = urlsplit(config.members.origin).scheme == "https"
+        if not public and config.members.origin != f"http://127.0.0.1:{args.port}":
             raise ValueError("local member origin must match the loopback listener")
         settings = config.settings()
         slack = (
@@ -83,6 +88,7 @@ def main(argv: list[str] | None = None) -> int:
                         ],
                         "autostart": False,
                         "cookie_authentication": True,
+                        "public_browser_routes": public,
                     }
                 )
             )
@@ -117,16 +123,22 @@ def main(argv: list[str] | None = None) -> int:
                 if args.once:
                     return 0
                 time.sleep(config.members.poll_seconds)
+        app: ASGIApp = create_app(
+            settings,
+            slack,
+            user_commands=components.portal.commands,
+            usage_history=components.portal.usage,
+            member_portal=components.portal,
+            member_paths=PUBLIC_PATHS if public else INTERNAL_PATHS,
+        )
+        if public:
+            app = PublicPortalBoundary(app, config.members.origin, args.port)
         uvicorn.run(
-            create_app(
-                settings,
-                slack,
-                user_commands=components.portal.commands,
-                usage_history=components.portal.usage,
-                member_portal=components.portal,
-            ),
+            app,
             host="127.0.0.1",
             port=args.port,
+            proxy_headers=True,
+            forwarded_allow_ips="127.0.0.1,::1",
             access_log=False,
             timeout_graceful_shutdown=5,
         )

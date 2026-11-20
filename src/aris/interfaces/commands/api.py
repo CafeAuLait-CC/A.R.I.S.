@@ -76,8 +76,13 @@ def authorization(request: Request) -> str | None:
     return values[0] if len(values) == 1 else None
 
 
-def build_router(service: UserCommandSurface) -> APIRouter:
-    router = APIRouter(prefix="/internal/commands", tags=["user-commands"])
+def build_router(
+    service: UserCommandSurface,
+    *,
+    prefix: str = "/internal/commands",
+    cancel_path: str = "withdraw",
+) -> APIRouter:
+    router = APIRouter(prefix=prefix, tags=["user-commands"])
 
     @router.post("")
     async def submit(request: Request) -> JSONResponse:
@@ -103,7 +108,7 @@ def build_router(service: UserCommandSurface) -> APIRouter:
         )
         return intake_response(result)
 
-    @router.post("/{command_id}/withdraw")
+    @router.post(f"/{{command_id}}/{cancel_path}")
     async def withdraw(command_id: UUID, request: Request) -> JSONResponse:
         # A withdrawal has no body fields that can redirect actor or target.
         payload = await bounded_input(request, AccessContract)

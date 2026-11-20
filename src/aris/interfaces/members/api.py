@@ -22,6 +22,7 @@ from aris.core.contracts import DomainError, ErrorDetail, ErrorResponse
 from aris.interfaces.commands.api import authorization, bounded_input
 from aris.interfaces.identity.slack_directory import SlackRosterQuery
 from aris.interfaces.members.service import GeneralQuery, MemberPortalSurface
+from aris.interfaces.web_paths import INTERNAL_PATHS, BrowserPaths
 
 COOKIE = "aris_member_session"
 COOKIE_PATH = "/internal"
@@ -88,12 +89,17 @@ def origin(request: Request, expected: str) -> None:
         raise DomainError("PERMISSION_DENIED", "Cross-origin requests are not allowed", 403)
 
 
-def install_session_transport(app: FastAPI, surface: MemberPortalSurface) -> None:
+def install_session_transport(
+    app: FastAPI, surface: MemberPortalSurface, paths: BrowserPaths = INTERNAL_PATHS
+) -> None:
     @app.middleware("http")
     async def member_session(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
-        if not request.url.path.startswith("/internal/"):
+        if not any(
+            request.url.path == prefix or request.url.path.startswith(prefix + "/")
+            for prefix in (paths.account, paths.commands, paths.usage)
+        ):
             return await call_next(request)
         try:
             raw = cookie(request)
@@ -102,17 +108,17 @@ def install_session_transport(app: FastAPI, surface: MemberPortalSurface) -> Non
                     raise DomainError("PERMISSION_DENIED", "Choose one authentication method", 401)
                 origin(request, surface.origin)
                 if request.method not in ("GET", "HEAD", "OPTIONS") and request.url.path not in {
-                    "/internal/members/login",
-                    "/internal/members/invitation",
-                    "/internal/members/register",
-                    "/internal/members/password-reset",
+                    paths.account + "/login",
+                    paths.account + "/invitation",
+                    paths.account + "/register",
+                    paths.account + "/password-reset",
                 }:
                     tokens = request.headers.getlist("x-csrf-token")
                     if len(tokens) != 1:
                         raise DomainError("PERMISSION_DENIED", "The page token is required", 403)
                     await run_in_threadpool(surface.login.current, raw, tokens[0])
                 request.state.member_authorization = "Bearer " + raw
-            elif request.url.path.startswith("/internal/members/") and request.method != "GET":
+            elif request.url.path.startswith(paths.account + "/") and request.method != "GET":
                 origin(request, surface.origin)
             return await call_next(request)
         except DomainError as error:
@@ -129,8 +135,8 @@ def install_session_transport(app: FastAPI, surface: MemberPortalSurface) -> Non
             )
 
 
-def build_router(surface: MemberPortalSurface) -> APIRouter:
-    router = APIRouter(prefix="/internal/members", tags=["member-portal"])
+def build_router(surface: MemberPortalSurface, paths: BrowserPaths = INTERNAL_PATHS) -> APIRouter:
+    router = APIRouter(tags=["member-portal"])
 
     def signed_in(grant: SessionGrant) -> JSONResponse:
         response = JSONResponse({"signed_in": True}, headers=PAGE_HEADERS)
@@ -138,7 +144,7 @@ def build_router(surface: MemberPortalSurface) -> APIRouter:
             COOKIE,
             grant.token.get_secret_value(),
             max_age=grant.max_age,
-            path=COOKIE_PATH,
+            path=paths.cookie,
             secure=urlsplit(surface.origin).scheme == "https",
             httponly=True,
             samesite="strict",
@@ -148,7 +154,7 @@ def build_router(surface: MemberPortalSurface) -> APIRouter:
     def peer(request: Request) -> str:
         return request.client.host if request.client is not None else "unknown"
 
-    @router.post("/login")
+    @router.post(paths.account + "/login")
     async def login(request: Request) -> JSONResponse:
         if request.query_params:
             raise DomainError("VALIDATION_ERROR", "Unexpected login query parameters", 422)
@@ -174,7 +180,7 @@ def build_router(surface: MemberPortalSurface) -> APIRouter:
             await run_in_threadpool(surface.login.logout, previous)
         return signed_in(grant)
 
-    @router.post("/invitation")
+    @router.post(paths.account + "/invitation")
     async def invitation(request: Request) -> JSONResponse:
         data = await bounded_input(request, InvitationInput)
         result = await run_in_threadpool(
@@ -186,7 +192,7 @@ def build_router(surface: MemberPortalSurface) -> APIRouter:
         )
         return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
 
-    @router.post("/register")
+    @router.post(paths.account + "/register")
     async def register(request: Request) -> JSONResponse:
         data = await bounded_input(request, ActivatePasswordInput)
         grant = await run_in_threadpool(
@@ -198,7 +204,7 @@ def build_router(surface: MemberPortalSurface) -> APIRouter:
         )
         return signed_in(grant)
 
-    @router.post("/password-reset")
+    @router.post(paths.account + "/password-reset")
     async def reset_password(request: Request) -> JSONResponse:
         data = await bounded_input(request, ActivatePasswordInput)
         grant = await run_in_threadpool(
@@ -210,7 +216,7 @@ def build_router(surface: MemberPortalSurface) -> APIRouter:
         )
         return signed_in(grant)
 
-    @router.post("/password")
+    @router.post(paths.account + "/password")
     async def set_password(request: Request) -> JSONResponse:
         data = await bounded_input(request, SetOwnPasswordInput)
         raw = cookie(request)
@@ -221,7 +227,7 @@ def build_router(surface: MemberPortalSurface) -> APIRouter:
         )
         return signed_in(grant)
 
-    @router.get("/session")
+    @router.get(paths.account + "/session")
     async def session(request: Request) -> JSONResponse:
         if request.query_params:
             raise DomainError("VALIDATION_ERROR", "Unexpected session query parameters", 422)
@@ -243,7 +249,7 @@ def build_router(surface: MemberPortalSurface) -> APIRouter:
             headers=PAGE_HEADERS,
         )
 
-    @router.post("/logout")
+    @router.post(paths.account + "/logout")
     async def logout(request: Request) -> JSONResponse:
         await bounded_input(request, AccessContract)
         await run_in_threadpool(
@@ -252,14 +258,14 @@ def build_router(surface: MemberPortalSurface) -> APIRouter:
         response = JSONResponse({"signed_out": True}, headers=PAGE_HEADERS)
         response.delete_cookie(
             COOKIE,
-            path=COOKIE_PATH,
+            path=paths.cookie,
             secure=urlsplit(surface.origin).scheme == "https",
             httponly=True,
             samesite="strict",
         )
         return response
 
-    @router.post("/directory")
+    @router.post(paths.account + "/directory")
     async def directory(request: Request) -> JSONResponse:
         data = await bounded_input(request, PageInput)
         result = await run_in_threadpool(
@@ -267,7 +273,7 @@ def build_router(surface: MemberPortalSurface) -> APIRouter:
         )
         return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
 
-    @router.post("/slack-members")
+    @router.post(paths.account + "/slack-members")
     async def roster(request: Request) -> JSONResponse:
         data = await bounded_input(request, SlackRosterQuery)
         result = await run_in_threadpool(
@@ -275,7 +281,7 @@ def build_router(surface: MemberPortalSurface) -> APIRouter:
         )
         return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
 
-    @router.post("/general")
+    @router.post(paths.account + "/general")
     async def general(request: Request) -> JSONResponse:
         data = await bounded_input(request, GeneralQuery)
         result = await run_in_threadpool(
@@ -283,14 +289,16 @@ def build_router(surface: MemberPortalSurface) -> APIRouter:
         )
         return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
 
-    @router.get("/ui", response_class=HTMLResponse)
+    @router.get(paths.home, response_class=HTMLResponse)
     def page() -> HTMLResponse:
-        return HTMLResponse((ASSETS / "index.html").read_text(), headers=PAGE_HEADERS)
+        html = paths.render((ASSETS / "index.html").read_text())
+        html = html.replace("<html ", f'<html data-cancel-path="{paths.cancel}" ', 1)
+        return HTMLResponse(html, headers=PAGE_HEADERS)
 
-    @router.get("/ui/assets/{name}")
+    @router.get(paths.member_assets + "/{name}")
     def asset(name: Literal["members.js", "members.css"]) -> Response:
         return Response(
-            (ASSETS / name).read_bytes(),
+            paths.render((ASSETS / name).read_text()),
             media_type="text/javascript" if name.endswith(".js") else "text/css",
             headers=PAGE_HEADERS,
         )

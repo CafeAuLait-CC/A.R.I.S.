@@ -46,6 +46,7 @@ from aris.interfaces.slack.usage import SlackUsageQueries
 from aris.interfaces.slack.user_commands import SlackCommandAdapter
 from aris.interfaces.usage.api import build_router as build_usage_router
 from aris.interfaces.usage.service import UsageHistorySurface
+from aris.interfaces.web_paths import INTERNAL_PATHS, BrowserPaths
 from aris.modules.vega.api import build_router
 from aris.modules.vega.live import LiveHub
 from aris.modules.vega.live_api import build_live_router
@@ -83,6 +84,7 @@ def create_app(
     policy_sources: PolicyReadSurface | None = None,
     slack_usage: SlackUsageQueries | None = None,
     member_portal: MemberPortalSurface | None = None,
+    member_paths: BrowserPaths = INTERNAL_PATHS,
     m2_config: M2RuntimeConfig | None = None,
 ) -> FastAPI:
     config = settings or Settings()
@@ -213,7 +215,11 @@ def create_app(
         )
     )
     if user_commands is not None:
-        app.include_router(build_command_router(user_commands))
+        app.include_router(
+            build_command_router(
+                user_commands, prefix=member_paths.commands, cancel_path=member_paths.cancel
+            )
+        )
     if user_reservations is not None:
         app.include_router(build_reservation_router(user_reservations))
     if identity_admin is not None:
@@ -221,7 +227,7 @@ def create_app(
     if notification_admin is not None:
         app.include_router(build_notification_router(notification_admin))
     if usage_history is not None:
-        app.include_router(build_usage_router(usage_history))
+        app.include_router(build_usage_router(usage_history, member_paths))
     if policy_sources is not None:
         app.include_router(build_policy_router(policy_sources))
     if member_portal is not None:
@@ -231,8 +237,8 @@ def create_app(
             or member_portal.usage is not usage_history
         ):
             raise ValueError("member portal requires matching explicit development surfaces")
-        app.include_router(build_member_router(member_portal))
-        install_session_transport(app, member_portal)
+        app.include_router(build_member_router(member_portal, member_paths))
+        install_session_transport(app, member_portal, member_paths)
 
     @app.middleware("http")
     async def request_context(
@@ -249,8 +255,8 @@ def create_app(
             or request.url.path.startswith("/internal/reservations/")
         )
         private_command = user_commands is not None and (
-            request.url.path == "/internal/commands"
-            or request.url.path.startswith("/internal/commands/")
+            request.url.path == member_paths.commands
+            or request.url.path.startswith(member_paths.commands + "/")
         )
         private_identity = identity_admin is not None and (
             request.url.path == "/internal/identity"
