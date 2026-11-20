@@ -5,4 +5,5 @@ cd "$ARIS_ROOT"
 ./scripts/uv run --locked --extra server ruff check src tests migrations scripts
 ./scripts/uv run --locked --extra server ruff format --check src tests migrations scripts
 ./scripts/uv run --locked --extra server mypy src
+./scripts/uv run --locked --extra server python scripts/check_frontend.py
 ./scripts/uv run --locked --extra server pytest -q

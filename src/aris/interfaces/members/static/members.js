@@ -343,7 +343,9 @@
         const operation=intent.pendingOperation;
         reviewView(operation.kind==='withdraw'?'cancelling':'saving',operation.kind==='withdraw'?'Cancelling…':savingText(intent),false,true);
         try {
-          await request('/internal/commands/'+encodeURIComponent(intent.commandId)'/' + (operation.kind==='withdraw'?(document.documentElement.dataset.cancelPath || 'withdraw'):operation.kind),operation.kind==='confirm'?{proof:operation.proof}:{},'POST',operation.kind==='confirm'?intent.confirmKey:intent.withdrawKey);
+          const action=operation.kind==='withdraw'?(document.documentElement.dataset.cancelPath || 'withdraw'):operation.kind;
+          const path='/internal/commands/'+encodeURIComponent(intent.commandId)+'/'+action;
+          await request(path,operation.kind==='confirm'?{proof:operation.proof}:{},'POST',operation.kind==='confirm'?intent.confirmKey:intent.withdrawKey);
         } catch(error) {
           intent.uncertain=true;
           reviewNotice('The result is not yet verified. '+error.message+' Checking this same request automatically.',true,true);
