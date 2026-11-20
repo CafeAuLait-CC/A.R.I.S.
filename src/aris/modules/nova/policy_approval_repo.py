@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from aris.core.contracts import DomainError
 from aris.core.time import utc
-from aris.modules.nova.models import PolicySourceApprovalRow
+from aris.modules.nova.models import PolicySourceApprovalRevocationRow, PolicySourceApprovalRow
 from aris.modules.nova.policy_approval_schemas import (
     MAX_APPROVAL_BYTES,
     PolicyApprovalListQuery,
@@ -97,6 +97,7 @@ class PolicyApprovalRepository:
         self, query: PolicyApprovalListQuery, source_id: UUID, owner_id: UUID
     ) -> tuple[PolicyApprovalSummary, ...]:
         row = PolicySourceApprovalRow
+        revoked = PolicySourceApprovalRevocationRow
         clauses = [row.source_id == str(source_id), row.approved_by == str(owner_id)]
         if query.before is not None:
             clauses.append(
@@ -118,7 +119,11 @@ class PolicyApprovalRepository:
                 row.approved_at,
                 row.expires_at,
                 row.fingerprint,
+                revoked.id.label("revocation_id"),
+                revoked.revoked_at,
+                revoked.fingerprint.label("revocation_fingerprint"),
             )
+            .outerjoin(revoked, revoked.approval_id == row.id)
             .where(*clauses)
             .order_by(row.approved_at.desc(), row.id.desc())
             .limit(query.limit + 1)
@@ -134,6 +139,9 @@ class PolicyApprovalRepository:
                     approved_at=utc(value.approved_at),
                     expires_at=utc(value.expires_at),
                     fingerprint=value.fingerprint,
+                    revocation_id=value.revocation_id,
+                    revoked_at=utc(value.revoked_at) if value.revoked_at is not None else None,
+                    revocation_fingerprint=value.revocation_fingerprint,
                 )
                 for value in values
             )

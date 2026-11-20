@@ -16,6 +16,7 @@ from aris.core.contracts import DomainError
 from aris.core.db import transaction_savepoint
 from aris.core.events import DomainEvent, OutboxEntry
 from aris.modules.nova.policy_approval_repo import PolicyApprovalRepository
+from aris.modules.nova.policy_approval_revocation_repo import PolicyApprovalRevocationRepository
 from aris.modules.nova.policy_approval_schemas import (
     ApprovedHistoricalSample,
     ApprovePolicySource,
@@ -26,6 +27,7 @@ from aris.modules.nova.policy_approval_schemas import (
     PolicyApprovalPreview,
     PolicyApprovalReceipt,
     PolicyApprovalRequirements,
+    PolicyApprovalStatus,
     StoredPolicyApproval,
     approval_fingerprint,
 )
@@ -62,8 +64,14 @@ class PolicyApprovalService:
                 "POLICY_APPROVAL_NOT_CONFIGURED", "Source approval is not configured", 503
             )
 
-    def _scope(
-        self, session: Session, actor: ActorContext, source: PolicySourceReference, fingerprint: str
+    def require_source_in_transaction(
+        self,
+        session: Session,
+        actor: ActorContext,
+        source: PolicySourceReference,
+        fingerprint: str,
+        *,
+        usage_evidence_required: bool = True,
     ) -> PolicySourceView:
         self.catalog.access.require_in_transaction(
             session,
@@ -76,7 +84,7 @@ class PolicyApprovalService:
         value = self.catalog.exact_in_transaction(session, actor, source)
         if value.fingerprint != fingerprint:
             raise DomainError("CONFLICT", "Approval source fingerprint differs", 409)
-        if value.source.spec.quota.scope == "per_node":
+        if usage_evidence_required and value.source.spec.quota.scope == "per_node":
             for node in value.source.spec.quota.node_limits:
                 self.catalog.access.require_in_transaction(
                     session,
@@ -91,7 +99,9 @@ class PolicyApprovalService:
     def _current(self, actor: ActorContext, request: ApprovePolicySource) -> PolicySourceView:
         with self.sessions() as db, db.no_autoflush:
             transaction_budget(db, 100, 1000, 3000)
-            return self._scope(db, actor, request.source, request.expected_source_fingerprint)
+            return self.require_source_in_transaction(
+                db, actor, request.source, request.expected_source_fingerprint
+            )
 
     def preview(self, actor: ActorContext, request: ApprovePolicySource) -> PolicyApprovalPreview:
         self.require_writer()
@@ -233,7 +243,7 @@ class PolicyApprovalService:
             and self.catalog._now() >= execution.execution_deadline
         ):
             raise DomainError("EXECUTION_EXPIRED", "Approval execution deadline passed", 409)
-        self._scope(
+        self.require_source_in_transaction(
             db,
             ActorContext(actor_id=execution.actor_id, request_id=execution.request_id),
             request.source,
@@ -344,15 +354,21 @@ class PolicyApprovalService:
         )
 
     def _read(
-        self, actor: ActorContext, query: PolicyApprovalListQuery | PolicyApprovalDetailQuery
-    ) -> PolicyApprovalPage | StoredPolicyApproval:
+        self,
+        actor: ActorContext,
+        query: PolicyApprovalListQuery | PolicyApprovalDetailQuery,
+        *,
+        include_status: bool = False,
+    ) -> PolicyApprovalPage | StoredPolicyApproval | PolicyApprovalStatus:
         started = monotonic()
         try:
             with self.sessions() as db, db.no_autoflush:
                 if db.get_bind().dialect.name == "postgresql":
                     db.execute(text("SET TRANSACTION READ ONLY"))
                 transaction_budget(db, 100, 1000, 3000)
-                source = self._scope(db, actor, query.source, query.expected_source_fingerprint)
+                source = self.require_source_in_transaction(
+                    db, actor, query.source, query.expected_source_fingerprint
+                )
                 repo = PolicyApprovalRepository(db)
                 if isinstance(query, PolicyApprovalListQuery):
                     values = repo.page(query, source.id, actor.actor_id)
@@ -363,16 +379,18 @@ class PolicyApprovalService:
                         raise DomainError(
                             "DEPENDENCY_UNAVAILABLE", "Approval directory differs", 503
                         )
-                    result: PolicyApprovalPage | StoredPolicyApproval = PolicyApprovalPage(
-                        query=query,
-                        as_of=self.catalog._now(),
-                        items=values[: query.limit],
-                        next_cursor=PolicyApprovalCursor(
-                            approved_at=values[query.limit - 1].approved_at,
-                            id=values[query.limit - 1].id,
+                    result: PolicyApprovalPage | StoredPolicyApproval | PolicyApprovalStatus = (
+                        PolicyApprovalPage(
+                            query=query,
+                            as_of=self.catalog._now(),
+                            items=values[: query.limit],
+                            next_cursor=PolicyApprovalCursor(
+                                approved_at=values[query.limit - 1].approved_at,
+                                id=values[query.limit - 1].id,
+                            )
+                            if len(values) > query.limit
+                            else None,
                         )
-                        if len(values) > query.limit
-                        else None,
                     )
                 else:
                     value = repo.get(query.id, actor.actor_id)
@@ -386,9 +404,28 @@ class PolicyApprovalService:
                     ) != (source.id, query.source, source.fingerprint, query.expected_fingerprint):
                         raise DomainError("CONFLICT", "Source approval reference differs", 409)
                     result = value
+                    if include_status:
+                        revocation = PolicyApprovalRevocationRepository(db).get(
+                            value.id, actor.actor_id
+                        )
+                        now = self.catalog._now()
+                        result = PolicyApprovalStatus(
+                            as_of=now,
+                            record=value,
+                            revocation=revocation,
+                            state="revoked"
+                            if revocation is not None
+                            else "expired"
+                            if now >= value.expires_at
+                            else "recorded",
+                            current_requirements_match=value.preview.requirements
+                            == self.requirements,
+                        )
             with self.sessions() as db, db.no_autoflush:
                 transaction_budget(db, 100, 1000, 3000)
-                self._scope(db, actor, query.source, query.expected_source_fingerprint)
+                self.require_source_in_transaction(
+                    db, actor, query.source, query.expected_source_fingerprint
+                )
             if monotonic() - started >= 3:
                 raise DomainError("RETRYABLE_DATABASE_ERROR", "Approval read budget exceeded", 503)
             return result
@@ -412,4 +449,13 @@ class PolicyApprovalService:
             actor, PolicyApprovalDetailQuery.model_validate(query.model_dump(mode="json"))
         )
         assert isinstance(result, StoredPolicyApproval)
+        return result
+
+    def status(self, actor: ActorContext, query: PolicyApprovalDetailQuery) -> PolicyApprovalStatus:
+        result = self._read(
+            actor,
+            PolicyApprovalDetailQuery.model_validate(query.model_dump(mode="json")),
+            include_status=True,
+        )
+        assert isinstance(result, PolicyApprovalStatus)
         return result

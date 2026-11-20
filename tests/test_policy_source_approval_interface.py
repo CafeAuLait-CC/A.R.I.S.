@@ -159,8 +159,8 @@ def test_approval_http_confirmation_worker_records_only_the_exact_individual_sou
         saved = client.post("/internal/policy/approvals/detail", headers=headers(), json=item)
         assert saved.status_code == 200 and saved.headers["cache-control"] == "no-store"
         assert (
-            saved.json()["preview"]["request"] == parameters
-            and not saved.json()["activation_performed"]
+            saved.json()["record"]["preview"]["request"] == parameters
+            and not saved.json()["record"]["activation_performed"]
         )
         assert (
             client.post(
@@ -173,6 +173,47 @@ def test_approval_http_confirmation_worker_records_only_the_exact_individual_sou
         assert client.get(path + "/review", headers=headers()).json()[
             "outcome"
         ] == result and counts(s) == (1, 1)
+        original_record = saved.json()["record"]
+        revoke = {
+            **choice,
+            "approval_id": receipt["id"],
+            "expected_approval_fingerprint": receipt["fingerprint"],
+            "reason": "Retract my synthetic approval",
+        }
+        preview = client.post(
+            "/internal/policy/approvals/revoke/validate", headers=headers(), json=revoke
+        )
+        assert preview.status_code == 200 and preview.json()["revocation_only"]
+        requested = client.post(
+            "/internal/commands",
+            headers=headers("revoke-http"),
+            json={"command": "policy.revoke_source_approval", "parameters": revoke},
+        ).json()["outcome"]
+        revoke_path = "/internal/commands/" + requested["command_id"]
+        checked = client.get(revoke_path + "/review", headers=headers()).json()
+        assert (
+            client.post(
+                revoke_path + "/confirm",
+                headers=headers("revoke-confirm"),
+                json={"proof": checked["outcome"]["proof"]},
+            ).json()["outcome"]["state"]
+            == "queued"
+        )
+        assert graph.worker.run_once().state == "succeeded"
+        status = client.post(
+            "/internal/policy/approvals/detail", headers=headers(), json=item
+        ).json()
+        assert status["state"] == "revoked" and status["record"] == original_record
+        assert (
+            status["revocation"]["request"]["reason"] == revoke["reason"]
+            and not status["publication_authorized"]
+        )
+        assert (
+            client.post("/internal/policy/approvals/query", headers=headers(), json=choice).json()[
+                "items"
+            ][0]["revocation_id"]
+            == status["revocation"]["id"]
+        )
         with surface.catalog.sessions.begin() as db:
             db.execute(delete(RoleBinding).where(RoleBinding.id == s.binding))
         current = client.post("/internal/policy/session", headers=headers()).json()

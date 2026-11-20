@@ -173,6 +173,16 @@ class PolicyApprovalSummary(PolicyContract):
     approved_at: AwareDatetime
     expires_at: AwareDatetime
     fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    revocation_id: UUID | None = None
+    revoked_at: AwareDatetime | None = None
+    revocation_fingerprint: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+
+    @model_validator(mode="after")
+    def coherent_revocation(self) -> "PolicyApprovalSummary":
+        fields = (self.revocation_id, self.revoked_at, self.revocation_fingerprint)
+        if any(item is None for item in fields) and not all(item is None for item in fields):
+            raise ValueError("approval revocation summary must include all original references")
+        return self
 
 
 class PolicyApprovalPage(PolicyContract):
@@ -193,3 +203,95 @@ class PolicyApprovalReceipt(PolicyContract):
     fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
     expires_at: AwareDatetime
     created: bool = Field(strict=True)
+
+
+class RevokePolicySourceApproval(PolicyContract):
+    source: PolicySourceReference
+    expected_source_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    approval_id: UUID
+    expected_approval_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    reason: str = Field(min_length=1, max_length=256, repr=False)
+
+    @field_validator("reason")
+    @classmethod
+    def explicit_reason(cls, value: str) -> str:
+        return RecordPolicyDraft.nonblank_reason(value)
+
+
+class PolicyApprovalRevocationPreview(PolicyContract):
+    revocation_only: Literal[True] = True
+    publication_performed: Literal[False] = False
+    request: RevokePolicySourceApproval
+    approved_at: AwareDatetime
+    expires_at: AwareDatetime
+    existing_revocation_id: UUID | None = None
+
+
+class StoredPolicyApprovalRevocation(PolicyContract):
+    revocation_only: Literal[True] = True
+    publication_performed: Literal[False] = False
+    id: UUID
+    request: RevokePolicySourceApproval
+    revoked_by: UUID
+    command_id: UUID
+    request_id: str = Field(min_length=1, max_length=128)
+    revoked_at: AwareDatetime
+    fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+    @field_validator("revoked_at")
+    @classmethod
+    def utc_time(cls, value: datetime) -> datetime:
+        return value.astimezone(UTC)
+
+    @model_validator(mode="after")
+    def original_fingerprint(self) -> "StoredPolicyApprovalRevocation":
+        if (
+            approval_fingerprint("revocation", self, exclude={"fingerprint"}) != self.fingerprint
+            or len(canonical_history_record(self).encode()) > 8192
+        ):
+            raise ValueError("approval revocation differs from its original statement")
+        return self
+
+
+class PolicyApprovalRevocationReceipt(PolicyContract):
+    revocation_only: Literal[True] = True
+    publication_performed: Literal[False] = False
+    id: UUID
+    source: PolicySourceReference
+    approval_id: UUID
+    fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    created: bool = Field(strict=True)
+
+
+class PolicyApprovalStatus(PolicyContract):
+    individual_record_only: Literal[True] = True
+    publication_authorized: Literal[False] = False
+    as_of: AwareDatetime
+    record: StoredPolicyApproval
+    revocation: StoredPolicyApprovalRevocation | None = None
+    state: Literal["recorded", "expired", "revoked"]
+    current_requirements_match: bool = Field(strict=True)
+
+    @model_validator(mode="after")
+    def coherent_state(self) -> "PolicyApprovalStatus":
+        expected = (
+            "revoked"
+            if self.revocation is not None
+            else "expired"
+            if self.as_of >= self.record.expires_at
+            else "recorded"
+        )
+        if expected != self.state or (
+            self.revocation is not None
+            and (
+                self.revocation.request.approval_id != self.record.id
+                or self.revocation.request.expected_approval_fingerprint != self.record.fingerprint
+                or self.revocation.request.source != self.record.preview.request.source
+                or self.revocation.request.expected_source_fingerprint
+                != self.record.preview.request.expected_source_fingerprint
+                or self.revocation.revoked_by != self.record.approved_by
+                or self.revocation.revoked_at < self.record.approved_at
+            )
+        ):
+            raise ValueError("approval status differs from its original approval and revocation")
+        return self

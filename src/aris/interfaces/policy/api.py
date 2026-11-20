@@ -26,6 +26,7 @@ from aris.modules.nova.policy_approval_schemas import (
     ApprovePolicySource,
     PolicyApprovalDetailQuery,
     PolicyApprovalListQuery,
+    RevokePolicySourceApproval,
 )
 from aris.modules.nova.policy_catalog_schemas import (
     PolicySourceComparisonQuery,
@@ -80,6 +81,21 @@ def build_router(service: PolicyReadSurface) -> APIRouter:
             service.draft_commands is not None
             and service.draft_commands.source_approval is not None
         ):
+
+            @router.post("/approvals/revoke/validate")
+            async def validate_approval_revocation(request: Request) -> JSONResponse:
+                if request.query_params:
+                    raise DomainError(
+                        "VALIDATION_ERROR", "Unexpected approval revocation parameters", 422
+                    )
+                query = await bounded_input(request, RevokePolicySourceApproval)
+                result = await run_in_threadpool(
+                    service.approval_revoke_validate,
+                    authorization(request),
+                    request.state.request_id,
+                    query,
+                )
+                return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
 
             @router.post("/approvals/validate")
             async def validate_approval(request: Request) -> JSONResponse:

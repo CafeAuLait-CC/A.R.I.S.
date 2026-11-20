@@ -16,6 +16,7 @@ from aris.interfaces.commands.service import UserCommandSurface
 from aris.modules.nova.policy_approval_schemas import (
     ApprovePolicySource,
     PolicyApprovalRequirements,
+    RevokePolicySourceApproval,
 )
 from aris.modules.nova.policy_catalog_schemas import PolicySourceReference, RecordPolicyDraft
 from aris.modules.nova.policy_feedback_schemas import RecordPolicyFeedback
@@ -80,6 +81,7 @@ class PolicyDraftCommandSurface(UserCommandSurface):
             allowed.add("policy.record_historical_review")
         if source_approval is not None:
             allowed.add("policy.approve_source")
+            allowed.add("policy.revoke_source_approval")
         if gateway.allowed != frozenset(allowed):
             raise ValueError("policy interface commands must match its explicit configuration")
         if not 1 <= len(policy_names) <= 32 or len(set(policy_names)) != len(policy_names):
@@ -102,6 +104,8 @@ class PolicyDraftCommandSurface(UserCommandSurface):
                 name = RecordPolicyFeedback.model_validate(request.parameters).source.name
             elif request.command == "policy.approve_source":
                 name = ApprovePolicySource.model_validate(request.parameters).source.name
+            elif request.command == "policy.revoke_source_approval":
+                name = RevokePolicySourceApproval.model_validate(request.parameters).source.name
             elif request.command == "policy.record_historical_review":
                 name = RecordHistoricalPolicyReview.model_validate(
                     request.parameters

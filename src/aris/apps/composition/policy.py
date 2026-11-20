@@ -19,7 +19,11 @@ from aris.core.commands.worker import CommandWorker
 from aris.interfaces.commands.auth import BoundSubjectTokens
 from aris.interfaces.policy.drafts import PolicyDraftCommandSurface
 from aris.modules.lyra.quota_evidence_service import HistoricalQuotaEvidenceService
-from aris.modules.nova.policy_approval_commands import ApprovePolicySourceCommand
+from aris.modules.nova.policy_approval_commands import (
+    ApprovePolicySourceCommand,
+    RevokePolicySourceApprovalCommand,
+)
+from aris.modules.nova.policy_approval_revocation_service import PolicyApprovalRevocationService
 from aris.modules.nova.policy_approval_schemas import PolicyApprovalRequirements
 from aris.modules.nova.policy_approval_service import PolicyApprovalService
 from aris.modules.nova.policy_catalog_commands import RecordPolicyDraftCommand
@@ -120,7 +124,11 @@ def build_policy_draft_components(
             catalog, historical_reviews, config.source_approval, writing_enabled=True
         )
         actions.append(ApprovePolicySourceCommand(approvals))
+        actions.append(
+            RevokePolicySourceApprovalCommand(PolicyApprovalRevocationService(approvals))
+        )
         allowed.append("policy.approve_source")
+        allowed.append("policy.revoke_source_approval")
     if config.feedback_writing:
         actions.append(
             RecordPolicyFeedbackCommand(PolicyFeedbackService(catalog, writing_enabled=True))

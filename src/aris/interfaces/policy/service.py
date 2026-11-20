@@ -42,6 +42,7 @@ from aris.interfaces.policy.materials import (
     PolicyMaterialValidation,
 )
 from aris.modules.lyra.quota_evidence_schemas import QuotaEvidencePage
+from aris.modules.nova.policy_approval_revocation_service import PolicyApprovalRevocationService
 from aris.modules.nova.policy_approval_schemas import (
     ApprovePolicySource,
     PolicyApprovalDetailQuery,
@@ -49,7 +50,9 @@ from aris.modules.nova.policy_approval_schemas import (
     PolicyApprovalPage,
     PolicyApprovalPreview,
     PolicyApprovalRequirements,
-    StoredPolicyApproval,
+    PolicyApprovalRevocationPreview,
+    PolicyApprovalStatus,
+    RevokePolicySourceApproval,
 )
 from aris.modules.nova.policy_approval_service import APPROVE_PERMISSION, PolicyApprovalService
 from aris.modules.nova.policy_catalog_schemas import (
@@ -270,7 +273,7 @@ class PolicyReadSurface:
 
     def approval_record(
         self, authorization: str | None, request_id: str, query: PolicyApprovalDetailQuery
-    ) -> StoredPolicyApproval:
+    ) -> PolicyApprovalStatus:
         approvals = self.approvals
         if approvals is None:
             raise DomainError(
@@ -279,7 +282,27 @@ class PolicyReadSurface:
         return self._run(
             authorization,
             request_id,
-            lambda session, actor, principal: approvals.get(actor, query),
+            lambda session, actor, principal: approvals.status(actor, query),
+            names=(query.source.name,),
+        )
+
+    def approval_revoke_validate(
+        self, authorization: str | None, request_id: str, query: RevokePolicySourceApproval
+    ) -> PolicyApprovalRevocationPreview:
+        approvals = self.approvals
+        if (
+            approvals is None
+            or self.draft_commands is None
+            or self.draft_commands.source_approval is None
+        ):
+            raise DomainError(
+                "POLICY_APPROVAL_NOT_CONFIGURED", "Source approval writing is not enabled", 503
+            )
+        revocations = PolicyApprovalRevocationService(approvals)
+        return self._run(
+            authorization,
+            request_id,
+            lambda session, actor, principal: revocations.preview(actor, query),
             names=(query.source.name,),
         )
 

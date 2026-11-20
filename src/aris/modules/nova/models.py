@@ -222,3 +222,27 @@ class PolicySourceApprovalRow(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     fingerprint: Mapped[str] = mapped_column(String(64))
     canonical_approval: Mapped[str] = mapped_column(Text)
+
+
+class PolicySourceApprovalRevocationRow(Base):
+    __tablename__ = "policy_source_approval_revocations"
+    __table_args__ = (
+        UniqueConstraint("command_id", name="uq_policy_approval_revocation_command"),
+        UniqueConstraint("approval_id", name="uq_policy_approval_revocation_target"),
+        CheckConstraint(
+            "length(fingerprint)=64 AND length(approval_fingerprint)=64 "
+            "AND length(source_fingerprint)=64 AND length(canonical_revocation)>0 "
+            "AND length(canonical_revocation)<=8192",
+            name="ck_policy_approval_revocation_size",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    approval_id: Mapped[str] = mapped_column(ForeignKey("policy_source_approvals.id"))
+    approval_fingerprint: Mapped[str] = mapped_column(String(64))
+    source_fingerprint: Mapped[str] = mapped_column(String(64))
+    revoked_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    command_id: Mapped[str] = mapped_column(ForeignKey("commands.id"))
+    request_id: Mapped[str] = mapped_column(String(128))
+    revoked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    canonical_revocation: Mapped[str] = mapped_column(Text)

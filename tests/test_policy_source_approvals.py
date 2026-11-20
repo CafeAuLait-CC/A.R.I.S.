@@ -1,4 +1,6 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from threading import Barrier
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -15,14 +17,19 @@ from aris.core.commands.service import CommandService
 from aris.core.contracts import DomainError
 from aris.core.db import SCHEMA_REVISION
 from aris.core.events import DomainEvent
-from aris.modules.nova.models import PolicySourceApprovalRow
-from aris.modules.nova.policy_approval_commands import ApprovePolicySourceCommand
+from aris.modules.nova.models import PolicySourceApprovalRevocationRow, PolicySourceApprovalRow
+from aris.modules.nova.policy_approval_commands import (
+    ApprovePolicySourceCommand,
+    RevokePolicySourceApprovalCommand,
+)
+from aris.modules.nova.policy_approval_revocation_service import PolicyApprovalRevocationService
 from aris.modules.nova.policy_approval_schemas import (
     ApprovalHistoryReference,
     ApprovePolicySource,
     PolicyApprovalDetailQuery,
     PolicyApprovalListQuery,
     PolicyApprovalRequirements,
+    RevokePolicySourceApproval,
 )
 from aris.modules.nova.policy_approval_service import PolicyApprovalService
 from aris.modules.nova.policy_catalog_commands import RecordPolicyDraftCommand
@@ -154,14 +161,21 @@ def approval(recording):
         ),
         reason="Approve this exact source using the fixed historical sample",
     )
+    revocations = PolicyApprovalRevocationService(service)
     bus = CommandService(
         s.service.sessions,
-        [ApprovePolicySourceCommand(service)],
+        [ApprovePolicySourceCommand(service), RevokePolicySourceApprovalCommand(revocations)],
         confirmation_key=SecretStr("fixture-human-source-approval-key-123456789"),
         clock=catalog.clock,
     )
     return SimpleNamespace(
-        recording=s, service=service, request=request, bus=bus, binding=binding, actor=actor
+        recording=s,
+        service=service,
+        revocations=revocations,
+        request=request,
+        bus=bus,
+        binding=binding,
+        actor=actor,
     )
 
 
@@ -186,6 +200,40 @@ def counts(s):
             select(func.count())
             .select_from(DomainEvent)
             .where(DomainEvent.event_type == "policy.source_approved")
+        )
+
+
+def revoke_request(s, result, reason="Retract my own source approval"):
+    return RevokePolicySourceApproval(
+        source=s.request.source,
+        expected_source_fingerprint=s.request.expected_source_fingerprint,
+        approval_id=result.result["id"],
+        expected_approval_fingerprint=result.result["fingerprint"],
+        reason=reason,
+    )
+
+
+def pending_revoke(s, request, *, key="revoke-approval-fixture"):
+    return s.bus.execute(
+        CommandContext(
+            actor_id=s.actor.actor_id, request_id="approval-retraction-test", idempotency_key=key
+        ),
+        CommandRequest(
+            command="policy.revoke_source_approval",
+            scope=GLOBAL_SCOPE,
+            parameters=request.model_dump(mode="json"),
+        ),
+    )
+
+
+def revocation_counts(s):
+    with s.service.sessions() as db:
+        return db.scalar(
+            select(func.count()).select_from(PolicySourceApprovalRevocationRow)
+        ), db.scalar(
+            select(func.count())
+            .select_from(DomainEvent)
+            .where(DomainEvent.event_type == "policy.source_approval_revoked")
         )
 
 
@@ -224,6 +272,8 @@ def test_human_approval_is_confirmed_exact_and_individual_without_activation(app
     assert s.service.list(s.actor, directory(s)).items[0].id == stored.id
     s.service.requirements = s.service.requirements.model_copy(update={"validity_seconds": 60})
     assert s.service.get(s.actor, selection(s, result)) == stored
+    assert s.service.status(s.actor, selection(s, result)).state == "recorded"
+    assert not s.service.status(s.actor, selection(s, result)).current_requirements_match
     with pytest.raises(DomainError, match="requirements"):
         s.service.preview(s.actor, s.request)
 
@@ -289,6 +339,96 @@ def test_approval_and_atomic_event_roll_back_and_changed_requirements_cannot_use
     assert counts(s) == (1, 1)
 
 
+def test_retraction_preserves_original_approval_after_expiry_method_change_and_lost_usage_access(
+    approval, monkeypatch
+):
+    s = approval
+    result = confirm(s, pending(s))
+    old = s.service.get(s.actor, selection(s, result))
+    now = old.expires_at + timedelta(seconds=1)
+    s.service.catalog.clock = lambda: now
+    s.bus.clock = lambda: now
+    s.service.history.configuration = s.service.history.configuration.model_copy(
+        update={"implementation_ref": "newer-history-method"}
+    )
+    s.service.requirements = s.service.requirements.model_copy(update={"validity_seconds": 60})
+    request = revoke_request(s, result)
+    with s.service.sessions.begin() as db:
+        permissions = tuple(
+            db.execute(
+                select(RolePermission.role_id, RolePermission.permission_id)
+                .join(Permission)
+                .where(Permission.name == "usage.read_own")
+            )
+        )
+        db.execute(
+            delete(RolePermission).where(
+                RolePermission.permission_id.in_(
+                    select(Permission.id).where(Permission.name == "usage.read_own")
+                )
+            )
+        )
+    assert s.revocations.preview(s.actor, request).existing_revocation_id is None
+    proposal = pending_revoke(s, request)
+    assert proposal.state == "awaiting_confirmation" and revocation_counts(s) == (0, 0)
+    original = s.revocations._event
+
+    def failed(db, execution, value):
+        original(db, execution, value)
+        raise RuntimeError("synthetic revocation before commit failure")
+
+    monkeypatch.setattr(s.revocations, "_event", failed)
+    with pytest.raises(RuntimeError):
+        confirm(s, proposal)
+    assert revocation_counts(s) == (0, 0)
+    monkeypatch.setattr(s.revocations, "_event", original)
+    revoked = confirm(s, proposal)
+    assert (
+        revoked.state == "succeeded"
+        and revoked.result["created"]
+        and revocation_counts(s) == (1, 1)
+    )
+    with s.service.sessions.begin() as db:
+        db.add_all(
+            RolePermission(role_id=role, permission_id=permission)
+            for role, permission in permissions
+        )
+    assert s.service.get(s.actor, selection(s, result)) == old
+    status = s.service.status(s.actor, selection(s, result))
+    assert (
+        status.state == "revoked"
+        and status.revocation.request == request
+        and not status.current_requirements_match
+    )
+    repeated = confirm(
+        s,
+        pending_revoke(
+            s,
+            request.model_copy(update={"reason": "Another reason must not overwrite the first"}),
+            key="independent-retraction",
+        ),
+    )
+    assert not repeated.result["created"] and repeated.result["id"] == revoked.result["id"]
+    assert s.service.status(
+        s.actor, selection(s, result)
+    ).revocation == status.revocation and revocation_counts(s) == (1, 1)
+    statements = [
+        "UPDATE policy_source_approval_revocations SET request_id='changed'",
+        "DELETE FROM policy_source_approval_revocations",
+    ]
+    if s.service.sessions.kw["bind"].dialect.name == "postgresql":
+        statements.append("TRUNCATE policy_source_approval_revocations")
+    for sql in statements:
+        with s.service.sessions.begin() as db, pytest.raises(DBAPIError):
+            db.execute(text(sql))
+    monkeypatch.setenv(
+        "ARIS_DATABASE_URL", s.service.sessions.kw["bind"].url.render_as_string(hide_password=False)
+    )
+    with pytest.raises(RuntimeError, match="source approval revocations prevent downgrade"):
+        command.downgrade(Config("alembic.ini"), "0032")
+    assert s.service.status(s.actor, selection(s, result)) == status
+
+
 def test_source_approval_is_immutable_and_nonempty_downgrade_is_refused(approval, monkeypatch):
     s = approval
     confirm(s, pending(s))
@@ -317,6 +457,18 @@ def test_postgresql_approval_directory_is_read_only_metadata_and_recovers_after_
     if engine.dialect.name != "postgresql":
         pytest.skip("requires PostgreSQL read-only and lock budget")
     result = confirm(s, pending(s))
+    request = revoke_request(s, result)
+    proposals = [pending_revoke(s, request, key="parallel-revoke-" + str(i)) for i in range(2)]
+    barrier = Barrier(2)
+
+    def retract(proposal):
+        barrier.wait(timeout=3)
+        return confirm(s, proposal)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(retract, proposals))
+    assert {item.result["created"] for item in outcomes} == {True, False}
+    assert len({item.result["id"] for item in outcomes}) == 1 and revocation_counts(s) == (1, 1)
     statements = []
 
     def observe(connection, cursor, statement, parameters, context, many):
@@ -327,7 +479,8 @@ def test_postgresql_approval_directory_is_read_only_metadata_and_recovers_after_
         page = s.service.list(s.actor, directory(s))
     finally:
         event.remove(engine, "before_cursor_execute", observe)
-    assert len(page.items) == 1 and any("SET TRANSACTION READ ONLY" in sql for sql in statements)
+    assert len(page.items) == 1 and page.items[0].revoked_at is not None
+    assert any("SET TRANSACTION READ ONLY" in sql for sql in statements)
     assert not any("canonical_approval" in sql or "agent_messages" in sql for sql in statements)
     with s.service.sessions() as blocker:
         blocker.execute(text("LOCK TABLE policy_source_approvals IN ACCESS EXCLUSIVE MODE"))

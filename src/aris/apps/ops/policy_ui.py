@@ -160,6 +160,7 @@ def main(argv: list[str] | None = None) -> int:
                     actions.append("policy.record_historical_review")
                 if config.draft_commands.source_approval is not None:
                     actions.append("policy.approve_source")
+                    actions.append("policy.revoke_source_approval")
                 summary["draft_commands"] = actions
             if config.historical_usage:
                 summary["historical_usage_nodes"] = [
