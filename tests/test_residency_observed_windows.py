@@ -130,6 +130,10 @@ def test_postgresql_observed_window_preserves_owner_work_budget_and_recovers_fro
     query = observed(state, ref, proofs[0])
     before = counts(state)
     app = verifier(state)
+    from tests.test_residency_layout_verification import reference, service
+
+    stable = service(state)
+    stable_request = reference(observed(state, ref, proofs[-1]), stable.method)
     with state.sessions() as db:
         db.execute(text("SET TRANSACTION READ ONLY"))
         db.execute(text("SET LOCAL transaction_timeout='2000ms'"))
@@ -143,6 +147,8 @@ def test_postgresql_observed_window_preserves_owner_work_budget_and_recovers_fro
         event.listen(db, "before_flush", reject)
         try:
             value = app.observed_window_in_transaction(db, query)
+            fixed = stable.verify_in_transaction(db, stable_request)
+            assert fixed.original.state_at_record == "closed"
             assert value.state_at_record == "open"
             assert db.scalar(text("SHOW statement_timeout")) == "750ms"
             assert db.scalar(text("SHOW transaction_timeout")) == "2s"
@@ -154,5 +160,9 @@ def test_postgresql_observed_window_preserves_owner_work_budget_and_recovers_fro
         with pytest.raises(DomainError) as error:
             app.observed_window(query)
         assert error.value.code == "RETRYABLE_DATABASE_ERROR"
+        with pytest.raises(DomainError) as stable_error:
+            stable.verify(stable_request)
+        assert stable_error.value.code == "RETRYABLE_DATABASE_ERROR"
     assert app.observed_window(query).fingerprint == value.fingerprint
+    assert stable.verify(stable_request).fingerprint == fixed.fingerprint
     assert counts(state) == before

@@ -663,6 +663,30 @@ def test_long_residency_pipeline_preserves_open_state_then_records_every_closed_
         item.platform_owner_id is None and not item.formal_usage_available
         for item in original_parts
     )
+    from aris.modules.lyra.residency_layout_verification_schemas import (
+        StableResidencyWindowReference,
+    )
+    from aris.modules.lyra.residency_layout_verification_service import StableResidencyWindowService
+
+    stable_reader = StableResidencyWindowService(
+        state.sessions, partition_service, method=layout_method, clock=state.now
+    )
+    stable_open_request = StableResidencyWindowReference(
+        **open_request.model_dump(exclude={"after_interval", "through_interval"}),
+        expected_method_fingerprint=layout_method.fingerprint,
+        window_index=6,
+    )
+    stable_open = stable_reader.verify(stable_open_request)
+    assert stable_open.original.candidate == original_parts[6].candidate
+    stable_tail_request = StableResidencyWindowReference(
+        **closed_window.request.model_dump(exclude={"after_interval", "through_interval"}),
+        expected_method_fingerprint=layout_method.fingerprint,
+        window_index=8,
+    )
+    stable_tail = stable_reader.verify(stable_tail_request)
+    assert stable_tail.original.candidate == original_parts[8].candidate
+    assert stable_tail.window.kind == "final_tail"
+    assert stable_tail.layout_key == stable_open.layout_key
     parent_reference = ResidencyPartitionReference(
         reference=reference(state, closed),
         closing_attestation_id=end.request.id,
