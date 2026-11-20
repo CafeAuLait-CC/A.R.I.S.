@@ -72,7 +72,7 @@
       render();notice(previous!==state.revision && state.edits.size?'Directory changed. Your edited fields are preserved; load any selected older pages before review.':'Select members, edit their details, then review the selection once.');
     } catch(error){notice(error.message,true);}finally{lock(false);}
   }
-  function edit(row, key, value) {if(!state.edits.has(row.id))state.edits.set(row.id,{});state.edits.get(row.id)[key]=value;state.selected.add(row.id);controls();}
+  function edit(row, key, value) {if(!state.edits.has(row.id))state.edits.set(row.id,{});state.edits.get(row.id)[key]=value;state.selected.add(row.id);document.querySelectorAll('#members-body tr').forEach(tr=>{if(tr.dataset.id===row.id)tr.querySelector('input[type="checkbox"]').checked=true;});controls();}
   function draft(row,key,fallback) {return state.edits.get(row.id)?.[key] ?? fallback;}
   function field(row,key,value,label) {const node=el('input');node.value=draft(row,key,value);node.setAttribute('aria-label',row.id+' '+label);node.autocomplete='off';node.addEventListener('input',()=>edit(row,key,node.value));return node;}
   function render() {
@@ -157,6 +157,41 @@
     if(change.type==='assign_node_user')return intent.users.has(change.user_id) && state.session.nodes.includes(change.node_id);
     return ['edit_member','issue_login_credential'].includes(change.type) && intent.users.has(change.user_id);
   }
+  function describeReview(content,intent,parameters) {
+    if(intent.command==='identity.edit_own_profile') {
+      content.append(el('h3','Your profile'),el('p','Display name: '+parameters.profile.display_name),el('p','Timezone: '+parameters.profile.timezone));
+    } else {
+      const groups=new Map();
+      for(const change of parameters.changes) {
+        const user=change.user_id || change.expected_user_id,row=change.type==='register_identity'?state.rows.get(change.subject.external_id):[...state.rows.values()].find(row=>row.user===user);
+        const key=change.type==='register_identity'?change.subject.external_id:user;
+        if(!groups.has(key))groups.set(key,{row,title:(change.type==='register_identity'?change.profile.display_name:row?.name || user)+(row?.id?' · '+row.id:''),lines:[]});
+        const lines=groups.get(key).lines;
+        if(change.type==='register_identity') {
+          lines.push('Register as Member.','Display name: '+change.profile.display_name,'Timezone: '+change.profile.timezone);
+          if(!change.mappings.length)lines.push('No Linux username links.');
+          change.mappings.forEach(link=>lines.push('Link '+link.node_id+' / '+link.os_username));
+        } else if(change.type==='edit_member') {
+          if(change.profile)lines.push('Display name: '+change.profile.display_name,'Timezone: '+change.profile.timezone);
+          if(change.active===false)lines.push('Remove this member and disable login. History is retained.');
+          if(change.active===true)lines.push('Restore this member. Issue a new credential if the old one was revoked.');
+          if(change.role) {
+            lines.push('Set role to '+(change.role==='admin'?'Admin':'Member')+'.');
+            const remove=change.role==='member'?(row?.revoked_when_member || []):change.previous_bindings.filter(binding=>['admin','member'].includes(binding.role_name));
+            remove.forEach(binding=>lines.push('Remove access binding: '+binding.role_name+' ('+binding.scope.type+' / '+binding.scope.id+')'));
+            const removed=new Set(remove.map(binding=>JSON.stringify(binding)));
+            const retained=change.previous_bindings.filter(binding=>!removed.has(JSON.stringify(binding)));
+            if(retained.length)lines.push('Keep business access: '+retained.map(binding=>binding.role_name+' ('+binding.scope.id+')').join(', '));
+          }
+        } else if(change.type==='assign_node_user')lines.push('Link '+change.node_id+' / '+change.os_username);
+        else if(change.type==='remove_node_user')lines.push('Unlink '+change.node_id+' / '+change.os_username);
+        else lines.push('Replace the personal login credential and sign out existing sessions. The new secret is shown only after success.');
+      }
+      for(const group of groups.values()){content.append(el('h3',group.title));const list=el('ul');group.lines.forEach(line=>list.append(el('li',line)));content.append(list);}
+      content.append(el('h3','Reason'),el('p',parameters.reason));
+    }
+    const details=el('details',undefined,'request-details');details.append(el('summary','Request details'),el('p','Request ID: '+intent.commandId,'muted small'),el('pre',JSON.stringify(parameters,null,2)));content.append(details);
+  }
   async function refreshReview() {
     const intent=state.intent;if(!intent || intent.busy)return;if(!intent.commandId)return submit();intent.busy=true;reviewLock();
     try {
@@ -164,7 +199,7 @@
       if(data.request.command!==intent.command || data.request.scope.type!=='global' || data.request.scope.id!=='*')throw new Error('The canonical request target differs.');
       const parameters=data.request.parameters;
       if(intent.command==='identity.manage_members' && !parameters.changes.every(change=>safeTarget(change,intent)))throw new Error('The canonical member selection differs.');
-      const content=$('review-content');content.replaceChildren();content.append(el('p','Request ID: '+intent.commandId,'muted small'),el('p',intent.command==='identity.edit_own_profile'?'Update your own display name and timezone.':intent.selected.length+' selected member(s).'),el('pre',JSON.stringify(parameters,null,2)));
+      const content=$('review-content');content.replaceChildren();describeReview(content,intent,parameters);
       if(intent.command==='identity.manage_members')content.append(el('p','New registrations receive Member access. Removing users disables login and preserves history. Role changes retain unrelated business bindings; a downgrade removes old directory-admin/full-statistics bindings.','muted small'));
       const outcome=data.outcome;reviewNotice('Request: '+outcome.state);$('withdraw-review').disabled=!['awaiting_confirmation','queued'].includes(outcome.state);
       if(outcome.state==='awaiting_confirmation'){const current=await request('/internal/members/session',undefined,'GET');if(current.actor.directory_revision!==parameters.expected_revision)reviewNotice('Directory changed. Withdraw, reload the selected members, and review again.',true);else{intent.proof=outcome.proof;$('confirm-review').disabled=false;reviewNotice('Nothing has changed yet. Confirm queues exactly this request.');}}

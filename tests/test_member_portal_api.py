@@ -16,6 +16,7 @@ from aris.core.access.admin_schemas import (
 from aris.core.access.member_repo import MemberRepository
 from aris.core.access.member_schemas import EditMember
 from aris.core.access.schemas import AccessRequest, AccessScope
+from aris.core.access.sessions import secret_digest
 from aris.core.contracts import DomainError
 from aris.interfaces.commands.auth import UserTokenBinding
 from aris.interfaces.members.api import COOKIE
@@ -23,6 +24,7 @@ from aris.interfaces.slack.config import SlackSettings
 from aris.interfaces.usage.activity_service import ActivityPreviewConfig
 from aris.modules.lyra.ledger_schemas import UsageLedgerHead
 from aris.modules.vega.models import Node
+from tests.conftest import AGENT_TOKEN
 from tests.test_historical_usage_facts import owner, ownership
 from tests.test_member_portal_core import (
     ADMIN_TOKEN,
@@ -235,6 +237,32 @@ def test_multiple_new_members_register_in_one_confirmed_batch_with_default_membe
         page = post(client, "/internal/members/directory", {}).json()
         assert len(page["directory"]["members"]) == 3
         assert [access["role"] for access in page["access"]].count("member") == 2
+        target = next(
+            row["user_id"] for row in page["directory"]["members"] if row["external_id"] == "UONE"
+        )
+        rejected = post(
+            client,
+            "/internal/commands",
+            {
+                "command": "identity.manage_members",
+                "parameters": {
+                    "expected_revision": page["directory"]["revision"],
+                    "reason": "Reject a node credential reused as a personal credential",
+                    "changes": [
+                        {
+                            "type": "issue_login_credential",
+                            "user_id": target,
+                            "token_digest": secret_digest(AGENT_TOKEN),
+                            "expected_generation": None,
+                        }
+                    ],
+                },
+            },
+            "reserved-node-credential",
+        )
+        assert (
+            rejected.status_code == 422 and rejected.json()["error"]["code"] == "VALIDATION_ERROR"
+        )
 
 
 def test_member_can_edit_only_their_profile_through_the_confirmed_command(portal):

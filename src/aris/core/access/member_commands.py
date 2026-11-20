@@ -2,7 +2,11 @@ from pydantic import JsonValue
 from sqlalchemy.orm import Session
 
 from aris.core.access.admin_schemas import AdministrationContext
-from aris.core.access.member_schemas import ManageMembersRequest, ProfileEditRequest
+from aris.core.access.member_schemas import (
+    IssueLoginCredential,
+    ManageMembersRequest,
+    ProfileEditRequest,
+)
 from aris.core.access.members import MemberAdministrationService
 from aris.core.access.schemas import AccessScope, UserPrincipal
 from aris.core.commands.schemas import CommandDefinition, CommandExecution
@@ -20,6 +24,12 @@ class ManageMembersCommand(DatabaseCommand):
 
     def normalize(self, parameters: dict[str, JsonValue]) -> dict[str, JsonValue]:
         request = ManageMembersRequest.model_validate(parameters)
+        if any(
+            isinstance(item, IssueLoginCredential)
+            and item.token_digest in self.members.login.reserved
+            for item in request.changes
+        ):
+            raise DomainError("VALIDATION_ERROR", "Login credential is not allowed", 422)
         if request.role_policy_fingerprint not in (None, self.members.policy_fingerprint):
             raise DomainError("CONFLICT", "Member role policy changed; review again", 409)
         return request.model_copy(

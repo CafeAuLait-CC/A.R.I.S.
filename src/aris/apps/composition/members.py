@@ -198,6 +198,7 @@ def build_member_components(
                 slack.bot_token,
                 slack.signing_secret,
                 config.confirmation_key,
+                *(value.token for value in settings.agent_credentials.values()),
             )
         ),
         clock=clock,

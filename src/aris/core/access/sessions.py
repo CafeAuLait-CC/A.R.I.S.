@@ -115,14 +115,10 @@ class LoginSessionService:
                         else None
                     )
                 else:
-                    subject = next(
-                        (
-                            subject
-                            for expected, subject in self.legacy.items()
-                            if hmac.compare_digest(expected, candidate)
-                        ),
-                        None,
-                    )
+                    subject = None
+                    for expected, bound_subject in self.legacy.items():
+                        if hmac.compare_digest(expected, candidate):
+                            subject = bound_subject
                     identity = repo.identity(subject) if subject is not None else None
                 if identity is None or subject is None:
                     raise authentication_required()

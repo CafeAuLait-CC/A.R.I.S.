@@ -25,6 +25,8 @@ td select { padding: 7px 9px; margin: 0 0 7px; font-size: 13px; }
 .general-card strong { display: block; margin-bottom: 7px; }
 .credential-output { width: 100%; font-family: ui-monospace,monospace; font-size: 13px; }
 pre { max-height: 300px; overflow: auto; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; padding: 14px; background: #f4f7fa; border-radius: 8px; }
+.request-details { margin-top: 20px; color: #697b91; font-size: 12px; }
+.request-details summary { cursor: pointer; margin-bottom: 10px; }
 @media (max-width:760px) { .page-header { align-items: flex-start; flex-wrap: wrap; } .panel { padding: 17px; } .bulk-controls { gap: 8px; } }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
