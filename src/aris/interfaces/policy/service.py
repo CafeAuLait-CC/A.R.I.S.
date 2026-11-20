@@ -42,6 +42,16 @@ from aris.interfaces.policy.materials import (
     PolicyMaterialValidation,
 )
 from aris.modules.lyra.quota_evidence_schemas import QuotaEvidencePage
+from aris.modules.nova.policy_approval_schemas import (
+    ApprovePolicySource,
+    PolicyApprovalDetailQuery,
+    PolicyApprovalListQuery,
+    PolicyApprovalPage,
+    PolicyApprovalPreview,
+    PolicyApprovalRequirements,
+    StoredPolicyApproval,
+)
+from aris.modules.nova.policy_approval_service import APPROVE_PERMISSION, PolicyApprovalService
 from aris.modules.nova.policy_catalog_schemas import (
     PolicySourceComparisonQuery,
     PolicySourceListQuery,
@@ -95,6 +105,11 @@ class PolicyCatalogSession(AccessContract):
     historical_review_implementation_ref: str | None = None
     historical_review_records_available: bool = False
     historical_review_writing_available: bool = False
+    source_approval_requirements: PolicyApprovalRequirements | None = None
+    source_approval_requirements_fingerprint: str | None = Field(
+        default=None, pattern=r"^[a-f0-9]{64}$"
+    )
+    source_approval_writing_available: bool = False
 
 
 class PolicyDetailInput(AccessContract):
@@ -116,6 +131,7 @@ class PolicyReadSurface:
         feedback: PolicyFeedbackService | None = None,
         historical_review_implementation_ref: str | None = None,
         historical_reviews: PolicyHistoricalReviewService | None = None,
+        approvals: PolicyApprovalService | None = None,
     ) -> None:
         if not 1 <= len(policy_names) <= 32 or len(set(policy_names)) != len(policy_names):
             raise ValueError("policy interface requires explicit unique policy names")
@@ -182,6 +198,90 @@ class PolicyReadSurface:
         ):
             raise ValueError("historical record writing requires its matching explicit reader")
         self.historical_reviews = historical_reviews
+        if approvals is not None and (
+            approvals.catalog is not catalog or approvals.history is not historical_reviews
+        ):
+            raise ValueError("source approval requires its matching historical reader")
+        if (
+            draft_commands is not None
+            and draft_commands.source_approval is not None
+            and (
+                approvals is None
+                or not approvals.writing_enabled
+                or approvals.requirements != draft_commands.source_approval
+            )
+        ):
+            raise ValueError(
+                "source approval writing requires its matching reader and requirements"
+            )
+        self.approvals = approvals
+
+    def _approval_requirements(
+        self, session: Session, actor: ActorContext
+    ) -> PolicyApprovalRequirements | None:
+        if self.approvals is None:
+            return None
+        try:
+            self.catalog.access.require_in_transaction(
+                session,
+                AccessRequest(
+                    user_id=actor.actor_id, permission=APPROVE_PERMISSION, scope=GLOBAL_SCOPE
+                ),
+            )
+        except DomainError as error:
+            if error.code != "PERMISSION_DENIED":
+                raise
+            return None
+        return self.approvals.requirements
+
+    def approval_validate(
+        self, authorization: str | None, request_id: str, query: ApprovePolicySource
+    ) -> PolicyApprovalPreview:
+        approvals = self.approvals
+        if (
+            approvals is None
+            or self.draft_commands is None
+            or self.draft_commands.source_approval is None
+        ):
+            raise DomainError(
+                "POLICY_APPROVAL_NOT_CONFIGURED", "Source approval writing is not enabled", 503
+            )
+        return self._run(
+            authorization,
+            request_id,
+            lambda session, actor, principal: approvals.preview(actor, query),
+            names=(query.source.name,),
+        )
+
+    def approval_records(
+        self, authorization: str | None, request_id: str, query: PolicyApprovalListQuery
+    ) -> PolicyApprovalPage:
+        approvals = self.approvals
+        if approvals is None:
+            raise DomainError(
+                "POLICY_APPROVAL_NOT_CONFIGURED", "Source approval reads are not enabled", 503
+            )
+        return self._run(
+            authorization,
+            request_id,
+            lambda session, actor, principal: approvals.list(actor, query),
+            names=(query.source.name,),
+        )
+
+    def approval_record(
+        self, authorization: str | None, request_id: str, query: PolicyApprovalDetailQuery
+    ) -> StoredPolicyApproval:
+        approvals = self.approvals
+        if approvals is None:
+            raise DomainError(
+                "POLICY_APPROVAL_NOT_CONFIGURED", "Source approval reads are not enabled", 503
+            )
+        return self._run(
+            authorization,
+            request_id,
+            lambda session, actor, principal: approvals.get(actor, query),
+            names=(query.source.name,),
+        )
 
     def _run(
         self,
@@ -246,6 +346,15 @@ class PolicyReadSurface:
                 historical_review_writing_available=self.historical_reviews is not None
                 and self.draft_commands is not None
                 and self.draft_commands.historical_review_storage is not None,
+                source_approval_requirements=(
+                    requirements := self._approval_requirements(session, actor)
+                ),
+                source_approval_requirements_fingerprint=requirements.fingerprint
+                if requirements is not None
+                else None,
+                source_approval_writing_available=requirements is not None
+                and self.draft_commands is not None
+                and self.draft_commands.source_approval is not None,
             ),
         )
 

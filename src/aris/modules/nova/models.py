@@ -192,3 +192,33 @@ class PolicyHistoricalReviewRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     fingerprint: Mapped[str] = mapped_column(String(64))
     canonical_record: Mapped[str] = mapped_column(Text)
+
+
+class PolicySourceApprovalRow(Base):
+    __tablename__ = "policy_source_approvals"
+    __table_args__ = (
+        UniqueConstraint("command_id", name="uq_policy_source_approval_command"),
+        CheckConstraint(
+            "source_version>0 AND expires_at>approved_at", name="ck_policy_source_approval_time"
+        ),
+        CheckConstraint(
+            "length(fingerprint)=64 AND length(source_fingerprint)=64 "
+            "AND length(requirements_fingerprint)=64 AND length(canonical_approval)>0 "
+            "AND length(canonical_approval)<=32768",
+            name="ck_policy_source_approval_size",
+        ),
+        Index("ix_policy_source_approval_source_time", "source_id", "approved_at", "id"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    source_id: Mapped[str] = mapped_column(ForeignKey("policy_versions.id"))
+    name: Mapped[str] = mapped_column(String(64))
+    source_version: Mapped[int] = mapped_column(Integer)
+    source_fingerprint: Mapped[str] = mapped_column(String(64))
+    requirements_fingerprint: Mapped[str] = mapped_column(String(64))
+    approved_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    command_id: Mapped[str] = mapped_column(ForeignKey("commands.id"))
+    request_id: Mapped[str] = mapped_column(String(128))
+    approved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    canonical_approval: Mapped[str] = mapped_column(Text)

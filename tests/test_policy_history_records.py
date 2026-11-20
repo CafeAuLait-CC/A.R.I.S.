@@ -11,6 +11,7 @@ from sqlalchemy.exc import DBAPIError
 from aris.core.commands.schemas import CommandContext, CommandRequest, ConfirmCommand
 from aris.core.commands.service import CommandService
 from aris.core.contracts import DomainError
+from aris.core.db import SCHEMA_REVISION
 from aris.core.events import DomainEvent
 from aris.interfaces.policy.history import PolicyHistoryReviewInput
 from aris.modules.nova.models import PolicyHistoricalReviewRow
@@ -232,7 +233,11 @@ def test_historical_records_reject_update_delete_and_nonempty_downgrade(recordin
     with pytest.raises(RuntimeError, match="historical review records prevent downgrade"):
         command.downgrade(Config("alembic.ini"), "0031")
     with s.service.sessions() as db:
-        assert db.scalar(text("SELECT version_num FROM alembic_version")) == "0032"
+        # PostgreSQL rolls back transactional DDL across later empty revisions.
+        # SQLite can already have removed those empty revisions before this guard.
+        assert db.scalar(text("SELECT version_num FROM alembic_version")) == (
+            SCHEMA_REVISION if dialect == "postgresql" else "0032"
+        )
     assert counts(s) == (1, 1)
 
 

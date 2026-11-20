@@ -28,6 +28,8 @@ from aris.interfaces.policy.history import PolicyHistoricalUsage
 from aris.interfaces.policy.service import PolicyReadSurface
 from aris.interfaces.slack.config import SlackSettings
 from aris.modules.lyra.quota_evidence_service import HistoricalQuotaEvidenceService
+from aris.modules.nova.policy_approval_schemas import PolicyApprovalRequirements
+from aris.modules.nova.policy_approval_service import PolicyApprovalService
 from aris.modules.nova.policy_catalog_service import PolicyCatalogService
 from aris.modules.nova.policy_feedback_service import PolicyFeedbackService
 from aris.modules.nova.policy_history_record_schemas import HistoricalReviewConfiguration
@@ -51,6 +53,7 @@ class LocalPolicyConfig(AccessContract):
     feedback_read: bool = Field(default=False, strict=True)
     historical_review_implementation_ref: ImplementationReference | None = None
     historical_review_records_read: bool = Field(default=False, strict=True)
+    approval_requirements: PolicyApprovalRequirements | None = None
 
     def settings(self) -> Settings:
         url = make_url(self.database_url.get_secret_value())
@@ -129,6 +132,17 @@ def main(argv: list[str] | None = None) -> int:
             )
         ):
             raise ValueError("saved historical review methods must match the read interface")
+        if config.approval_requirements is not None and (
+            not config.historical_review_records_read
+            or config.approval_requirements.history != review_configuration
+        ):
+            raise ValueError("source approvals require matching saved historical reads")
+        if (
+            config.draft_commands is not None
+            and config.draft_commands.source_approval is not None
+            and config.draft_commands.source_approval != config.approval_requirements
+        ):
+            raise ValueError("source approval writing and reading requirements must match")
         if args.validate:
             summary: dict[str, object] = {
                 "result": "valid",
@@ -144,6 +158,8 @@ def main(argv: list[str] | None = None) -> int:
                     actions.append("policy.record_feedback")
                 if config.draft_commands.historical_review_storage is not None:
                     actions.append("policy.record_historical_review")
+                if config.draft_commands.source_approval is not None:
+                    actions.append("policy.approve_source")
                 summary["draft_commands"] = actions
             if config.historical_usage:
                 summary["historical_usage_nodes"] = [
@@ -157,6 +173,8 @@ def main(argv: list[str] | None = None) -> int:
                 summary["historical_review_read"] = True
             if config.historical_review_records_read:
                 summary["historical_review_records_read"] = True
+            if config.approval_requirements is not None:
+                summary["source_approval_read"] = True
             if config.material_comparison_implementation_ref is not None:
                 summary["material_comparison_read"] = True
             print(json.dumps(summary))
@@ -218,6 +236,15 @@ def main(argv: list[str] | None = None) -> int:
             feedback=PolicyFeedbackService(catalog) if config.feedback_read else None,
             historical_review_implementation_ref=config.historical_review_implementation_ref,
             historical_reviews=historical_reviews,
+            approvals=(
+                drafts.approvals
+                if drafts is not None and drafts.approvals is not None
+                else PolicyApprovalService(
+                    catalog, historical_reviews, config.approval_requirements
+                )
+            )
+            if config.approval_requirements is not None and historical_reviews is not None
+            else None,
         )
         uvicorn.run(
             create_app(

@@ -22,6 +22,11 @@ from aris.interfaces.policy.materials import (
     PolicyMaterialTextInput,
 )
 from aris.interfaces.policy.service import PolicyDetailInput, PolicyReadSurface
+from aris.modules.nova.policy_approval_schemas import (
+    ApprovePolicySource,
+    PolicyApprovalDetailQuery,
+    PolicyApprovalListQuery,
+)
 from aris.modules.nova.policy_catalog_schemas import (
     PolicySourceComparisonQuery,
     PolicySourceListQuery,
@@ -48,6 +53,48 @@ PAGE_HEADERS = {
 
 def build_router(service: PolicyReadSurface) -> APIRouter:
     router = APIRouter(prefix="/internal/policy", tags=["policy-source-review"])
+
+    if service.approvals is not None:
+
+        @router.post("/approvals/query")
+        async def approvals(request: Request) -> JSONResponse:
+            if request.query_params:
+                raise DomainError("VALIDATION_ERROR", "Unexpected approval query parameters", 422)
+            query = await bounded_input(request, PolicyApprovalListQuery)
+            result = await run_in_threadpool(
+                service.approval_records, authorization(request), request.state.request_id, query
+            )
+            return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
+
+        @router.post("/approvals/detail")
+        async def approval_record(request: Request) -> JSONResponse:
+            if request.query_params:
+                raise DomainError("VALIDATION_ERROR", "Unexpected approval query parameters", 422)
+            query = await bounded_input(request, PolicyApprovalDetailQuery)
+            result = await run_in_threadpool(
+                service.approval_record, authorization(request), request.state.request_id, query
+            )
+            return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
+
+        if (
+            service.draft_commands is not None
+            and service.draft_commands.source_approval is not None
+        ):
+
+            @router.post("/approvals/validate")
+            async def validate_approval(request: Request) -> JSONResponse:
+                if request.query_params:
+                    raise DomainError(
+                        "VALIDATION_ERROR", "Unexpected approval query parameters", 422
+                    )
+                query = await bounded_input(request, ApprovePolicySource)
+                result = await run_in_threadpool(
+                    service.approval_validate,
+                    authorization(request),
+                    request.state.request_id,
+                    query,
+                )
+                return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
 
     if service.historical_reviews is not None:
 
@@ -339,6 +386,7 @@ def build_router(service: PolicyReadSurface) -> APIRouter:
             "policy-fields.js",
             "policy-history.js",
             "policy-history-records.js",
+            "policy-approvals.js",
             "policy-materials.js",
             "policy-material-save.js",
             "policy-material-compare.js",

@@ -13,6 +13,10 @@ from aris.core.commands.schemas import CommandOutcome, CommandReview, ConfirmCom
 from aris.core.contracts import DomainError
 from aris.interfaces.commands.auth import UserCommandAuthenticator
 from aris.interfaces.commands.service import UserCommandSurface
+from aris.modules.nova.policy_approval_schemas import (
+    ApprovePolicySource,
+    PolicyApprovalRequirements,
+)
 from aris.modules.nova.policy_catalog_schemas import PolicySourceReference, RecordPolicyDraft
 from aris.modules.nova.policy_feedback_schemas import RecordPolicyFeedback
 from aris.modules.nova.policy_history_record_schemas import (
@@ -64,6 +68,7 @@ class PolicyDraftCommandSurface(UserCommandSurface):
         material_implementation_ref: str | None = None,
         feedback_writing: bool = False,
         historical_review_storage: HistoricalReviewConfiguration | None = None,
+        source_approval: PolicyApprovalRequirements | None = None,
     ) -> None:
         super().__init__(gateway, authentication)
         allowed = {"policy.record_draft"}
@@ -73,6 +78,8 @@ class PolicyDraftCommandSurface(UserCommandSurface):
             allowed.add("policy.record_feedback")
         if historical_review_storage is not None:
             allowed.add("policy.record_historical_review")
+        if source_approval is not None:
+            allowed.add("policy.approve_source")
         if gateway.allowed != frozenset(allowed):
             raise ValueError("policy interface commands must match its explicit configuration")
         if not 1 <= len(policy_names) <= 32 or len(set(policy_names)) != len(policy_names):
@@ -83,6 +90,7 @@ class PolicyDraftCommandSurface(UserCommandSurface):
         self.material_implementation_ref = material_implementation_ref
         self.feedback_writing = feedback_writing
         self.historical_review_storage = historical_review_storage
+        self.source_approval = source_approval
 
     def _name(self, request: UserCommandInput) -> None:
         if request.command not in self.gateway.allowed:
@@ -92,6 +100,8 @@ class PolicyDraftCommandSurface(UserCommandSurface):
                 name = RecordPolicyDraft.model_validate(request.parameters).source.metadata.name
             elif request.command == "policy.record_feedback":
                 name = RecordPolicyFeedback.model_validate(request.parameters).source.name
+            elif request.command == "policy.approve_source":
+                name = ApprovePolicySource.model_validate(request.parameters).source.name
             elif request.command == "policy.record_historical_review":
                 name = RecordHistoricalPolicyReview.model_validate(
                     request.parameters

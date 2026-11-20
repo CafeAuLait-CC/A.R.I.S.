@@ -19,6 +19,9 @@ from aris.core.commands.worker import CommandWorker
 from aris.interfaces.commands.auth import BoundSubjectTokens
 from aris.interfaces.policy.drafts import PolicyDraftCommandSurface
 from aris.modules.lyra.quota_evidence_service import HistoricalQuotaEvidenceService
+from aris.modules.nova.policy_approval_commands import ApprovePolicySourceCommand
+from aris.modules.nova.policy_approval_schemas import PolicyApprovalRequirements
+from aris.modules.nova.policy_approval_service import PolicyApprovalService
 from aris.modules.nova.policy_catalog_commands import RecordPolicyDraftCommand
 from aris.modules.nova.policy_catalog_service import PolicyCatalogService
 from aris.modules.nova.policy_feedback_commands import RecordPolicyFeedbackCommand
@@ -44,11 +47,18 @@ class PolicyDraftRuntimeConfig(AccessContract):
     review_material_implementation_ref: ImplementationReference | None = None
     feedback_writing: bool = Field(default=False, strict=True)
     historical_review_storage: HistoricalReviewConfiguration | None = None
+    source_approval: PolicyApprovalRequirements | None = None
 
     @model_validator(mode="after")
     def explicit_workspace(self) -> "PolicyDraftRuntimeConfig":
         if self.namespace.provider != "slack":
             raise ValueError("the development draft interface requires one Slack workspace")
+        if (
+            self.source_approval is not None
+            and self.historical_review_storage is not None
+            and self.source_approval.history != self.historical_review_storage
+        ):
+            raise ValueError("source approval and saved historical review methods must match")
         return self
 
 
@@ -74,6 +84,7 @@ class PolicyDraftComponents:
     user_api: PolicyDraftCommandSurface
     worker: CommandWorker
     historical_reviews: PolicyHistoricalReviewService | None = None
+    approvals: PolicyApprovalService | None = None
 
 
 def build_policy_draft_components(
@@ -88,15 +99,28 @@ def build_policy_draft_components(
     actions: list[DatabaseCommand] = [RecordPolicyDraftCommand(catalog)]
     allowed = ["policy.record_draft"]
     historical_reviews = None
-    if config.historical_review_storage is not None:
+    history_configuration = config.historical_review_storage or (
+        config.source_approval.history if config.source_approval is not None else None
+    )
+    if history_configuration is not None:
         historical_reviews = PolicyHistoricalReviewService(
             catalog,
             HistoricalQuotaAssessmentService(catalog, HistoricalQuotaEvidenceService(sessions)),
-            config.historical_review_storage,
-            writing_enabled=True,
+            history_configuration,
+            writing_enabled=config.historical_review_storage is not None,
         )
+    if config.historical_review_storage is not None:
+        assert historical_reviews is not None
         actions.append(RecordHistoricalPolicyReviewCommand(historical_reviews))
         allowed.append("policy.record_historical_review")
+    approvals = None
+    if config.source_approval is not None:
+        assert historical_reviews is not None
+        approvals = PolicyApprovalService(
+            catalog, historical_reviews, config.source_approval, writing_enabled=True
+        )
+        actions.append(ApprovePolicySourceCommand(approvals))
+        allowed.append("policy.approve_source")
     if config.feedback_writing:
         actions.append(
             RecordPolicyFeedbackCommand(PolicyFeedbackService(catalog, writing_enabled=True))
@@ -133,7 +157,9 @@ def build_policy_draft_components(
             material_implementation_ref=config.review_material_implementation_ref,
             feedback_writing=config.feedback_writing,
             historical_review_storage=config.historical_review_storage,
+            source_approval=config.source_approval,
         ),
         worker=CommandWorker(intake, config.worker_limits),
         historical_reviews=historical_reviews,
+        approvals=approvals,
     )
