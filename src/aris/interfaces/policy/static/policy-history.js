@@ -1,8 +1,8 @@
 "use strict";
 window.ARISPolicyHistory = ({$,text,request,run,formatDate,quota}) => {
-  let configured=[],source=null,windows=[],next=null,base=null,locked=false;
+  let configured=[],source=null,windows=[],next=null,base=null,locked=false,implementation=null,reportInput=null;
   const panel=$('history-panel');
-  function clearResult(){ $('history-result').hidden=true;$('history-result').replaceChildren(); }
+  function clearResult(){ $('history-result').hidden=true;$('history-result').replaceChildren();$('history-evidence').hidden=true;$('history-evidence').replaceChildren();reportInput=null;$('history-report').disabled=true; }
   function clearWindows(){windows=[];next=null;base=null;$('history-window').replaceChildren();$('history-note').textContent='';$('history-selected').textContent='';clearResult();controls();}
   function controls(){
     const usable=source?.source.spec.quota.scope==='per_node' && $('history-node').options.length>0;
@@ -12,6 +12,9 @@ window.ARISPolicyHistory = ({$,text,request,run,formatDate,quota}) => {
     for(const el of panel.querySelectorAll('input,select,button'))el.disabled=locked || !usable;
     $('history-window').disabled=locked || windows.length===0;
     $('history-assess').disabled=locked || windows.length===0;
+    $('history-review-actions').hidden=!implementation;
+    $('history-review').disabled=locked || !usable || windows.length===0 || !implementation;
+    $('history-report').disabled=locked || !reportInput;
     $('history-more').hidden=next===null || windows.length>=128;
   }
   function showSource(view){
@@ -63,22 +66,50 @@ window.ARISPolicyHistory = ({$,text,request,run,formatDate,quota}) => {
     const proof=text('details','','source');proof.append(text('summary','精确数值与固定来源'),text('pre',`用量：${exact(result.used_gpu_seconds)}\n剩余：${exact(result.remaining_gpu_seconds)}\n规则：${result.policy.name} v${result.policy.version}\n规则指纹：${result.policy_fingerprint}\n快照 ID：${result.selection.snapshot_id}\n快照指纹：${result.selection.expected_snapshot_fingerprint}\n历史证据：${result.evidence_fingerprint}\n原因：${result.reason}`));
     target.replaceChildren(head,note,cards,times,roles,proof);target.hidden=false;
   }
+  function selectedInput(){
+    const item=windows.find(item=>item.selection.snapshot_id===$('history-window').value);
+    if(!item || !source)throw new Error('请先选择一个已保存的统计窗口。');
+    const roles=$('history-roles').value.split(',').map(value=>value.trim()).filter(Boolean);
+    if(roles.length>32 || new Set(roles).size!==roles.length)throw new Error('请填写不重复的假设角色，最多32项。');
+    return {reference:{name:source.source.metadata.name,version:source.source.metadata.version},expected_fingerprint:source.fingerprint,node_id:$('history-node').value,snapshot_id:item.selection.snapshot_id,expected_snapshot_fingerprint:item.selection.expected_snapshot_fingerprint,period_at:source.source.spec.quota.window.kind==='calendar_week'?item.start_at:item.end_at,assumed_roles:roles};
+  }
+  function evidenceView(value){
+    const target=$('history-evidence'),evidence=value.evidence,result=value.assessment;
+    const coverage={complete:'该历史窗口覆盖完整',partial:'部分覆盖',unknown:'覆盖未知'};
+    const heading=text('div','','history-result-head');heading.append(text('h3','原历史证据'),text('span',coverage[evidence.coverage],'badge'));
+    const note=text('p','原窗口、处理方法与账本版本保持不变。角色为手动假设；当前依赖未评估，本次不批准或发布策略。','history-context');
+    const facts=text('dl','','history-times');
+    for(const [label,content] of [['原始来源截止序号',evidence.source_ceiling],['账本版本',evidence.ledger_revision],['来源前缀完整',evidence.source_prefix_complete?'是':'否'],['历史身份修订',evidence.identity_revision ?? '未知'],['计量起算',formatDate(evidence.recording_start_at)],['审核运行实现引用',value.implementation_ref]]){const row=text('div','');row.append(text('dt',label),text('dd',content));facts.append(row);}
+    const models=text('div','','history-models');models.append(text('h4','原型号驻留时长（未加权）'));
+    if(evidence.models===null)models.append(text('p','完整实际用量未知，保留原观测缺口。','muted'));
+    else if(!evidence.models.length)models.append(text('p','该完整历史窗口没有已计量用量。','muted'));
+    else for(const item of evidence.models)models.append(text('p',`${item.model} · ${usage({numerator:item.observed_microseconds,denominator:'1000000'})}`));
+    const proof=text('details','','source');proof.append(text('summary','精确原始上下文与方法指纹'),text('pre',`规则指纹：${result.policy_fingerprint}\n快照指纹：${result.selection.expected_snapshot_fingerprint}\n证据指纹：${result.evidence_fingerprint}\n账本指纹：${evidence.ledger_fingerprint ?? '空账本'}\n处理方法：${evidence.configuration_fingerprint}\n时序规则：${evidence.timing_fingerprint}\n\n${value.canonical_review_json}`));
+    target.replaceChildren(heading,note,facts,models,proof);target.hidden=false;
+  }
   $('history-load').addEventListener('click',()=>run(()=>load(false),'正在读取已保存统计窗口…'));
   $('history-more').addEventListener('click',()=>run(()=>load(true),'正在读取更多固定窗口…'));
   $('history-form').addEventListener('submit',event=>{
     event.preventDefault();
     run(async()=>{
-      const item=windows.find(item=>item.selection.snapshot_id===$('history-window').value);
-      if(!item || !source)throw new Error('请先选择一个已保存的统计窗口。');
       clearResult();
-      const roles=$('history-roles').value.split(',').map(value=>value.trim()).filter(Boolean);
-      if(roles.length>32 || new Set(roles).size!==roles.length)throw new Error('请填写不重复的假设角色，最多32项。');
-      const result=await request('history/assess',{reference:{name:source.source.metadata.name,version:source.source.metadata.version},expected_fingerprint:source.fingerprint,node_id:$('history-node').value,snapshot_id:item.selection.snapshot_id,expected_snapshot_fingerprint:item.selection.expected_snapshot_fingerprint,period_at:source.source.spec.quota.window.kind==='calendar_week'?item.start_at:item.end_at,assumed_roles:roles});
+      const result=await request('history/assess',selectedInput());
       resultView(result);
     },'正在核对固定历史额度…');
   });
   $('history-window').addEventListener('change',showSelection);
   for(const id of ['history-node','history-range'])$(id).addEventListener('change',clearWindows);
   $('history-roles').addEventListener('input',clearResult);
-  return {session(nodes){configured=[...nodes];showSource(null);},source:showSource,reset(){showSource(null);},disconnect(){configured=[];$('history-roles').value='';$('history-selected').textContent='';showSource(null);},setBusy(value){locked=value;controls();}};
+  $('history-review').addEventListener('click',()=>run(async()=>{
+    if(!implementation)return;clearResult();const input={...selectedInput(),expected_implementation_ref:implementation};
+    const value=await request('history/review',input);
+    if(value.review_context_only!==true || value.implementation_ref!==implementation)throw new Error('历史审核上下文与配置不一致，请重新登录。');
+    resultView(value.assessment);evidenceView(value);reportInput=input;
+  },'正在读取同一固定窗口的原历史证据…'));
+  $('history-report').addEventListener('click',()=>run(async()=>{
+    if(!reportInput)return;const input=reportInput,blob=await request('history/report',input,{download:true});
+    if(input!==reportInput)return;const url=URL.createObjectURL(blob),link=document.createElement('a');
+    try{link.href=url;link.download='aris-historical-policy-review.html';document.body.append(link);link.click();}finally{link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+  },'正在重新核对权限与来源并导出报告…'));
+  return {session(nodes,reference){configured=[...nodes];implementation=reference || null;showSource(null);},source:showSource,reset(){showSource(null);},disconnect(){configured=[];implementation=null;$('history-roles').value='';$('history-selected').textContent='';showSource(null);},setBusy(value){locked=value;controls();}};
 };

@@ -14,7 +14,11 @@ from aris.modules.nova.policy_schemas import NodeQuotaRules
 from aris.modules.nova.policy_simulation import ExactGpuSeconds
 from aris.modules.nova.policy_source import CompiledPolicy, compile_policy
 from aris.modules.nova.policy_units import policy_quota_window, weighted_gpu_seconds
-from aris.modules.nova.quota_history_schemas import HistoricalQuotaAssessment, HistoricalQuotaQuery
+from aris.modules.nova.quota_history_schemas import (
+    HistoricalQuotaAssessment,
+    HistoricalQuotaQuery,
+    HistoricalQuotaReview,
+)
 
 
 class HistoricalUsageReader(Protocol):
@@ -141,6 +145,9 @@ class HistoricalQuotaAssessmentService:
             ) from None
 
     def assess(self, actor: ActorContext, query: HistoricalQuotaQuery) -> HistoricalQuotaAssessment:
+        return self.review(actor, query).assessment
+
+    def review(self, actor: ActorContext, query: HistoricalQuotaQuery) -> HistoricalQuotaReview:
         actor = ActorContext.model_validate(actor.model_dump(mode="json"))
         query = HistoricalQuotaQuery.model_validate(query.model_dump(mode="json"))
         compiled = self._source(actor, query)
@@ -149,4 +156,4 @@ class HistoricalQuotaAssessmentService:
         # Each domain rechecks current permissions after the combined calculation.
         self.usage.require_access(actor, query.usage)
         self._source(actor, query)
-        return result
+        return HistoricalQuotaReview(assessment=result, evidence=evidence)

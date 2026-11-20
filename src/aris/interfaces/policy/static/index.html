@@ -102,7 +102,9 @@
             <label class="history-window-label">统计窗口<select id="history-window" required></select></label><p id="history-selected" class="muted"></p><button id="history-more" type="button" class="secondary" hidden>更多窗口</button>
             <label class="history-roles-label">历史核对的假设角色（可选）<input id="history-roles" maxlength="2079" placeholder="规则角色名，用逗号分隔" autocomplete="off"></label><p class="muted">角色仅为手动假设，不读取或授予当前账号的真实角色。</p><button id="history-assess" type="submit">核对历史额度</button>
           </form>
+          <div id="history-review-actions" class="actions" hidden><button id="history-review" type="button" class="secondary">读取原历史证据</button><button id="history-report" type="button" class="secondary" disabled>导出历史审核报告</button></div>
           <section id="history-result" class="history-result" hidden aria-live="polite"></section>
+          <section id="history-evidence" class="history-result" hidden aria-live="polite"></section>
         </section>
         <section id="comparison" class="panel comparison" hidden>
           <h2>比较版本</h2><p class="muted">比较保存内容的语义变化，结果不构成批准或发布。</p>

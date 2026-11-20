@@ -8,7 +8,12 @@ from starlette.responses import HTMLResponse, JSONResponse, Response
 from aris.core.contracts import DomainError
 from aris.interfaces.commands.api import authorization, bounded_input
 from aris.interfaces.policy.drafts import PolicyDraftInput
-from aris.interfaces.policy.history import PolicyHistoryAssessmentInput, PolicyHistoryWindowsInput
+from aris.interfaces.policy.history import (
+    PolicyHistoryAssessmentInput,
+    PolicyHistoryReviewInput,
+    PolicyHistoryWindowsInput,
+)
+from aris.interfaces.policy.history_report import historical_review_report
 from aris.interfaces.policy.material_report import REPORT_CSP, comparison_report
 from aris.interfaces.policy.materials import (
     PolicyMaterialComparisonInput,
@@ -150,6 +155,40 @@ def build_router(service: PolicyReadSurface) -> APIRouter:
             return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
 
     if service.historical_usage is not None:
+        if service.historical_review_implementation_ref is not None:
+
+            @router.post("/history/review")
+            async def history_review(request: Request) -> JSONResponse:
+                if request.query_params:
+                    raise DomainError(
+                        "VALIDATION_ERROR", "Unexpected historical review parameters", 422
+                    )
+                query = await bounded_input(request, PolicyHistoryReviewInput)
+                result = await run_in_threadpool(
+                    service.history_review, authorization(request), request.state.request_id, query
+                )
+                return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
+
+            @router.post("/history/report")
+            async def history_report(request: Request) -> HTMLResponse:
+                if request.query_params:
+                    raise DomainError(
+                        "VALIDATION_ERROR", "Unexpected historical review parameters", 422
+                    )
+                query = await bounded_input(request, PolicyHistoryReviewInput)
+                result = await run_in_threadpool(
+                    service.history_review, authorization(request), request.state.request_id, query
+                )
+                return HTMLResponse(
+                    historical_review_report(result),
+                    headers={
+                        **PAGE_HEADERS,
+                        "Content-Security-Policy": REPORT_CSP + "; frame-ancestors 'none'",
+                        "Content-Disposition": (
+                            'attachment; filename="aris-historical-policy-review.html"'
+                        ),
+                    },
+                )
 
         @router.post("/history/windows")
         async def history_windows(request: Request) -> JSONResponse:

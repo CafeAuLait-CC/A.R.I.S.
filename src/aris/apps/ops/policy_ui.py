@@ -46,6 +46,7 @@ class LocalPolicyConfig(AccessContract):
     review_materials_read: bool = Field(default=False, strict=True)
     material_comparison_implementation_ref: ImplementationReference | None = None
     feedback_read: bool = Field(default=False, strict=True)
+    historical_review_implementation_ref: ImplementationReference | None = None
 
     def settings(self) -> Settings:
         url = make_url(self.database_url.get_secret_value())
@@ -103,6 +104,8 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("material writing requires its explicit read interface")
         elif args.worker:
             raise ValueError("draft commands must be explicitly configured for the worker")
+        if config.historical_review_implementation_ref is not None and not config.historical_usage:
+            raise ValueError("historical review requires configured historical usage methods")
         if args.validate:
             summary: dict[str, object] = {
                 "result": "valid",
@@ -125,6 +128,8 @@ def main(argv: list[str] | None = None) -> int:
                 summary["review_materials_read"] = True
             if config.feedback_read:
                 summary["feedback_read"] = True
+            if config.historical_review_implementation_ref is not None:
+                summary["historical_review_read"] = True
             if config.material_comparison_implementation_ref is not None:
                 summary["material_comparison_read"] = True
             print(json.dumps(summary))
@@ -170,6 +175,7 @@ def main(argv: list[str] | None = None) -> int:
             else None,
             material_comparison_implementation_ref=config.material_comparison_implementation_ref,
             feedback=PolicyFeedbackService(catalog) if config.feedback_read else None,
+            historical_review_implementation_ref=config.historical_review_implementation_ref,
         )
         uvicorn.run(
             create_app(

@@ -318,6 +318,14 @@ def test_history_wire_precision_and_private_configuration_need_no_database(
     path.chmod(0o600)
     assert policy_ui.main(["--config", str(path), "--validate"]) == 0
     assert json.loads(capsys.readouterr().out)["historical_usage_nodes"] == ["fixture-node"]
+    config["historical_review_implementation_ref"] = "fixture-history-cli"
+    path.write_text(json.dumps(config))
+    assert policy_ui.main(["--config", str(path), "--validate"]) == 0
+    assert json.loads(capsys.readouterr().out)["historical_review_read"] is True
+    config["historical_usage"] = []
+    path.write_text(json.dumps(config))
+    assert policy_ui.main(["--config", str(path), "--validate"]) == 2
+    config["historical_usage"] = [node]
     config["historical_usage"].append(node)
     path.write_text(json.dumps(config))
     assert policy_ui.main(["--config", str(path), "--validate"]) == 2

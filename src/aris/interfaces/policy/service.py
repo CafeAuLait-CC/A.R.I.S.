@@ -24,6 +24,8 @@ from aris.interfaces.policy.history import (
     PolicyHistoricalUsage,
     PolicyHistoryAssessmentInput,
     PolicyHistoryAssessmentView,
+    PolicyHistoryReviewInput,
+    PolicyHistoryReviewView,
     PolicyHistoryWindowsInput,
 )
 from aris.interfaces.policy.materials import (
@@ -81,6 +83,7 @@ class PolicyCatalogSession(AccessContract):
     material_comparison_implementation_ref: str | None = None
     feedback_available: bool = False
     feedback_writing_available: bool = False
+    historical_review_implementation_ref: str | None = None
 
 
 class PolicyDetailInput(AccessContract):
@@ -100,6 +103,7 @@ class PolicyReadSurface:
         review_materials: PolicyReviewMaterialService | None = None,
         material_comparison_implementation_ref: str | None = None,
         feedback: PolicyFeedbackService | None = None,
+        historical_review_implementation_ref: str | None = None,
     ) -> None:
         if not 1 <= len(policy_names) <= 32 or len(set(policy_names)) != len(policy_names):
             raise ValueError("policy interface requires explicit unique policy names")
@@ -134,6 +138,17 @@ class PolicyReadSurface:
         if draft_commands is not None and draft_commands.feedback_writing and feedback is None:
             raise ValueError("feedback writing requires its explicit read interface")
         self.feedback = feedback
+        if historical_review_implementation_ref is not None:
+            from pydantic import TypeAdapter
+
+            from aris.modules.nova.policy_material_schemas import ImplementationReference
+
+            historical_review_implementation_ref = TypeAdapter(
+                ImplementationReference
+            ).validate_python(historical_review_implementation_ref)
+            if historical_usage is None:
+                raise ValueError("historical review requires explicit historical usage methods")
+        self.historical_review_implementation_ref = historical_review_implementation_ref
 
     def _run(
         self,
@@ -193,6 +208,7 @@ class PolicyReadSurface:
                 feedback_writing_available=self.feedback is not None
                 and self.draft_commands is not None
                 and self.draft_commands.feedback_writing,
+                historical_review_implementation_ref=self.historical_review_implementation_ref,
             ),
         )
 
@@ -404,6 +420,21 @@ class PolicyReadSurface:
             authorization,
             request_id,
             lambda session, actor, principal: history.assess(actor, query),
+            names=(query.reference.name,),
+        )
+
+    def history_review(
+        self, authorization: str | None, request_id: str, query: PolicyHistoryReviewInput
+    ) -> PolicyHistoryReviewView:
+        history, reference = self.historical_usage, self.historical_review_implementation_ref
+        if history is None or reference is None:
+            raise DomainError(
+                "HISTORICAL_REVIEW_NOT_CONFIGURED", "Historical review is not configured", 503
+            )
+        return self._run(
+            authorization,
+            request_id,
+            lambda session, actor, principal: history.review(actor, query, reference),
             names=(query.reference.name,),
         )
 

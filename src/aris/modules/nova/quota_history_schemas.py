@@ -6,7 +6,7 @@ from uuid import UUID
 
 from pydantic import AwareDatetime, Field, field_validator, model_validator
 
-from aris.modules.lyra.quota_evidence_schemas import QuotaEvidenceSelection
+from aris.modules.lyra.quota_evidence_schemas import HistoricalQuotaEvidence, QuotaEvidenceSelection
 from aris.modules.nova.policy_catalog_schemas import PolicySourceReference
 from aris.modules.nova.policy_schemas import PolicyContract, PolicyName, QuotaLimit
 from aris.modules.nova.policy_simulation import ExactGpuSeconds
@@ -83,4 +83,29 @@ class HistoricalQuotaAssessment(PolicyContract):
             )
         ):
             raise ValueError("historical quota result has inconsistent scope or numeric authority")
+        return self
+
+
+class HistoricalQuotaReview(PolicyContract):
+    review_context_only: Literal[True] = True
+    historical_only: Literal[True] = True
+    current_dependencies_assessed: Literal[False] = False
+    role_assignments_verified: Literal[False] = False
+    roles_authority: Literal["caller_supplied_assumptions"] = "caller_supplied_assumptions"
+    approval_performed: Literal[False] = False
+    publication_performed: Literal[False] = False
+    assessment: HistoricalQuotaAssessment
+    evidence: HistoricalQuotaEvidence
+
+    @model_validator(mode="after")
+    def same_fixed_evidence(self) -> "HistoricalQuotaReview":
+        value, evidence = self.assessment, self.evidence
+        if (
+            value.query.usage != evidence.selection
+            or value.evidence_fingerprint != evidence.fingerprint
+            or value.sampled_until != evidence.window.end_at
+            or value.captured_at != evidence.captured_at
+            or value.snapshot_created_at != evidence.created_at
+        ):
+            raise ValueError("historical review and assessment use different fixed evidence")
         return self
