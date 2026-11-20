@@ -26,6 +26,8 @@
     <div id="notice" class="notice" role="status" aria-live="polite">Set a user credential, then choose a directory to load.</div>
     <div class="table-controls"><label for="filter">Filter current page<input id="filter" type="search" placeholder="Name or Member ID" autocomplete="off"></label>
       <label for="reason">Reason for changes<input id="reason" maxlength="256" placeholder="Why are these mappings changing?" autocomplete="off"></label></div>
+    <label class="member-filter"><input id="active-members-only" type="checkbox" checked disabled> Active members only</label>
+    <p class="muted small">Hide deactivated Slack accounts on the current page. This is not an online status filter.</p>
     <p id="snapshot" class="muted small"></p>
     <section id="observed-users" class="observed-users" aria-label="Observed Linux usernames" hidden>
       <p class="muted small">Suggestions from current GPU compute processes, not verified Slack identities. Idle accounts may not appear. Choose the correct member explicitly.</p>

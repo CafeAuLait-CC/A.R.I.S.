@@ -14,6 +14,7 @@ function notice(message, error = false, target = "notice") {
 function buttons() {
   $("load-slack").disabled = $("load-registered").disabled = !state.token || state.busy;
   $("load-node-users").disabled = !state.token || state.busy;
+  $("active-members-only").disabled = state.source !== "slack";
   $("next-page").disabled = !state.token || state.busy || !state.next;
   $("resume-request").hidden = !state.intent;
   document.querySelectorAll(".member-review").forEach((button) => {
@@ -26,6 +27,7 @@ function clearAccess(message) {
   Object.assign(state, { token: "", busy: false, page: null, source: null, next: null, stale: false, intent: null, observations: null });
   $("credential").value = "";
   $("reason").value = ""; $("filter").value = "";
+  $("active-members-only").checked = true;
   $("members-head").replaceChildren(); $("members-body").replaceChildren();
   $("snapshot").textContent = ""; $("review-content").replaceChildren();
   $("observed-users").hidden = true; $("observed-user-list").replaceChildren(); $("observed-user-options").replaceChildren();
@@ -116,14 +118,13 @@ function renderRows() {
   const heading = element("tr");
   ["Member", "ARIS identity", "Profile", ...page.node_ids, ""].forEach((text) => heading.append(element("th", text)));
   $("members-head").replaceChildren(heading); $("members-body").replaceChildren();
-  const filter = $("filter").value.trim().toLowerCase();
   for (const row of page.rows) {
     const registered = row.registered, slack = row.slack;
     const memberId = slack?.external_id || registered.external_id;
     const name = slack?.display_name || registered.profile.display_name;
     const tr = element("tr"), who = element("td"), identity = element("td"), profile = element("td");
     tr.dataset.search = (name + " " + memberId + " " + (registered?.profile.display_name || "")).toLowerCase();
-    tr.hidden = !!filter && !tr.dataset.search.includes(filter);
+    tr.dataset.slackDeactivated = String(slack?.deleted === true);
     who.append(element("div", name, "member-name"), element("div", memberId, "member-id"));
     if (slack?.deleted === true) who.append(element("p", "Slack deactivated", "muted small"));
     if (slack?.is_bot === true || slack?.is_app_user === true) who.append(element("p", "Slack bot / app", "muted small"));
@@ -160,8 +161,16 @@ function renderRows() {
     review.addEventListener("click", () => beginReview(row, fields, nameInput, zoneInput));
     action.append(review); tr.append(action); $("members-body").append(tr);
   }
+  filterMembers();
   userHints();
   buttons();
+}
+function filterMembers() {
+  const filter = $("filter").value.trim().toLowerCase();
+  const activeOnly = state.source === "slack" && $("active-members-only").checked;
+  document.querySelectorAll("#members-body tr").forEach((row) => {
+    row.hidden = (activeOnly && row.dataset.slackDeactivated === "true") || (!!filter && !row.dataset.search.includes(filter));
+  });
 }
 function beginReview(row, fields, nameInput, zoneInput) {
   if (state.busy || state.intent || state.stale) return;
@@ -287,10 +296,8 @@ $("load-slack").addEventListener("click", () => load("slack"));
 $("load-registered").addEventListener("click", () => load("registered"));
 $("load-node-users").addEventListener("click", loadNodeUsers);
 $("next-page").addEventListener("click", () => load(state.source, state.next));
-$("filter").addEventListener("input", () => {
-  const filter = $("filter").value.trim().toLowerCase();
-  document.querySelectorAll("#members-body tr").forEach((row) => { row.hidden = !!filter && !row.dataset.search.includes(filter); });
-});
+$("filter").addEventListener("input", filterMembers);
+$("active-members-only").addEventListener("change", filterMembers);
 $("resume-request").addEventListener("click", () => { $("review-dialog").showModal(); refreshReview(); });
 $("close-review").addEventListener("click", () => $("review-dialog").close());
 $("review-dialog").addEventListener("close", () => {
