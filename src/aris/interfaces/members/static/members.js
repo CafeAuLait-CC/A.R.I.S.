@@ -272,7 +272,7 @@
           if(change.profile)lines.push('Display name: '+change.profile.display_name,'Email: '+(change.profile.email || 'Not set'));
           if(change.active===false)lines.push('Remove this member and disable login. History is retained.');
           if(change.active===true)lines.push('Restore this member. They can request an invitation code to activate or reset their password.');
-          if(change.login_username!==undefined)lines.push('Login username: '+(change.login_username || 'Not set'));
+          if(change.login_username)lines.push('Login username: '+change.login_username);
           if(change.role) {
             lines.push('Set role to '+(change.role==='admin'?'Admin':'Member')+'.');
             const remove=change.role==='member'?(row?.revoked_when_member || []):change.previous_bindings.filter(binding=>['admin','member'].includes(binding.role_name) && !(binding.role_name===change.role && binding.scope.type==='global' && binding.scope.id==='*'));
