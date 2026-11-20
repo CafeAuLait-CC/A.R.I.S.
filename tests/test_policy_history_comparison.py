@@ -288,7 +288,7 @@ def test_postgresql_comparison_is_read_only_and_recovers_after_a_source_lock(com
     finally:
         event.remove(engine, "before_cursor_execute", observe)
     assert result.historical_only
-    assert any("SET TRANSACTION READ ONLY" in sql for sql in statements)
+    assert any("SET TRANSACTION" in sql and "READ ONLY" in sql for sql in statements)
     assert not any(
         sql.lstrip().upper().startswith(("UPDATE", "INSERT", "DELETE")) for sql in statements
     )
