@@ -4,7 +4,7 @@ from datetime import timedelta
 from typing import Literal
 from uuid import UUID
 
-from pydantic import AwareDatetime, Field, model_validator
+from pydantic import AwareDatetime, Field, field_validator, model_validator
 from sqlalchemy.orm import Session
 
 from aris.core.access.schemas import AccessContract, AccessRequest, AccessScope
@@ -19,22 +19,23 @@ from aris.modules.lyra.quota_evidence_schemas import (
 from aris.modules.lyra.quota_evidence_service import HistoricalQuotaEvidenceService
 from aris.modules.lyra.window_reader_schemas import WindowPageCursor
 from aris.modules.nova.policy_catalog_schemas import PolicySourceReference
+from aris.modules.nova.policy_history_record_schemas import (
+    RecordHistoricalPolicyReview,
+    StoredHistoricalPolicyReview,
+    canonical_history_record,
+    historical_context_fingerprint,
+)
 from aris.modules.nova.policy_material_schemas import ImplementationReference
 from aris.modules.nova.policy_schemas import PolicyName, QuotaLimit
 from aris.modules.nova.policy_simulation import ExactGpuSeconds
 from aris.modules.nova.policy_units import PolicyTimeWindow
 from aris.modules.nova.quota_history_schemas import (
+    HistoricalPolicyNode,
     HistoricalQuotaAssessment,
     HistoricalQuotaQuery,
     HistoricalQuotaReview,
 )
 from aris.modules.nova.quota_history_service import HistoricalQuotaAssessmentService
-
-
-class HistoricalPolicyNode(AccessContract):
-    node_id: str = Field(min_length=1, max_length=128, pattern=r"^\S+$")
-    expected_configuration_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
-    expected_timing_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
 class PolicyHistoryWindowsInput(AccessContract):
@@ -82,6 +83,16 @@ class ExactSecondsView(AccessContract):
 
 class PolicyHistoryReviewInput(PolicyHistoryAssessmentInput):
     expected_implementation_ref: ImplementationReference
+
+
+class PolicyHistoryRecordInput(PolicyHistoryReviewInput):
+    expected_context_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    reason: str = Field(min_length=1, max_length=256)
+
+    @field_validator("reason")
+    @classmethod
+    def explicit_reason(cls, value: str) -> str:
+        return RecordHistoricalPolicyReview.explicit_reason(value)
 
 
 class PolicyHistoryAssessmentView(AccessContract):
@@ -132,6 +143,8 @@ class HistoricalModelView(AccessContract):
 
 
 class HistoricalEvidenceView(AccessContract):
+    window_start_at: AwareDatetime
+    window_end_at: AwareDatetime
     coverage: Literal["complete", "partial", "unknown"]
     source_prefix_complete: bool = Field(strict=True)
     source_ceiling: str = Field(pattern=r"^(0|[1-9][0-9]*)$")
@@ -147,6 +160,8 @@ class HistoricalEvidenceView(AccessContract):
     @classmethod
     def of(cls, value: HistoricalQuotaEvidence) -> "HistoricalEvidenceView":
         return cls(
+            window_start_at=value.window.start_at,
+            window_end_at=value.window.end_at,
             coverage=value.coverage,
             source_prefix_complete=value.source_prefix_complete,
             source_ceiling=str(value.source_ceiling),
@@ -182,6 +197,7 @@ class PolicyHistoryReviewView(AccessContract):
         "configured_runtime_reference"
     )
     implementation_ref: ImplementationReference
+    context_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
     assessment: PolicyHistoryAssessmentView
     evidence: HistoricalEvidenceView
     # Retain the exact domain JSON as text; JavaScript must not round large integers.
@@ -194,9 +210,14 @@ class PolicyHistoryReviewView(AccessContract):
     @model_validator(mode="after")
     def coherent(self) -> "PolicyHistoryReviewView":
         original = self.review
-        if self.assessment != PolicyHistoryAssessmentView.of(
-            original.assessment
-        ) or self.evidence != HistoricalEvidenceView.of(original.evidence):
+        if (
+            self.assessment != PolicyHistoryAssessmentView.of(original.assessment)
+            or self.evidence != HistoricalEvidenceView.of(original.evidence)
+            or (
+                self.context_fingerprint
+                != historical_context_fingerprint(original, self.implementation_ref)
+            )
+        ):
             raise ValueError("historical review display differs from its original evidence")
         return self
 
@@ -204,10 +225,68 @@ class PolicyHistoryReviewView(AccessContract):
     def of(cls, value: HistoricalQuotaReview, implementation_ref: str) -> "PolicyHistoryReviewView":
         return cls(
             implementation_ref=implementation_ref,
+            context_fingerprint=historical_context_fingerprint(value, implementation_ref),
             assessment=PolicyHistoryAssessmentView.of(value.assessment),
             evidence=HistoricalEvidenceView.of(value.evidence),
             canonical_review_json=value.model_dump_json(),
         )
+
+
+class PolicyStoredHistoryView(AccessContract):
+    id: UUID
+    created_at: AwareDatetime
+    created_by: UUID
+    command_id: UUID
+    fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    reason: str
+    context: PolicyHistoryReviewView
+    canonical_record_json: str = Field(min_length=1, max_length=2_097_152)
+
+    @classmethod
+    def of(cls, value: StoredHistoricalPolicyReview) -> "PolicyStoredHistoryView":
+        return cls(
+            id=value.id,
+            created_at=value.created_at,
+            created_by=value.created_by,
+            command_id=value.command_id,
+            fingerprint=value.fingerprint,
+            reason=value.request.reason,
+            context=PolicyHistoryReviewView.of(
+                value.review, value.request.expected_implementation_ref
+            ),
+            canonical_record_json=canonical_history_record(value),
+        )
+
+    @model_validator(mode="after")
+    def coherent(self) -> "PolicyStoredHistoryView":
+        original = StoredHistoricalPolicyReview.model_validate_json(self.canonical_record_json)
+        if (
+            self.id,
+            self.created_at,
+            self.created_by,
+            self.command_id,
+            self.fingerprint,
+            self.reason,
+        ) != (
+            original.id,
+            original.created_at,
+            original.created_by,
+            original.command_id,
+            original.fingerprint,
+            original.request.reason,
+        ) or self.context != PolicyHistoryReviewView.of(
+            original.review, original.request.expected_implementation_ref
+        ):
+            raise ValueError("historical record display differs from its original")
+        return self
+
+
+class PolicyHistoryRecordValidation(AccessContract):
+    historical_only: Literal[True] = True
+    approval_performed: Literal[False] = False
+    publication_performed: Literal[False] = False
+    request: RecordHistoricalPolicyReview = Field(repr=False)
+    context: PolicyHistoryReviewView
 
 
 class PolicyHistoricalUsage:
@@ -282,6 +361,16 @@ class PolicyHistoricalUsage:
             raise DomainError("CONFLICT", "Historical review implementation reference changed", 409)
         result = self.assessments.review(actor, self._query(actor, query))
         return PolicyHistoryReviewView.of(result, implementation_ref)
+
+    def record_request(
+        self, actor: ActorContext, value: PolicyHistoryRecordInput
+    ) -> RecordHistoricalPolicyReview:
+        return RecordHistoricalPolicyReview(
+            query=self._query(actor, value),
+            expected_implementation_ref=value.expected_implementation_ref,
+            expected_context_fingerprint=value.expected_context_fingerprint,
+            reason=value.reason,
+        )
 
     def assess(
         self, actor: ActorContext, query: PolicyHistoryAssessmentInput

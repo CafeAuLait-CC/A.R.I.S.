@@ -326,6 +326,26 @@ def test_history_wire_precision_and_private_configuration_need_no_database(
     path.write_text(json.dumps(config))
     assert policy_ui.main(["--config", str(path), "--validate"]) == 2
     config["historical_usage"] = [node]
+    config["historical_review_records_read"] = True
+    path.write_text(json.dumps(config))
+    assert policy_ui.main(["--config", str(path), "--validate"]) == 0
+    assert json.loads(capsys.readouterr().out)["historical_review_records_read"] is True
+    from tests.test_policy_draft_editor import draft_runtime
+
+    runtime = draft_runtime(
+        historical_review_storage={"implementation_ref": "fixture-history-cli", "nodes": [node]}
+    )
+    config["draft_commands"] = runtime.model_dump(mode="json")
+    config["draft_commands"]["confirmation_key"] = runtime.confirmation_key.get_secret_value()
+    path.write_text(json.dumps(config))
+    assert policy_ui.main(["--config", str(path), "--validate"]) == 0
+    assert (
+        "policy.record_historical_review" in json.loads(capsys.readouterr().out)["draft_commands"]
+    )
+    config["draft_commands"]["historical_review_storage"]["implementation_ref"] = "changed"
+    path.write_text(json.dumps(config))
+    assert policy_ui.main(["--config", str(path), "--validate"]) == 2
+    config["draft_commands"] = None
     config["historical_usage"].append(node)
     path.write_text(json.dumps(config))
     assert policy_ui.main(["--config", str(path), "--validate"]) == 2

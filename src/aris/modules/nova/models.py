@@ -155,3 +155,40 @@ class PolicyReviewFeedbackRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     fingerprint: Mapped[str] = mapped_column(String(64))
     canonical_feedback: Mapped[str] = mapped_column(Text)
+
+
+class PolicyHistoricalReviewRow(Base):
+    __tablename__ = "policy_historical_reviews"
+    __table_args__ = (
+        UniqueConstraint("command_id", name="uq_policy_historical_review_command"),
+        CheckConstraint("source_version>0", name="ck_policy_historical_review_version"),
+        CheckConstraint(
+            "length(fingerprint)=64 AND length(source_fingerprint)=64 "
+            "AND length(context_fingerprint)=64 AND length(canonical_record)>0 "
+            "AND length(canonical_record)<=2097152",
+            name="ck_policy_historical_review_size",
+        ),
+        Index(
+            "ix_policy_history_source_owner_node_time",
+            "source_id",
+            "created_by",
+            "node_id",
+            "created_at",
+            "id",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    source_id: Mapped[str] = mapped_column(ForeignKey("policy_versions.id"))
+    name: Mapped[str] = mapped_column(String(64))
+    source_version: Mapped[int] = mapped_column(Integer)
+    source_fingerprint: Mapped[str] = mapped_column(String(64))
+    node_id: Mapped[str] = mapped_column(String(128))
+    snapshot_id: Mapped[str] = mapped_column(String(36))
+    context_fingerprint: Mapped[str] = mapped_column(String(64))
+    implementation_ref: Mapped[str] = mapped_column(String(128))
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    command_id: Mapped[str] = mapped_column(ForeignKey("commands.id"))
+    request_id: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    canonical_record: Mapped[str] = mapped_column(Text)

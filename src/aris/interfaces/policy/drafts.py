@@ -15,6 +15,10 @@ from aris.interfaces.commands.auth import UserCommandAuthenticator
 from aris.interfaces.commands.service import UserCommandSurface
 from aris.modules.nova.policy_catalog_schemas import PolicySourceReference, RecordPolicyDraft
 from aris.modules.nova.policy_feedback_schemas import RecordPolicyFeedback
+from aris.modules.nova.policy_history_record_schemas import (
+    HistoricalReviewConfiguration,
+    RecordHistoricalPolicyReview,
+)
 from aris.modules.nova.policy_material_schemas import RecordPolicyReviewMaterial
 from aris.modules.nova.policy_review import PolicyDifference
 
@@ -59,6 +63,7 @@ class PolicyDraftCommandSurface(UserCommandSurface):
         *,
         material_implementation_ref: str | None = None,
         feedback_writing: bool = False,
+        historical_review_storage: HistoricalReviewConfiguration | None = None,
     ) -> None:
         super().__init__(gateway, authentication)
         allowed = {"policy.record_draft"}
@@ -66,6 +71,8 @@ class PolicyDraftCommandSurface(UserCommandSurface):
             allowed.add("policy.record_review_material")
         if feedback_writing:
             allowed.add("policy.record_feedback")
+        if historical_review_storage is not None:
+            allowed.add("policy.record_historical_review")
         if gateway.allowed != frozenset(allowed):
             raise ValueError("policy interface commands must match its explicit configuration")
         if not 1 <= len(policy_names) <= 32 or len(set(policy_names)) != len(policy_names):
@@ -75,6 +82,7 @@ class PolicyDraftCommandSurface(UserCommandSurface):
         self.policy_names = policy_names
         self.material_implementation_ref = material_implementation_ref
         self.feedback_writing = feedback_writing
+        self.historical_review_storage = historical_review_storage
 
     def _name(self, request: UserCommandInput) -> None:
         if request.command not in self.gateway.allowed:
@@ -84,6 +92,10 @@ class PolicyDraftCommandSurface(UserCommandSurface):
                 name = RecordPolicyDraft.model_validate(request.parameters).source.metadata.name
             elif request.command == "policy.record_feedback":
                 name = RecordPolicyFeedback.model_validate(request.parameters).source.name
+            elif request.command == "policy.record_historical_review":
+                name = RecordHistoricalPolicyReview.model_validate(
+                    request.parameters
+                ).query.policy.name
             else:
                 name = RecordPolicyReviewMaterial.model_validate(request.parameters).source.name
         except ValidationError:

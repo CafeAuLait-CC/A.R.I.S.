@@ -10,6 +10,7 @@ from aris.interfaces.commands.api import authorization, bounded_input
 from aris.interfaces.policy.drafts import PolicyDraftInput
 from aris.interfaces.policy.history import (
     PolicyHistoryAssessmentInput,
+    PolicyHistoryRecordInput,
     PolicyHistoryReviewInput,
     PolicyHistoryWindowsInput,
 )
@@ -26,6 +27,10 @@ from aris.modules.nova.policy_catalog_schemas import (
     PolicySourceListQuery,
 )
 from aris.modules.nova.policy_feedback_schemas import PolicyFeedbackListQuery, RecordPolicyFeedback
+from aris.modules.nova.policy_history_record_schemas import (
+    HistoricalReviewDetailQuery,
+    HistoricalReviewListQuery,
+)
 from aris.modules.nova.policy_material_schemas import (
     PolicyMaterialListQuery,
     RecordPolicyReviewMaterial,
@@ -43,6 +48,64 @@ PAGE_HEADERS = {
 
 def build_router(service: PolicyReadSurface) -> APIRouter:
     router = APIRouter(prefix="/internal/policy", tags=["policy-source-review"])
+
+    if service.historical_reviews is not None:
+
+        @router.post("/history/records/query")
+        async def history_records(request: Request) -> JSONResponse:
+            if request.query_params:
+                raise DomainError(
+                    "VALIDATION_ERROR", "Unexpected historical record parameters", 422
+                )
+            query = await bounded_input(request, HistoricalReviewListQuery)
+            result = await run_in_threadpool(
+                service.history_records, authorization(request), request.state.request_id, query
+            )
+            return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
+
+        @router.post("/history/records/detail")
+        @router.post("/history/records/report")
+        async def history_record(request: Request) -> Response:
+            if request.query_params:
+                raise DomainError(
+                    "VALIDATION_ERROR", "Unexpected historical record parameters", 422
+                )
+            query = await bounded_input(request, HistoricalReviewDetailQuery)
+            result = await run_in_threadpool(
+                service.history_record, authorization(request), request.state.request_id, query
+            )
+            if request.url.path.endswith("/report"):
+                return HTMLResponse(
+                    historical_review_report(result.context, saved=result),
+                    headers={
+                        **PAGE_HEADERS,
+                        "Content-Security-Policy": REPORT_CSP + "; frame-ancestors 'none'",
+                        "Content-Disposition": (
+                            'attachment; filename="aris-saved-historical-review.html"'
+                        ),
+                    },
+                )
+            return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
+
+        if (
+            service.draft_commands is not None
+            and service.draft_commands.historical_review_storage is not None
+        ):
+
+            @router.post("/history/records/validate")
+            async def validate_history_record(request: Request) -> JSONResponse:
+                if request.query_params:
+                    raise DomainError(
+                        "VALIDATION_ERROR", "Unexpected historical record parameters", 422
+                    )
+                query = await bounded_input(request, PolicyHistoryRecordInput)
+                result = await run_in_threadpool(
+                    service.history_record_validate,
+                    authorization(request),
+                    request.state.request_id,
+                    query,
+                )
+                return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
 
     if service.feedback is not None:
 
@@ -275,6 +338,7 @@ def build_router(service: PolicyReadSurface) -> APIRouter:
             "policy-scenarios.js",
             "policy-fields.js",
             "policy-history.js",
+            "policy-history-records.js",
             "policy-materials.js",
             "policy-material-save.js",
             "policy-material-compare.js",

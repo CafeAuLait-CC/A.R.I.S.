@@ -13,6 +13,12 @@ from aris.modules.nova.policy_simulation import ExactGpuSeconds
 from aris.modules.nova.policy_units import PolicyTimeWindow
 
 
+class HistoricalPolicyNode(PolicyContract):
+    node_id: str = Field(min_length=1, max_length=128, pattern=r"^\S+$")
+    expected_configuration_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    expected_timing_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 class HistoricalQuotaQuery(PolicyContract):
     policy: PolicySourceReference
     expected_policy_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")

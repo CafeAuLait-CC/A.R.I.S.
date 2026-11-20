@@ -1,8 +1,8 @@
 "use strict";
-window.ARISPolicyHistory = ({$,text,request,run,formatDate,quota}) => {
+window.ARISPolicyHistory = ({$,text,request,run,formatDate,quota,onReview=()=>{},onClear=()=>{}}) => {
   let configured=[],source=null,windows=[],next=null,base=null,locked=false,implementation=null,reportInput=null;
   const panel=$('history-panel');
-  function clearResult(){ $('history-result').hidden=true;$('history-result').replaceChildren();$('history-evidence').hidden=true;$('history-evidence').replaceChildren();reportInput=null;$('history-report').disabled=true; }
+  function clearResult(){ $('history-result').hidden=true;$('history-result').replaceChildren();$('history-evidence').hidden=true;$('history-evidence').replaceChildren();reportInput=null;$('history-report').disabled=true;onClear(); }
   function clearWindows(){windows=[];next=null;base=null;$('history-window').replaceChildren();$('history-note').textContent='';$('history-selected').textContent='';clearResult();controls();}
   function controls(){
     const usable=source?.source.spec.quota.scope==='per_node' && $('history-node').options.length>0;
@@ -104,12 +104,12 @@ window.ARISPolicyHistory = ({$,text,request,run,formatDate,quota}) => {
     if(!implementation)return;clearResult();const input={...selectedInput(),expected_implementation_ref:implementation};
     const value=await request('history/review',input);
     if(value.review_context_only!==true || value.implementation_ref!==implementation)throw new Error('历史审核上下文与配置不一致，请重新登录。');
-    resultView(value.assessment);evidenceView(value);reportInput=input;
+    resultView(value.assessment);evidenceView(value);reportInput=input;onReview(value,input);
   },'正在读取同一固定窗口的原历史证据…'));
   $('history-report').addEventListener('click',()=>run(async()=>{
     if(!reportInput)return;const input=reportInput,blob=await request('history/report',input,{download:true});
     if(input!==reportInput)return;const url=URL.createObjectURL(blob),link=document.createElement('a');
     try{link.href=url;link.download='aris-historical-policy-review.html';document.body.append(link);link.click();}finally{link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}
   },'正在重新核对权限与来源并导出报告…'));
-  return {session(nodes,reference){configured=[...nodes];implementation=reference || null;showSource(null);},source:showSource,reset(){showSource(null);},disconnect(){configured=[];implementation=null;$('history-roles').value='';$('history-selected').textContent='';showSource(null);},setBusy(value){locked=value;controls();}};
+  return {usage,session(nodes,reference){configured=[...nodes];implementation=reference || null;showSource(null);},source:showSource,reset(){showSource(null);},disconnect(){configured=[];implementation=null;$('history-roles').value='';$('history-selected').textContent='';showSource(null);},setBusy(value){locked=value;controls();}};
 };

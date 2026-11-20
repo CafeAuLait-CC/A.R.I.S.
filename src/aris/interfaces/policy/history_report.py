@@ -4,7 +4,7 @@ import json
 from decimal import ROUND_HALF_UP, Decimal, localcontext
 from html import escape
 
-from aris.interfaces.policy.history import PolicyHistoryReviewView
+from aris.interfaces.policy.history import PolicyHistoryReviewView, PolicyStoredHistoryView
 from aris.interfaces.policy.material_report import REPORT_CSP, STYLE
 from aris.modules.nova.policy_simulation import ExactGpuSeconds
 
@@ -34,8 +34,29 @@ def _seconds(value: ExactGpuSeconds | None) -> str:
     return "未知" if value is None else _amount(value.numerator, value.denominator) + " GPU 秒"
 
 
-def historical_review_report(value: PolicyHistoryReviewView) -> str:
+def historical_review_report(
+    value: PolicyHistoryReviewView, *, saved: PolicyStoredHistoryView | None = None
+) -> str:
     value = PolicyHistoryReviewView.model_validate(value.model_dump(mode="json"))
+    saved_header = ""
+    if saved is not None:
+        saved = PolicyStoredHistoryView.model_validate(saved.model_dump(mode="json"))
+        if saved.context != value:
+            raise ValueError("saved historical report differs from its original context")
+        saved_header = (
+            "<section><h2>已保存审核记录</h2>"
+            + _pairs(
+                (
+                    ("记录 ID", saved.id),
+                    ("保存于", saved.created_at.isoformat()),
+                    ("作者 ID", saved.created_by),
+                    ("保存原因", saved.reason),
+                    ("上下文指纹", saved.context.context_fingerprint),
+                    ("记录指纹", saved.fingerprint),
+                )
+            )
+            + "</section>"
+        )
     review, evidence = value.review, value.review.evidence
     result = review.assessment
     states = {
@@ -136,11 +157,15 @@ def historical_review_report(value: PolicyHistoryReviewView) -> str:
         )
     )
     raw = _text(
-        '{"implementation_ref": '
-        + json.dumps(value.implementation_ref, ensure_ascii=False)
-        + ', "review": '
-        + value.canonical_review_json
-        + "}"
+        saved.canonical_record_json
+        if saved is not None
+        else (
+            '{"implementation_ref": '
+            + json.dumps(value.implementation_ref, ensure_ascii=False)
+            + ', "review": '
+            + value.canonical_review_json
+            + "}"
+        )
     )
     return (
         '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
@@ -151,6 +176,7 @@ def historical_review_report(value: PolicyHistoryReviewView) -> str:
         '<h1>真实历史样本审核</h1><p class="notice">用于固定历史窗口的证据核对。'
         "当前角色、维护和运行依赖未评估；尚未批准、发布或授权预约。</p>"
         + overview
+        + saved_header
         + "<section><h2>历史额度核对</h2>"
         + totals
         + "</section>"

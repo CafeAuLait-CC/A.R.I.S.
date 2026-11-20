@@ -24,9 +24,12 @@ from aris.interfaces.policy.history import (
     PolicyHistoricalUsage,
     PolicyHistoryAssessmentInput,
     PolicyHistoryAssessmentView,
+    PolicyHistoryRecordInput,
+    PolicyHistoryRecordValidation,
     PolicyHistoryReviewInput,
     PolicyHistoryReviewView,
     PolicyHistoryWindowsInput,
+    PolicyStoredHistoryView,
 )
 from aris.interfaces.policy.materials import (
     PolicyExampleResultView,
@@ -59,6 +62,12 @@ from aris.modules.nova.policy_feedback_schemas import (
     RecordPolicyFeedback,
 )
 from aris.modules.nova.policy_feedback_service import PolicyFeedbackService
+from aris.modules.nova.policy_history_record_schemas import (
+    HistoricalReviewDetailQuery,
+    HistoricalReviewListQuery,
+    HistoricalReviewPage,
+)
+from aris.modules.nova.policy_history_record_service import PolicyHistoricalReviewService
 from aris.modules.nova.policy_material_schemas import (
     PolicyMaterialListQuery,
     PolicyMaterialPage,
@@ -84,6 +93,8 @@ class PolicyCatalogSession(AccessContract):
     feedback_available: bool = False
     feedback_writing_available: bool = False
     historical_review_implementation_ref: str | None = None
+    historical_review_records_available: bool = False
+    historical_review_writing_available: bool = False
 
 
 class PolicyDetailInput(AccessContract):
@@ -104,6 +115,7 @@ class PolicyReadSurface:
         material_comparison_implementation_ref: str | None = None,
         feedback: PolicyFeedbackService | None = None,
         historical_review_implementation_ref: str | None = None,
+        historical_reviews: PolicyHistoricalReviewService | None = None,
     ) -> None:
         if not 1 <= len(policy_names) <= 32 or len(set(policy_names)) != len(policy_names):
             raise ValueError("policy interface requires explicit unique policy names")
@@ -149,6 +161,27 @@ class PolicyReadSurface:
             if historical_usage is None:
                 raise ValueError("historical review requires explicit historical usage methods")
         self.historical_review_implementation_ref = historical_review_implementation_ref
+        if historical_reviews is not None and (
+            historical_reviews.catalog is not catalog
+            or historical_usage is None
+            or historical_review_implementation_ref
+            != historical_reviews.configuration.implementation_ref
+            or historical_usage.nodes != historical_reviews.configuration.nodes
+        ):
+            raise ValueError(
+                "historical record reads require the same catalog and configured methods"
+            )
+        if (
+            draft_commands is not None
+            and draft_commands.historical_review_storage is not None
+            and (
+                historical_reviews is None
+                or not historical_reviews.writing_enabled
+                or historical_reviews.configuration != draft_commands.historical_review_storage
+            )
+        ):
+            raise ValueError("historical record writing requires its matching explicit reader")
+        self.historical_reviews = historical_reviews
 
     def _run(
         self,
@@ -209,6 +242,10 @@ class PolicyReadSurface:
                 and self.draft_commands is not None
                 and self.draft_commands.feedback_writing,
                 historical_review_implementation_ref=self.historical_review_implementation_ref,
+                historical_review_records_available=self.historical_reviews is not None,
+                historical_review_writing_available=self.historical_reviews is not None
+                and self.draft_commands is not None
+                and self.draft_commands.historical_review_storage is not None,
             ),
         )
 
@@ -436,6 +473,62 @@ class PolicyReadSurface:
             request_id,
             lambda session, actor, principal: history.review(actor, query, reference),
             names=(query.reference.name,),
+        )
+
+    def history_record_validate(
+        self, authorization: str | None, request_id: str, query: PolicyHistoryRecordInput
+    ) -> PolicyHistoryRecordValidation:
+        store, history = self.historical_reviews, self.historical_usage
+        if (
+            store is None
+            or history is None
+            or self.draft_commands is None
+            or self.draft_commands.historical_review_storage is None
+        ):
+            raise DomainError(
+                "POLICY_HISTORY_NOT_CONFIGURED", "Historical review saving is not enabled", 503
+            )
+
+        def validate(
+            session: Session, actor: ActorContext, principal: UserPrincipal
+        ) -> PolicyHistoryRecordValidation:
+            request = history.record_request(actor, query)
+            value = store.preview(actor, request)
+            return PolicyHistoryRecordValidation(
+                request=request,
+                context=PolicyHistoryReviewView.of(value, store.configuration.implementation_ref),
+            )
+
+        return self._run(authorization, request_id, validate, names=(query.reference.name,))
+
+    def history_records(
+        self, authorization: str | None, request_id: str, query: HistoricalReviewListQuery
+    ) -> HistoricalReviewPage:
+        store = self.historical_reviews
+        if store is None:
+            raise DomainError(
+                "POLICY_HISTORY_NOT_CONFIGURED", "Historical review records are not enabled", 503
+            )
+        return self._run(
+            authorization,
+            request_id,
+            lambda session, actor, principal: store.list(actor, query),
+            names=(query.source.name,),
+        )
+
+    def history_record(
+        self, authorization: str | None, request_id: str, query: HistoricalReviewDetailQuery
+    ) -> PolicyStoredHistoryView:
+        store = self.historical_reviews
+        if store is None:
+            raise DomainError(
+                "POLICY_HISTORY_NOT_CONFIGURED", "Historical review records are not enabled", 503
+            )
+        return self._run(
+            authorization,
+            request_id,
+            lambda session, actor, principal: PolicyStoredHistoryView.of(store.get(actor, query)),
+            names=(query.source.name,),
         )
 
     def _name(self, name: str) -> None:

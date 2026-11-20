@@ -18,13 +18,18 @@ from aris.core.commands.service import CommandService, DatabaseCommand
 from aris.core.commands.worker import CommandWorker
 from aris.interfaces.commands.auth import BoundSubjectTokens
 from aris.interfaces.policy.drafts import PolicyDraftCommandSurface
+from aris.modules.lyra.quota_evidence_service import HistoricalQuotaEvidenceService
 from aris.modules.nova.policy_catalog_commands import RecordPolicyDraftCommand
 from aris.modules.nova.policy_catalog_service import PolicyCatalogService
 from aris.modules.nova.policy_feedback_commands import RecordPolicyFeedbackCommand
 from aris.modules.nova.policy_feedback_service import PolicyFeedbackService
+from aris.modules.nova.policy_history_record_commands import RecordHistoricalPolicyReviewCommand
+from aris.modules.nova.policy_history_record_schemas import HistoricalReviewConfiguration
+from aris.modules.nova.policy_history_record_service import PolicyHistoricalReviewService
 from aris.modules.nova.policy_material_commands import RecordPolicyReviewMaterialCommand
 from aris.modules.nova.policy_material_schemas import ImplementationReference
 from aris.modules.nova.policy_material_service import PolicyReviewMaterialService
+from aris.modules.nova.quota_history_service import HistoricalQuotaAssessmentService
 
 
 class PolicyDraftRuntimeConfig(AccessContract):
@@ -38,6 +43,7 @@ class PolicyDraftRuntimeConfig(AccessContract):
     poll_seconds: float = Field(default=1, ge=0.1, le=60)
     review_material_implementation_ref: ImplementationReference | None = None
     feedback_writing: bool = Field(default=False, strict=True)
+    historical_review_storage: HistoricalReviewConfiguration | None = None
 
     @model_validator(mode="after")
     def explicit_workspace(self) -> "PolicyDraftRuntimeConfig":
@@ -67,6 +73,7 @@ def validate_policy_draft_configuration(
 class PolicyDraftComponents:
     user_api: PolicyDraftCommandSurface
     worker: CommandWorker
+    historical_reviews: PolicyHistoricalReviewService | None = None
 
 
 def build_policy_draft_components(
@@ -80,6 +87,16 @@ def build_policy_draft_components(
     catalog = PolicyCatalogService(sessions, clock=clock)
     actions: list[DatabaseCommand] = [RecordPolicyDraftCommand(catalog)]
     allowed = ["policy.record_draft"]
+    historical_reviews = None
+    if config.historical_review_storage is not None:
+        historical_reviews = PolicyHistoricalReviewService(
+            catalog,
+            HistoricalQuotaAssessmentService(catalog, HistoricalQuotaEvidenceService(sessions)),
+            config.historical_review_storage,
+            writing_enabled=True,
+        )
+        actions.append(RecordHistoricalPolicyReviewCommand(historical_reviews))
+        allowed.append("policy.record_historical_review")
     if config.feedback_writing:
         actions.append(
             RecordPolicyFeedbackCommand(PolicyFeedbackService(catalog, writing_enabled=True))
@@ -115,6 +132,8 @@ def build_policy_draft_components(
             policy_names,
             material_implementation_ref=config.review_material_implementation_ref,
             feedback_writing=config.feedback_writing,
+            historical_review_storage=config.historical_review_storage,
         ),
         worker=CommandWorker(intake, config.worker_limits),
+        historical_reviews=historical_reviews,
     )
