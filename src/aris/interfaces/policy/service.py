@@ -19,6 +19,7 @@ from aris.interfaces.policy.drafts import (
     PolicyDraftInput,
     PolicyDraftValidation,
 )
+from aris.interfaces.policy.feedback import PolicyFeedbackValidation
 from aris.interfaces.policy.history import (
     PolicyHistoricalUsage,
     PolicyHistoryAssessmentInput,
@@ -50,6 +51,12 @@ from aris.modules.nova.policy_catalog_service import (
     GLOBAL_SCOPE,
     PolicyCatalogService,
 )
+from aris.modules.nova.policy_feedback_schemas import (
+    PolicyFeedbackListQuery,
+    PolicyFeedbackPage,
+    RecordPolicyFeedback,
+)
+from aris.modules.nova.policy_feedback_service import PolicyFeedbackService
 from aris.modules.nova.policy_material_schemas import (
     PolicyMaterialListQuery,
     PolicyMaterialPage,
@@ -72,6 +79,8 @@ class PolicyCatalogSession(AccessContract):
     review_materials_available: bool = False
     review_material_implementation_ref: str | None = None
     material_comparison_implementation_ref: str | None = None
+    feedback_available: bool = False
+    feedback_writing_available: bool = False
 
 
 class PolicyDetailInput(AccessContract):
@@ -90,6 +99,7 @@ class PolicyReadSurface:
         historical_usage: PolicyHistoricalUsage | None = None,
         review_materials: PolicyReviewMaterialService | None = None,
         material_comparison_implementation_ref: str | None = None,
+        feedback: PolicyFeedbackService | None = None,
     ) -> None:
         if not 1 <= len(policy_names) <= 32 or len(set(policy_names)) != len(policy_names):
             raise ValueError("policy interface requires explicit unique policy names")
@@ -119,6 +129,11 @@ class PolicyReadSurface:
             if review_materials is None:
                 raise ValueError("stored material comparisons require material reads")
         self.material_comparison_implementation_ref = material_comparison_implementation_ref
+        if feedback is not None and feedback.catalog is not catalog:
+            raise ValueError("feedback reads require the same source catalog")
+        if draft_commands is not None and draft_commands.feedback_writing and feedback is None:
+            raise ValueError("feedback writing requires its explicit read interface")
+        self.feedback = feedback
 
     def _run(
         self,
@@ -174,7 +189,49 @@ class PolicyReadSurface:
                 if self.draft_commands is not None and self.review_materials is not None
                 else None,
                 material_comparison_implementation_ref=self.material_comparison_implementation_ref,
+                feedback_available=self.feedback is not None,
+                feedback_writing_available=self.feedback is not None
+                and self.draft_commands is not None
+                and self.draft_commands.feedback_writing,
             ),
+        )
+
+    def feedback_validate(
+        self, authorization: str | None, request_id: str, query: RecordPolicyFeedback
+    ) -> PolicyFeedbackValidation:
+        feedback = self.feedback
+        if (
+            feedback is None
+            or self.draft_commands is None
+            or not self.draft_commands.feedback_writing
+        ):
+            raise DomainError(
+                "POLICY_FEEDBACK_NOT_CONFIGURED", "Feedback writing is not enabled", 503
+            )
+
+        def validate(
+            session: Session, actor: ActorContext, principal: UserPrincipal
+        ) -> PolicyFeedbackValidation:
+            feedback.validate_in_transaction(session, actor, query)
+            return PolicyFeedbackValidation(
+                request=query, inline_bytes=len(bounded_json(query.model_dump(mode="json"), 12288))
+            )
+
+        return self._run(authorization, request_id, validate, names=(query.source.name,))
+
+    def feedback_list(
+        self, authorization: str | None, request_id: str, query: PolicyFeedbackListQuery
+    ) -> PolicyFeedbackPage:
+        feedback = self.feedback
+        if feedback is None:
+            raise DomainError(
+                "POLICY_FEEDBACK_NOT_CONFIGURED", "Feedback reads are not enabled", 503
+            )
+        return self._run(
+            authorization,
+            request_id,
+            lambda session, actor, principal: feedback.list_in_transaction(session, actor, query),
+            names=(query.source.name,),
         )
 
     def materials_validate(

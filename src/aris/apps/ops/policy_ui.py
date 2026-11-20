@@ -29,6 +29,7 @@ from aris.interfaces.policy.service import PolicyReadSurface
 from aris.interfaces.slack.config import SlackSettings
 from aris.modules.lyra.quota_evidence_service import HistoricalQuotaEvidenceService
 from aris.modules.nova.policy_catalog_service import PolicyCatalogService
+from aris.modules.nova.policy_feedback_service import PolicyFeedbackService
 from aris.modules.nova.policy_material_schemas import ImplementationReference
 from aris.modules.nova.policy_material_service import PolicyReviewMaterialService
 from aris.modules.nova.quota_history_service import HistoricalQuotaAssessmentService
@@ -44,6 +45,7 @@ class LocalPolicyConfig(AccessContract):
     historical_usage: tuple[HistoricalPolicyNode, ...] = Field(default=(), max_length=8)
     review_materials_read: bool = Field(default=False, strict=True)
     material_comparison_implementation_ref: ImplementationReference | None = None
+    feedback_read: bool = Field(default=False, strict=True)
 
     def settings(self) -> Settings:
         url = make_url(self.database_url.get_secret_value())
@@ -91,6 +93,8 @@ def main(argv: list[str] | None = None) -> int:
         ):
             raise ValueError("material comparisons require explicit material reads")
         if config.draft_commands is not None:
+            if config.draft_commands.feedback_writing and not config.feedback_read:
+                raise ValueError("feedback writing requires explicit feedback reads")
             validate_policy_draft_configuration(config.draft_commands, auth, config.read_token)
             if (
                 config.draft_commands.review_material_implementation_ref is not None
@@ -107,18 +111,20 @@ def main(argv: list[str] | None = None) -> int:
                 "port": args.port,
             }
             if config.draft_commands is not None:
-                summary["draft_commands"] = ["policy.record_draft"]
+                actions = ["policy.record_draft"]
                 if config.draft_commands.review_material_implementation_ref is not None:
-                    summary["draft_commands"] = [
-                        "policy.record_draft",
-                        "policy.record_review_material",
-                    ]
+                    actions.append("policy.record_review_material")
+                if config.draft_commands.feedback_writing:
+                    actions.append("policy.record_feedback")
+                summary["draft_commands"] = actions
             if config.historical_usage:
                 summary["historical_usage_nodes"] = [
                     node.node_id for node in config.historical_usage
                 ]
             if config.review_materials_read:
                 summary["review_materials_read"] = True
+            if config.feedback_read:
+                summary["feedback_read"] = True
             if config.material_comparison_implementation_ref is not None:
                 summary["material_comparison_read"] = True
             print(json.dumps(summary))
@@ -163,6 +169,7 @@ def main(argv: list[str] | None = None) -> int:
             if config.review_materials_read
             else None,
             material_comparison_implementation_ref=config.material_comparison_implementation_ref,
+            feedback=PolicyFeedbackService(catalog) if config.feedback_read else None,
         )
         uvicorn.run(
             create_app(

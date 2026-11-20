@@ -20,6 +20,7 @@ from aris.modules.nova.policy_catalog_schemas import (
     PolicySourceComparisonQuery,
     PolicySourceListQuery,
 )
+from aris.modules.nova.policy_feedback_schemas import PolicyFeedbackListQuery, RecordPolicyFeedback
 from aris.modules.nova.policy_material_schemas import (
     PolicyMaterialListQuery,
     RecordPolicyReviewMaterial,
@@ -37,6 +38,35 @@ PAGE_HEADERS = {
 
 def build_router(service: PolicyReadSurface) -> APIRouter:
     router = APIRouter(prefix="/internal/policy", tags=["policy-source-review"])
+
+    if service.feedback is not None:
+
+        @router.post("/feedback")
+        async def feedback(request: Request) -> JSONResponse:
+            if request.query_params:
+                raise DomainError("VALIDATION_ERROR", "Unexpected feedback query parameters", 422)
+            query = await bounded_input(request, PolicyFeedbackListQuery)
+            result = await run_in_threadpool(
+                service.feedback_list, authorization(request), request.state.request_id, query
+            )
+            return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
+
+        if service.draft_commands is not None and service.draft_commands.feedback_writing:
+
+            @router.post("/feedback/validate")
+            async def validate_feedback(request: Request) -> JSONResponse:
+                if request.query_params:
+                    raise DomainError(
+                        "VALIDATION_ERROR", "Unexpected feedback query parameters", 422
+                    )
+                query = await bounded_input(request, RecordPolicyFeedback)
+                result = await run_in_threadpool(
+                    service.feedback_validate,
+                    authorization(request),
+                    request.state.request_id,
+                    query,
+                )
+                return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
 
     if service.material_comparison_implementation_ref is not None:
 
@@ -209,6 +239,8 @@ def build_router(service: PolicyReadSurface) -> APIRouter:
             "policy-materials.js",
             "policy-material-save.js",
             "policy-material-compare.js",
+            "policy-feedback.js",
+            "policy-feedback.css",
             "policy-editor.js",
             "policy.css",
         ],

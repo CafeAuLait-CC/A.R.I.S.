@@ -20,6 +20,8 @@ from aris.interfaces.commands.auth import BoundSubjectTokens
 from aris.interfaces.policy.drafts import PolicyDraftCommandSurface
 from aris.modules.nova.policy_catalog_commands import RecordPolicyDraftCommand
 from aris.modules.nova.policy_catalog_service import PolicyCatalogService
+from aris.modules.nova.policy_feedback_commands import RecordPolicyFeedbackCommand
+from aris.modules.nova.policy_feedback_service import PolicyFeedbackService
 from aris.modules.nova.policy_material_commands import RecordPolicyReviewMaterialCommand
 from aris.modules.nova.policy_material_schemas import ImplementationReference
 from aris.modules.nova.policy_material_service import PolicyReviewMaterialService
@@ -35,6 +37,7 @@ class PolicyDraftRuntimeConfig(AccessContract):
     worker_limits: CommandWorkerLimits
     poll_seconds: float = Field(default=1, ge=0.1, le=60)
     review_material_implementation_ref: ImplementationReference | None = None
+    feedback_writing: bool = Field(default=False, strict=True)
 
     @model_validator(mode="after")
     def explicit_workspace(self) -> "PolicyDraftRuntimeConfig":
@@ -77,6 +80,11 @@ def build_policy_draft_components(
     catalog = PolicyCatalogService(sessions, clock=clock)
     actions: list[DatabaseCommand] = [RecordPolicyDraftCommand(catalog)]
     allowed = ["policy.record_draft"]
+    if config.feedback_writing:
+        actions.append(
+            RecordPolicyFeedbackCommand(PolicyFeedbackService(catalog, writing_enabled=True))
+        )
+        allowed.append("policy.record_feedback")
     if config.review_material_implementation_ref is not None:
         actions.append(
             RecordPolicyReviewMaterialCommand(
@@ -106,6 +114,7 @@ def build_policy_draft_components(
             auth,
             policy_names,
             material_implementation_ref=config.review_material_implementation_ref,
+            feedback_writing=config.feedback_writing,
         ),
         worker=CommandWorker(intake, config.worker_limits),
     )
