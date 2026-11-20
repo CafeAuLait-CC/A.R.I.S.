@@ -2,19 +2,20 @@
 (() => {
   const $ = id => document.getElementById(id);
   const AUDIT_REASON = 'Member changes saved from the member portal.';
-  let reviewTimer = null;
-  const state = {session:null, csrf:"", epoch:0, busy:false, source:"registered", next:null, revision:null, rows:new Map(), page:[], edits:new Map(), selected:new Set(), secrets:new Map(), intent:null};
+  let reviewTimer = null, invitationTimer = null;
+  const state = {session:null, csrf:"", epoch:0, busy:false, authBusy:false, accountBusy:false, authMode:'login',invitation:null,invitationSendAfter:0,source:"registered", next:null, revision:null, rows:new Map(), page:[], edits:new Map(), selected:new Set(), intent:null};
   function el(tag, value, className) {const node=document.createElement(tag);if(value!==undefined)node.textContent=value;if(className)node.className=className;return node;}
   function notice(value, error=false) {$('notice').textContent=value;$('notice').hidden=!value;$('notice').classList.toggle('error',error);}
-  function reviewNotice(value,error=false,working=false) {$('review-status').textContent=value;$('review-status').classList.toggle('error',error);$('review-status').classList.toggle('working',working);}
+  function reviewNotice(value,error=false,working=false) {if($('review-status').textContent!==value)$('review-status').textContent=value;$('review-status').classList.toggle('error',error);$('review-status').classList.toggle('working',working);$('review-dialog').setAttribute('aria-busy',String(working));}
   function lock(value) {state.busy=value;document.querySelectorAll('#workspace button,#workspace input,#workspace select').forEach(node=>node.disabled=value);controls();}
   function controls() {
     const pending=state.intent && (!state.intent.terminal || state.intent.needsRefresh);
-    document.querySelectorAll('#members-panel input,#members-panel select,#members-panel button,#profile-form input,#profile-form button').forEach(node=>node.disabled=state.busy || pending);
+    document.querySelectorAll('#members-panel input,#members-panel select,#members-panel button,#profile-form input,#profile-form button,#account-password-form input,#account-password-form button').forEach(node=>node.disabled=state.busy || pending || state.accountBusy);
     $('review-selected').disabled=state.busy || pending || !state.selected.size;
     $('next-page').disabled=state.busy || pending || !state.next;
     $('resume-review').hidden=!state.intent;
     $('resume-review').disabled=state.busy;
+    $('sign-out').disabled=state.busy || state.accountBusy;
     $('selection-count').textContent=state.selected.size+' selected';
     $('load-slack').hidden=!state.session?.slack_roster_available;
     document.querySelectorAll('.no-edit').forEach(node=>node.disabled=true);
@@ -31,27 +32,109 @@
   }
   function clear() {
     clearTimeout(reviewTimer);reviewTimer=null;
-    state.epoch++;state.session=null;state.csrf='';state.intent=null;state.rows.clear();state.edits.clear();state.selected.clear();state.secrets.clear();state.page=[];state.next=null;state.busy=false;
+    clearTimeout(invitationTimer);invitationTimer=null;
+    state.epoch++;state.session=null;state.csrf='';state.intent=null;state.rows.clear();state.edits.clear();state.selected.clear();state.page=[];state.next=null;state.busy=false;state.accountBusy=false;state.invitation=null;
     $('credential').value='';$('members-body').replaceChildren();$('review-content').replaceChildren();$('general-data').replaceChildren();$('profile-name').value='';$('profile-email').value='';
+    ['login-password','invitation-code','invitation-password','invitation-confirm','current-password','account-password','account-confirm','account-username'].forEach(id=>$(id).value='');
     $('review-dialog').close();$('add-dialog').close();$('workspace').hidden=true;$('account').hidden=true;$('login-panel').hidden=false;
-    ['new-id','new-name','new-email','filter'].forEach(id=>$(id).value='');$('actor-name').textContent='';$('actor-role').textContent='';lock(false);
+    $('legacy-login').open=false;
+    ['new-id','new-name','new-email','new-username','filter'].forEach(id=>$(id).value='');$('actor-name').textContent='';$('actor-role').textContent='';authMode('login');lock(false);
   }
   function tab(name) {for(const value of ['members','profile','general'])$(value+'-panel').hidden=value!==name;}
   async function connect() {
     state.session=await request('/internal/members/session',undefined,'GET');state.csrf=state.session.csrf_token;state.revision=state.session.actor.directory_revision;
     $('actor-name').textContent=state.session.actor.display_name;$('actor-role').textContent=state.session.actor.role;
     $('profile-name').value=state.session.actor.display_name;$('profile-email').value=state.session.actor.email || '';
+    accountFields();
     $('members-tab').hidden=state.session.actor.role!=='admin';$('account').hidden=false;$('workspace').hidden=false;$('login-panel').hidden=true;
     $('general-node').replaceChildren(...state.session.nodes.map(node=>new Option(node,node)));
     const date=new Intl.DateTimeFormat('en-CA',{timeZone:state.session.actor.timezone,year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date()),parts=Object.fromEntries(date.map(part=>[part.type,part.value]));
     const today=parts.year+'-'+parts.month+'-'+parts.day;$('general-start').value=today;$('general-end').value=today;
     tab(state.session.actor.role==='admin'?'members':'profile');controls();
   }
-  $('login-form').addEventListener('submit',async event=>{
-    event.preventDefault();if(state.busy)return;state.epoch++;state.busy=true;$('sign-in').disabled=true;
-    const credential=$('credential').value.trim();$('credential').value='';
-    try{await request('/internal/members/login',{credential,remember:$('remember').checked});await connect();notice('Signed in.');}
-    catch(error){notice(error.message,true);}finally{state.busy=false;$('sign-in').disabled=false;controls();}
+  function username(value) {
+    const normalized=value.trim().toLowerCase();
+    if(!/^[a-z][a-z0-9_.-]{2,63}$/.test(normalized))throw new Error('Use a username of 3–64 characters, starting with a letter and containing letters, numbers, dots, underscores or hyphens.');
+    return normalized;
+  }
+  function password(value,confirmation=value) {
+    if([...value].length<15 || [...value].length>128)throw new Error('Use a password of 15–128 characters.');
+    if(value!==confirmation)throw new Error('The passwords do not match.');
+    return value;
+  }
+  function authControls() {
+    document.querySelectorAll('#login-panel input,#login-panel button').forEach(node=>node.disabled=state.authBusy);
+    $('send-invitation').disabled=state.authBusy || Date.now()<state.invitationSendAfter;
+    if(Date.now()<state.invitationSendAfter && invitationTimer===null)invitationTimer=setTimeout(()=>{invitationTimer=null;authControls();},state.invitationSendAfter-Date.now());
+  }
+  function authMode(mode) {
+    if(state.authBusy)return;
+    state.authMode=mode;state.invitation=null;
+    $('login-form').hidden=mode!=='login';$('invitation-form').hidden=mode==='login';$('legacy-login').hidden=mode!=='login';$('invitation-fields').hidden=true;
+    $('login-title').textContent=mode==='login'?'Sign in':mode==='activate'?'Activate account':'Reset password';
+    $('login-intro').textContent=mode==='login'?'Enter your username and password.':'Request an invitation code in Slack, then choose your password.';
+    $('complete-invitation').textContent=mode==='activate'?'Activate account':'Reset password';
+    $('invitation-message').textContent='';
+    ['login-password','invitation-code','invitation-password','invitation-confirm','credential'].forEach(id=>$(id).value='');
+    for(const [id,value] of [['auth-sign-in','login'],['auth-activate','activate'],['auth-reset','reset']])$(id).setAttribute('aria-current',value===mode?'page':'false');
+    authControls();
+  }
+  $('auth-sign-in').addEventListener('click',()=>authMode('login'));$('auth-activate').addEventListener('click',()=>authMode('activate'));$('auth-reset').addEventListener('click',()=>authMode('reset'));
+  async function signIn(payload) {
+    if(state.authBusy)return;state.epoch++;state.authBusy=true;authControls();notice('Signing in…');
+    try{const data=await request('/internal/members/login',payload);if(data.signed_in!==true)throw new Error('Sign-in could not be verified.');await connect();notice('Signed in.');}
+    catch(error){notice(error.message,true);}finally{state.authBusy=false;authControls();controls();}
+  }
+  $('login-form').addEventListener('submit',event=>{
+    event.preventDefault();if(state.authBusy)return;
+    try{const payload={username:username($('login-username').value),password:$('login-password').value,remember:$('remember').checked};$('login-password').value='';signIn(payload);}catch(error){notice(error.message,true);}
+  });
+  $('legacy-form').addEventListener('submit',event=>{event.preventDefault();if(state.authBusy)return;const credential=$('credential').value.trim();$('credential').value='';signIn({credential,remember:$('legacy-remember').checked});});
+  $('invitation-username').addEventListener('input',()=>{state.invitation=null;$('invitation-fields').hidden=true;['invitation-code','invitation-password','invitation-confirm'].forEach(id=>$(id).value='');$('invitation-message').textContent='Request a code for this username.';});
+  $('send-invitation').addEventListener('click',async()=>{
+    if(state.authBusy || Date.now()<state.invitationSendAfter || state.authMode==='login')return;
+    let account;try{account=username($('invitation-username').value);}catch(error){notice(error.message,true);return;}
+    state.authBusy=true;state.invitation=null;state.invitationSendAfter=Date.now()+60000;authControls();$('invitation-fields').hidden=true;$('invitation-message').textContent='Sending invitation code…';
+    clearTimeout(invitationTimer);invitationTimer=setTimeout(()=>{invitationTimer=null;authControls();},60000);
+    try {
+      const data=await request('/internal/members/invitation',{username:account,purpose:state.authMode});
+      if(typeof data.challenge_id!=='string' || !data.challenge_id || !Number.isFinite(data.expires_in) || data.expires_in<=0 || data.expires_in>600)throw new Error('Invitation delivery could not be verified.');
+      state.invitation={username:account,purpose:state.authMode,id:data.challenge_id,expiresAt:Date.now()+data.expires_in*1000};
+      $('invitation-fields').hidden=false;$('invitation-message').textContent=data.message || 'Check Slack for your invitation code.';
+    } catch(error){$('invitation-message').textContent=error.message+(error.status?'':' Delivery is uncertain. Wait before requesting another code.');}
+    finally{state.authBusy=false;authControls();}
+  });
+  $('invitation-form').addEventListener('submit',async event=>{
+    event.preventDefault();if(state.authBusy)return;
+    let payload,invitation=state.invitation;
+    try {
+      if(!invitation || invitation.username!==username($('invitation-username').value) || invitation.purpose!==state.authMode)throw new Error('Request an invitation code for this username first.');
+      if(Date.now()>=invitation.expiresAt)throw new Error('This invitation code expired. Request a new code.');
+      const code=$('invitation-code').value.trim();if(!/^[0-9]{6}$/.test(code))throw new Error('Enter the six-digit invitation code from Slack.');
+      payload={username:invitation.username,challenge_id:invitation.id,code,password:password($('invitation-password').value,$('invitation-confirm').value),remember:$('invitation-remember').checked};
+    }catch(error){notice(error.message,true);return;}
+    state.authBusy=true;authControls();['invitation-code','invitation-password','invitation-confirm'].forEach(id=>$(id).value='');notice(state.authMode==='activate'?'Activating account…':'Resetting password…');
+    let acknowledged=false;
+    try {const data=await request('/internal/members/'+(invitation.purpose==='activate'?'register':'password-reset'),payload);if(data.signed_in!==true)throw new Error('Account activation could not be verified.');acknowledged=true;state.invitation=null;await connect();notice('Signed in.');}
+    catch(error){notice(acknowledged?'Password saved. Sign in with your new password to continue.':error.message+(error.status?'':' The result is uncertain. Try signing in with your chosen password before requesting another code.'),true);}
+    finally{state.authBusy=false;authControls();controls();}
+  });
+  function accountFields() {
+    const account=state.session?.account || {username:null,password_ready:false};
+    $('account-username').value=account.username || '';$('account-username').readOnly=account.password_ready;
+    $('current-password-field').hidden=!account.password_ready;$('current-password').required=account.password_ready;
+    $('save-password').textContent=account.password_ready?'Update password':'Set password';
+    $('account-note').textContent=account.password_ready?'Your login username is managed by an administrator.':'Set your username and password to finish migrating your account.';
+    ['current-password','account-password','account-confirm'].forEach(id=>$(id).value='');$('account-message').textContent='';
+  }
+  $('account-password-form').addEventListener('submit',async event=>{
+    event.preventDefault();if(state.accountBusy || state.busy || (state.intent && (!state.intent.terminal || state.intent.needsRefresh)))return;
+    let payload;try{payload={username:username($('account-username').value),password:password($('account-password').value,$('account-confirm').value),remember:$('account-remember').checked};if(state.session.account?.password_ready)payload.current_password=$('current-password').value;}catch(error){$('account-message').textContent=error.message;return;}
+    state.accountBusy=true;controls();$('account-message').textContent='Saving…';['current-password','account-password','account-confirm'].forEach(id=>$(id).value='');
+    let acknowledged=false;
+    try{const data=await request('/internal/members/password',payload);if(data.signed_in!==true)throw new Error('The password change could not be verified.');acknowledged=true;await connect();tab('profile');$('account-message').textContent='Password saved.';}
+    catch(error){$('account-message').textContent=acknowledged?'Password saved. Sign in again to continue.':error.message+(error.status?'':' The result is uncertain. Try signing in with your new password before another change.');}
+    finally{state.accountBusy=false;controls();}
   });
   $('sign-out').addEventListener('click',async()=>{if(state.busy)return;try{await request('/internal/members/logout',{});clear();notice('Signed out.');}catch(error){notice(error.message,true);}});
   $('members-tab').addEventListener('click',()=>tab('members'));
@@ -59,7 +142,7 @@
   $('general-tab').addEventListener('click',()=>tab('general'));
   function cacheRow(row, access) {
     const registered=row.registered, slack=row.slack;
-    return {id:slack?.external_id || registered.external_id,user:registered?.user_id || null,name:slack?.display_name || registered.profile.display_name,profile:registered?.profile || {display_name:slack.display_name,timezone:slack.timezone || state.session.actor.timezone,email:null},status:registered?.status || 'unregistered',active:slack?.deleted!==true,eligible:registered || (slack?.deleted===false && slack?.is_bot===false && slack?.is_app_user!==true),mappings:registered?.mappings || [],role:access?.role || 'member',bindings:access?.bindings || [],revoked_when_member:access?.revoked_when_member || [],generation:access?.credential_generation || null,credential:access?.credential_available || false,revision:state.revision};
+    return {id:slack?.external_id || registered.external_id,user:registered?.user_id || null,name:slack?.display_name || registered.profile.display_name,profile:registered?.profile || {display_name:slack.display_name,timezone:slack.timezone || state.session.actor.timezone,email:null},status:registered?.status || 'unregistered',active:slack?.deleted!==true,eligible:registered || (slack?.deleted===false && slack?.is_bot===false && slack?.is_app_user!==true),mappings:registered?.mappings || [],role:access?.role || 'member',bindings:access?.bindings || [],revoked_when_member:access?.revoked_when_member || [],login_username:access?.login_username || null,password_ready:access?.password_ready===true,revision:state.revision};
   }
   async function load(source, next=false) {
     if(state.busy)return;lock(true);notice('Loading members…');
@@ -80,15 +163,16 @@
   function draft(row,key,fallback) {return state.edits.get(row.id)?.[key] ?? fallback;}
   function field(row,key,value,label) {const node=el('input');node.value=draft(row,key,value);node.setAttribute('aria-label',row.id+' '+label);node.autocomplete='off';node.addEventListener('input',()=>edit(row,key,node.value));return node;}
   function render() {
-    const heading=el('tr');['','Member','Profile','Role / access',...state.session.nodes,'Status'].forEach(value=>heading.append(el('th',value)));$('members-head').replaceChildren(heading);$('members-body').replaceChildren();
+    const heading=el('tr');['','Member','Profile','Account','Role / access',...state.session.nodes,'Status'].forEach(value=>heading.append(el('th',value)));$('members-head').replaceChildren(heading);$('members-body').replaceChildren();
     for(const id of state.page) {
       const row=state.rows.get(id),tr=el('tr');tr.dataset.id=id;tr.dataset.search=(row.name+' '+id).toLowerCase();tr.dataset.inactive=String(!row.active || row.status==='suspended');
       const check=el('input');check.type='checkbox';check.checked=state.selected.has(id);check.setAttribute('aria-label','Select '+id);check.addEventListener('change',()=>{if(check.checked)state.selected.add(id);else state.selected.delete(id);controls();});
       const selectCell=el('td');selectCell.append(check);tr.append(selectCell);
       const who=el('td');who.append(el('div',row.name,'member-name'),el('div',id,'member-id'),el('p',row.user?'Registered':'Not registered','muted small'));if(!row.eligible){who.append(el('p','Not an active human Slack account','muted small'));check.disabled=true;check.classList.add('no-edit');}tr.append(who);
       const profile=el('td'),email=field(row,'email',row.profile.email || '','email');email.type='email';email.maxLength=320;profile.append(field(row,'display_name',row.profile.display_name,'display name'),email);tr.append(profile);
+      const account=el('td'),login=field(row,'login_username',row.login_username || '','login username');login.maxLength=64;login.spellcheck=false;account.append(login,el('p',row.password_ready?'Password set':'Needs activation','muted small'));tr.append(account);
       const roleCell=el('td'),role=el('select');role.setAttribute('aria-label',id+' role');role.append(new Option('Member','member'),new Option('Admin','admin'));role.value=draft(row,'role',row.role);role.addEventListener('change',()=>edit(row,'role',role.value));if(!row.user){role.disabled=true;role.classList.add('no-edit');}roleCell.append(role);
-      if(row.user){const credential=el('button','Prepare new credential','quiet small-button');credential.type='button';credential.addEventListener('click',()=>prepareCredential(row));if(row.user===state.session.actor.user_id){credential.disabled=true;credential.classList.add('no-edit');credential.title='Another administrator must rotate your login credential.';}roleCell.append(el('p',row.credential?'Personal login configured':'Uses configured login or no credential','muted small'),credential);if(state.secrets.has(id))roleCell.append(el('p','New credential prepared','changed-note'));}tr.append(roleCell);
+      tr.append(roleCell);
       for(const node of state.session.nodes){const cell=el('td'),links=row.mappings.filter(link=>link.node_id===node);if(links.length>1){cell.append(el('p',links.map(link=>link.os_username).join(', ')),el('p','Multiple aliases: retained','muted small'));}else cell.append(field(row,'node:'+node,links[0]?.os_username || '',node+' Linux username'));tr.append(cell);}
       const status=el('td');status.append(el('span',draft(row,'active',row.status!=='suspended')?'Active':'Removed','state'));
       if(row.user){const action=el('button',row.status==='suspended'?'Restore':'Remove','quiet small-button');action.type='button';action.addEventListener('click',()=>{edit(row,'active',row.status==='suspended');render();});status.append(action);}tr.append(status);$('members-body').append(tr);
@@ -103,13 +187,9 @@
   $('load-members').addEventListener('click',()=>load('registered'));
   $('load-slack').addEventListener('click',()=>load('slack'));
   $('next-page').addEventListener('click',()=>load(state.source,true));
-  $('add-member').addEventListener('click',()=>{$('new-id').value='';$('new-name').value='';$('new-email').value='';$('add-dialog').showModal();});
+  $('add-member').addEventListener('click',()=>{$('new-id').value='';$('new-name').value='';$('new-email').value='';$('new-username').value='';$('add-dialog').showModal();});
   $('close-add').addEventListener('click',()=>$('add-dialog').close());
-  $('add-form').addEventListener('submit',event=>{event.preventDefault();const id=$('new-id').value.trim();if(state.rows.has(id)){notice('This member is already loaded. Edit their existing row.',true);return;}const row={id,user:null,name:$('new-name').value.trim(),profile:{display_name:$('new-name').value.trim(),timezone:state.session.actor.timezone,email:$('new-email').value.trim() || null},status:'unregistered',active:true,eligible:true,mappings:[],role:'member',bindings:[],generation:null,credential:false,revision:state.revision,manual:true};state.rows.set(id,row);state.page.push(id);state.selected.add(id);$('add-dialog').close();render();});
-  async function prepareCredential(row) {
-    if(state.busy || row.status!=='active')return;const epoch=state.epoch;
-    try {const bytes=crypto.getRandomValues(new Uint8Array(32)),raw=btoa(String.fromCharCode(...bytes)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');const digest=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(raw))),byte=>byte.toString(16).padStart(2,'0')).join('');if(epoch!==state.epoch)return;state.secrets.set(row.id,{raw,digest,generation:row.generation});state.selected.add(row.id);render();notice('A new personal credential is prepared. Review and confirm to activate it; the secret is shown only after success.');}catch(error){if(epoch===state.epoch)notice('A secure credential could not be generated in this browser.',true);}
-  }
+  $('add-form').addEventListener('submit',event=>{event.preventDefault();const id=$('new-id').value.trim();if(state.rows.has(id)){notice('This member is already loaded. Edit their existing row.',true);return;}let login=null;try{if($('new-username').value.trim())login=username($('new-username').value);}catch(error){notice(error.message,true);return;}const row={id,user:null,name:$('new-name').value.trim(),profile:{display_name:$('new-name').value.trim(),timezone:state.session.actor.timezone,email:$('new-email').value.trim() || null},status:'unregistered',active:true,eligible:true,mappings:[],role:'member',bindings:[],login_username:login,password_ready:false,revision:state.revision,manual:true};state.rows.set(id,row);state.page.push(id);state.selected.add(id);$('add-dialog').close();render();});
   function changes() {
     const result=[];
     for(const id of state.selected) {
@@ -117,6 +197,9 @@
       if(!row.manual && row.revision!==state.revision)throw new Error('Load the current page for '+id+' before review. Your edits are preserved.');
       const profile={display_name:draft(row,'display_name',row.profile.display_name).trim(),timezone:row.profile.timezone,email:draft(row,'email',row.profile.email || '').trim() || null};
       if(!profile.display_name)throw new Error('Enter a display name for '+id+'.');
+      const loginValue=draft(row,'login_username',row.login_username || '').trim();
+      if(row.user && row.login_username && !loginValue)throw new Error('Keep the existing login username or enter a new one for '+id+'.');
+      const login=loginValue?username(loginValue):null;
       const mappings=[];
       for(const node of state.session.nodes) {
         const links=row.mappings.filter(link=>link.node_id===node);if(links.length>1)continue;
@@ -127,14 +210,14 @@
           if(value && (!links[0] || links[0].os_username!==value || links[0].confidence!=='verified' || links[0].source!=='manual'))result.push({type:'assign_node_user',node_id:node,os_username:value,user_id:row.user,expected_user_id:links[0]?.os_username===value?row.user:null});
         }
       }
-      if(!row.user)result.push({type:'register_identity',subject:{provider:'slack',namespace:state.session.workspace_namespace,external_id:id},profile,mappings});
+      if(!row.user)result.push({type:'register_identity',subject:{provider:'slack',namespace:state.session.workspace_namespace,external_id:id},profile,mappings,...(login?{login_username:login}:{})});
       else {
         const role=draft(row,'role',row.role),active=draft(row,'active',row.status==='active'),change={type:'edit_member',user_id:row.user};
         if(profile.display_name!==row.profile.display_name || profile.email!==(row.profile.email || null))change.profile=profile;
         if(active!==(row.status==='active'))change.active=active;
-        if(role!==row.role || state.edits.get(id)?.role!==undefined){change.role=role;change.previous_bindings=row.bindings;}
+        if(login!==(row.login_username || null))change.login_username=login;
+        if(role!==row.role || state.edits.get(id)?.role!==undefined || !row.bindings.some(binding=>binding.role_name===role && binding.scope.type==='global' && binding.scope.id==='*')){change.role=role;change.previous_bindings=row.bindings;}
         if(Object.keys(change).length>2)result.push(change);
-        const secret=state.secrets.get(id);if(secret)result.push({type:'issue_login_credential',user_id:row.user,token_digest:secret.digest,expected_generation:secret.generation});
       }
     }
     if(!result.length)throw new Error('The selected members have no changes.');
@@ -142,9 +225,9 @@
     return result;
   }
   function begin(command,parameters,selected) {
-    if(state.busy || (state.intent && (!state.intent.terminal || state.intent.needsRefresh)))return;
+    if(state.busy || state.accountBusy || (state.intent && (!state.intent.terminal || state.intent.needsRefresh)))return;
     clearTimeout(reviewTimer);reviewTimer=null;
-    state.intent={command,parameters,selected:[...selected],users:new Set([...selected].map(id=>state.rows.get(id)?.user).filter(Boolean)),key:crypto.randomUUID(),confirmKey:crypto.randomUUID(),withdrawKey:crypto.randomUUID(),commandId:null,proof:null,busy:false,terminal:false,needsRefresh:false,successApplied:false,pollCount:0,confirmedAt:null,pendingOperation:null,uncertain:false,secretCopy:new Map([...selected].filter(id=>state.secrets.has(id)).map(id=>[id,state.secrets.get(id)]))};
+    state.intent={command,parameters,selected:[...selected],users:new Set([...selected].map(id=>state.rows.get(id)?.user).filter(Boolean)),key:crypto.randomUUID(),confirmKey:crypto.randomUUID(),withdrawKey:crypto.randomUUID(),commandId:null,proof:null,busy:false,terminal:false,needsRefresh:false,successApplied:false,pollCount:0,confirmedAt:null,pendingOperation:null,uncertain:false};
     $('review-content').replaceChildren();reviewView('preparing','Processing…',false,true);$('review-dialog').showModal();advanceReview();controls();
   }
   $('review-selected').addEventListener('click',()=>{try{begin('identity.manage_members',{expected_revision:state.revision,reason:AUDIT_REASON,changes:changes()},state.selected);}catch(error){notice(error.message,true);}});
@@ -168,7 +251,7 @@
     if(change.type==='register_identity')return change.subject.provider==='slack' && change.subject.namespace===state.session.workspace_namespace && intent.selected.includes(change.subject.external_id) && change.mappings.every(link=>state.session.nodes.includes(link.node_id));
     if(change.type==='remove_node_user')return intent.users.has(change.expected_user_id) && state.session.nodes.includes(change.node_id);
     if(change.type==='assign_node_user')return intent.users.has(change.user_id) && state.session.nodes.includes(change.node_id);
-    return ['edit_member','issue_login_credential'].includes(change.type) && intent.users.has(change.user_id);
+    return change.type==='edit_member' && intent.users.has(change.user_id);
   }
   function describeReview(content,intent,parameters) {
     if(intent.command==='identity.edit_own_profile') {
@@ -182,12 +265,14 @@
         const lines=groups.get(key).lines;
         if(change.type==='register_identity') {
           lines.push('Register as Member.','Display name: '+change.profile.display_name,'Email: '+(change.profile.email || 'Not set'));
+          if(change.login_username)lines.push('Login username: '+change.login_username);
           if(!change.mappings.length)lines.push('No Linux username links.');
           change.mappings.forEach(link=>lines.push('Link '+link.node_id+' / '+link.os_username));
         } else if(change.type==='edit_member') {
           if(change.profile)lines.push('Display name: '+change.profile.display_name,'Email: '+(change.profile.email || 'Not set'));
           if(change.active===false)lines.push('Remove this member and disable login. History is retained.');
-          if(change.active===true)lines.push('Restore this member. Issue a new credential if the old one was revoked.');
+          if(change.active===true)lines.push('Restore this member. They can request an invitation code to activate or reset their password.');
+          if(change.login_username!==undefined)lines.push('Login username: '+(change.login_username || 'Not set'));
           if(change.role) {
             lines.push('Set role to '+(change.role==='admin'?'Admin':'Member')+'.');
             const remove=change.role==='member'?(row?.revoked_when_member || []):change.previous_bindings.filter(binding=>['admin','member'].includes(binding.role_name) && !(binding.role_name===change.role && binding.scope.type==='global' && binding.scope.id==='*'));
@@ -198,7 +283,6 @@
           }
         } else if(change.type==='assign_node_user')lines.push('Link '+change.node_id+' / '+change.os_username);
         else if(change.type==='remove_node_user')lines.push('Unlink '+change.node_id+' / '+change.os_username);
-        else lines.push('Replace the personal login credential and sign out existing sessions. The new secret is shown only after success.');
       }
       for(const group of groups.values()){content.append(el('h3',group.title));const list=el('ul');group.lines.forEach(line=>list.append(el('li',line)));content.append(list);}
     }
@@ -207,15 +291,15 @@
     visible.changes?.forEach(change=>{if(change.profile)delete change.profile.timezone;});
     const details=el('details',undefined,'request-details');details.append(el('summary','Request details'),el('p','Request ID: '+intent.commandId,'muted small'),el('pre',JSON.stringify(visible,null,2)));content.append(details);
   }
-  async function applySavedChanges(intent,content) {
+  async function applySavedChanges(intent) {
     intent.needsRefresh=true;
     if(!intent.successApplied) {
-      for(const id of intent.selected){state.edits.delete(id);state.selected.delete(id);state.secrets.delete(id);}
+      for(const id of intent.selected){state.edits.delete(id);state.selected.delete(id);}
       intent.successApplied=true;
     }
-    for(const [id,secret] of intent.secretCopy){content.append(el('h3','Personal credential · '+id));const output=el('input');output.type='password';output.readOnly=true;output.value=secret.raw;output.className='credential-output';output.setAttribute('aria-label',id+' new personal credential');const reveal=el('button','Reveal once','quiet small-button');reveal.type='button';reveal.addEventListener('click',()=>{output.type=output.type==='password'?'text':'password';reveal.textContent=output.type==='password'?'Reveal once':'Hide';});content.append(output,reveal,el('p','Save this credential now. It cannot be retrieved after closing or reloading.','muted small'));}
     state.session=await request('/internal/members/session',undefined,'GET');state.csrf=state.session.csrf_token;state.revision=state.session.actor.directory_revision;
     $('actor-name').textContent=state.session.actor.display_name;$('actor-role').textContent=state.session.actor.role;$('profile-name').value=state.session.actor.display_name;$('profile-email').value=state.session.actor.email || '';
+    accountFields();
     if(state.session.actor.role==='admin') {
       if(!await load('registered'))throw new Error('Changes saved, but the member list could not refresh. Retrying automatically.');
     } else {$('members-tab').hidden=true;tab('profile');}
@@ -240,13 +324,14 @@
       if(data.command_id!==intent.commandId || data.outcome.command_id!==intent.commandId || data.request.command!==intent.command || data.request.scope.type!=='global' || data.request.scope.id!=='*')throw new Error('The canonical request target differs. Confirmation is blocked.');
       const parameters=data.request.parameters;
       if(intent.command==='identity.manage_members' && !parameters.changes.every(change=>safeTarget(change,intent)))throw new Error('The canonical member selection differs. Confirmation is blocked.');
-      const content=$('review-content');content.replaceChildren();describeReview(content,intent,parameters);
+      const signature=JSON.stringify(parameters);
+      if(intent.reviewSignature!==signature){const content=$('review-content');content.replaceChildren();describeReview(content,intent,parameters);intent.reviewSignature=signature;}
       const outcome=data.outcome;
       if(['succeeded','failed','expired','cancelled'].includes(outcome.state)) {
         intent.terminal=true;intent.pendingOperation=null;
         if(outcome.state==='succeeded') {
           reviewView('terminal','Changes saved.');
-          try {await applySavedChanges(intent,content);reviewNotice('Changes saved.');}
+          try {await applySavedChanges(intent);reviewNotice('Changes saved.');}
           catch(error){reviewNotice(error.message || 'Changes saved. Retrying the page update automatically.',true,true);}
         } else if(outcome.state==='failed')reviewView('terminal',failedMessage(outcome.code),true);
         else if(outcome.state==='expired')reviewView('terminal','These changes expired before they could be saved. Your edits are kept.',true);

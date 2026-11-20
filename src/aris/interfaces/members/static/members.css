@@ -2,7 +2,19 @@
 select { font: inherit; border: 1px solid #cad4df; border-radius: 7px; color: #17263b; background: white; padding: 8px 10px; width: 100%; margin: 7px 0; }
 .panel { background: white; border: 1px solid #dfe6ee; border-radius: 14px; padding: 22px; margin-bottom: 20px; }
 .login-panel { max-width: 600px; margin: 45px auto; }
-.login-panel form, #add-form { display: grid; gap: 16px; margin-top: 20px; }
+.login-panel form, #add-form, #invitation-fields { display: grid; gap: 16px; margin-top: 20px; }
+.auth-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 22px; padding-bottom: 12px; border-bottom: 1px solid #dfe6ee; }
+.auth-tabs button { padding: 7px 10px; }
+.auth-tabs [aria-current=page] { background: #e8f4f4; border-color: #147e88; color: #147e88; }
+.migration-login { border-top: 1px solid #dfe6ee; padding-top: 18px; margin-top: 26px; }
+.migration-login summary { cursor: pointer; font-size: 12px; color: #697b91; }
+.migration-login p { margin-top: 12px; }
+.account-password { border-top: 1px solid #dfe6ee; padding-top: 22px; margin-top: 28px; }
+.account-password h3 { font-size: 17px; margin: 0 0 8px; }
+.account-password .check { margin-bottom: 14px; }
+.account-password input[readonly] { background: #f5f7fa; color: #697b91; }
+#account-message:not(:empty) { margin: 12px 0; }
+#invitation-message { line-height: 1.6; overflow-wrap: anywhere; }
 .check { display: flex; align-items: center; gap: 7px; font-weight: 500; }
 .check input { width: auto; margin: 0; }
 .page-nav, .bulk-controls, #account { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
@@ -19,11 +31,9 @@ td { min-width: 150px; }
 td input[type=checkbox] { width: auto; }
 td select { padding: 7px 9px; margin: 0 0 7px; font-size: 13px; }
 .small-button { font-size: 11px; padding: 6px 8px; margin-top: 7px; }
-.changed-note { color: #147e88; font-size: 11px; margin-top: 5px; }
 .general-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(200px,1fr)); gap: 12px; margin-top: 20px; }
 .general-card { border: 1px solid #e2e9ef; border-radius: 9px; padding: 15px; }
 .general-card strong { display: block; margin-bottom: 7px; }
-.credential-output { width: 100%; font-family: ui-monospace,monospace; font-size: 13px; }
 pre { max-height: 300px; overflow: auto; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; padding: 14px; background: #f4f7fa; border-radius: 8px; }
 .request-details { margin-top: 20px; color: #697b91; font-size: 12px; }
 .request-details summary { cursor: pointer; margin-bottom: 10px; }
