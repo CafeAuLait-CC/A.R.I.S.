@@ -1,8 +1,9 @@
 "use strict";
-window.ARISPolicyHistory = ({$,text,request,run,formatDate,quota,onReview=()=>{},onClear=()=>{}}) => {
+window.ARISPolicyHistory = ({$,text,request,run,formatDate,quota,versions,renderDifference,onReview=()=>{},onClear=()=>{}}) => {
   let configured=[],source=null,windows=[],next=null,base=null,locked=false,implementation=null,reportInput=null;
   const panel=$('history-panel');
-  function clearResult(){ $('history-result').hidden=true;$('history-result').replaceChildren();$('history-evidence').hidden=true;$('history-evidence').replaceChildren();reportInput=null;$('history-report').disabled=true;onClear(); }
+  let comparison=null;
+  function clearResult(){ $('history-result').hidden=true;$('history-result').replaceChildren();$('history-evidence').hidden=true;$('history-evidence').replaceChildren();reportInput=null;$('history-report').disabled=true;comparison?.clear();onClear(); }
   function clearWindows(){windows=[];next=null;base=null;$('history-window').replaceChildren();$('history-note').textContent='';$('history-selected').textContent='';clearResult();controls();}
   function controls(){
     const usable=source?.source.spec.quota.scope==='per_node' && $('history-node').options.length>0;
@@ -16,6 +17,7 @@ window.ARISPolicyHistory = ({$,text,request,run,formatDate,quota,onReview=()=>{}
     $('history-review').disabled=locked || !usable || windows.length===0 || !implementation;
     $('history-report').disabled=locked || !reportInput;
     $('history-more').hidden=next===null || windows.length>=128;
+    comparison?.setBusy(locked || !usable,windows.length>0);
   }
   function showSource(view){
     source=view;clearWindows();
@@ -23,7 +25,7 @@ window.ARISPolicyHistory = ({$,text,request,run,formatDate,quota,onReview=()=>{}
     $('history-node').replaceChildren(...allowed.map(id=>new Option(id,id)));
     $('history-source').textContent=view?`${view.source.metadata.name} · 版本 ${view.source.metadata.version}`:'';
     $('history-unavailable').textContent=view?.source.spec.quota.scope==='global'?'该来源使用全局额度，需要全部节点证据；此入口只支持逐节点核对。':'该来源没有当前账号可用的已配置节点。';
-    controls();
+    comparison?.source(view);controls();
   }
   function renderWindows(){
     const old=$('history-window').value;
@@ -97,6 +99,7 @@ window.ARISPolicyHistory = ({$,text,request,run,formatDate,quota,onReview=()=>{}
       resultView(result);
     },'正在核对固定历史额度…');
   });
+  comparison=window.ARISPolicyHistoryCompare({$,text,request,run,versions,input:selectedInput,usage,quota,formatDate,renderDifference});
   $('history-window').addEventListener('change',showSelection);
   for(const id of ['history-node','history-range'])$(id).addEventListener('change',clearWindows);
   $('history-roles').addEventListener('input',clearResult);
@@ -111,5 +114,5 @@ window.ARISPolicyHistory = ({$,text,request,run,formatDate,quota,onReview=()=>{}
     if(input!==reportInput)return;const url=URL.createObjectURL(blob),link=document.createElement('a');
     try{link.href=url;link.download='aris-historical-policy-review.html';document.body.append(link);link.click();}finally{link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}
   },'正在重新核对权限与来源并导出报告…'));
-  return {usage,session(nodes,reference){configured=[...nodes];implementation=reference || null;showSource(null);},source:showSource,reset(){showSource(null);},disconnect(){configured=[];implementation=null;$('history-roles').value='';$('history-selected').textContent='';showSource(null);},setBusy(value){locked=value;controls();}};
+  return {usage,session(nodes,reference,comparisonAvailable){configured=[...nodes];implementation=reference || null;comparison.session(comparisonAvailable,implementation);showSource(null);},source:showSource,reset(){showSource(null);},disconnect(){configured=[];implementation=null;$('history-roles').value='';$('history-selected').textContent='';showSource(null);},setBusy(value){locked=value;controls();}};
 };

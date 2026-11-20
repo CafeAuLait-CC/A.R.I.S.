@@ -31,6 +31,12 @@ from aris.interfaces.policy.history import (
     PolicyHistoryWindowsInput,
     PolicyStoredHistoryView,
 )
+from aris.interfaces.policy.history_comparison import (
+    PolicyHistoryComparison,
+    PolicyHistoryComparisonExport,
+    PolicyHistoryComparisonInput,
+    PolicyHistoryComparisonView,
+)
 from aris.interfaces.policy.materials import (
     PolicyExampleResultView,
     PolicyMaterialComparedCase,
@@ -114,6 +120,7 @@ class PolicyCatalogSession(AccessContract):
     historical_review_implementation_ref: str | None = None
     historical_review_records_available: bool = False
     historical_review_writing_available: bool = False
+    historical_comparison_available: bool = False
     source_approval_requirements: PolicyApprovalRequirements | None = None
     source_approval_requirements_fingerprint: str | None = Field(
         default=None, pattern=r"^[a-f0-9]{64}$"
@@ -145,6 +152,7 @@ class PolicyReadSurface:
         feedback: PolicyFeedbackService | None = None,
         historical_review_implementation_ref: str | None = None,
         historical_reviews: PolicyHistoricalReviewService | None = None,
+        historical_comparison_enabled: bool = False,
         approvals: PolicyApprovalService | None = None,
         approval_summary: PolicyApprovalReviewService | None = None,
     ) -> None:
@@ -192,6 +200,17 @@ class PolicyReadSurface:
             if historical_usage is None:
                 raise ValueError("historical review requires explicit historical usage methods")
         self.historical_review_implementation_ref = historical_review_implementation_ref
+        if historical_comparison_enabled and (
+            historical_usage is None or historical_review_implementation_ref is None
+        ):
+            raise ValueError("historical comparison requires configured history and implementation")
+        self.historical_comparison = (
+            PolicyHistoryComparison(historical_usage, historical_review_implementation_ref)
+            if historical_comparison_enabled
+            and historical_usage is not None
+            and historical_review_implementation_ref is not None
+            else None
+        )
         if historical_reviews is not None and (
             historical_reviews.catalog is not catalog
             or historical_usage is None
@@ -418,6 +437,7 @@ class PolicyReadSurface:
                 and self.draft_commands is not None
                 and self.draft_commands.feedback_writing,
                 historical_review_implementation_ref=self.historical_review_implementation_ref,
+                historical_comparison_available=self.historical_comparison is not None,
                 historical_review_records_available=self.historical_reviews is not None,
                 historical_review_writing_available=self.historical_reviews is not None
                 and self.draft_commands is not None
@@ -667,6 +687,36 @@ class PolicyReadSurface:
             lambda session, actor, principal: history.review(actor, query, reference),
             names=(query.reference.name,),
         )
+
+    def history_compare(
+        self, authorization: str | None, request_id: str, query: PolicyHistoryComparisonInput
+    ) -> PolicyHistoryComparisonView:
+        comparison = self.historical_comparison
+        if comparison is None:
+            raise DomainError(
+                "HISTORICAL_COMPARISON_NOT_CONFIGURED",
+                "Historical comparison is not configured",
+                503,
+            )
+        return self._run(
+            authorization,
+            request_id,
+            lambda session, actor, principal: comparison.compare(actor, query),
+            names=(query.reference.name, query.target.name),
+        )
+
+    def history_compare_export(
+        self, authorization: str | None, request_id: str, query: PolicyHistoryComparisonExport
+    ) -> PolicyHistoryComparisonView:
+        original = PolicyHistoryComparisonInput.model_validate(
+            query.model_dump(mode="json", exclude={"expected_context_fingerprint"})
+        )
+        value = self.history_compare(authorization, request_id, original)
+        if value.context_fingerprint != query.expected_context_fingerprint:
+            raise DomainError(
+                "CONFLICT", "Historical comparison changed; refresh before export", 409
+            )
+        return value
 
     def history_record_validate(
         self, authorization: str | None, request_id: str, query: PolicyHistoryRecordInput

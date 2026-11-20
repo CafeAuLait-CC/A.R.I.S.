@@ -15,6 +15,11 @@ from aris.interfaces.policy.history import (
     PolicyHistoryReviewInput,
     PolicyHistoryWindowsInput,
 )
+from aris.interfaces.policy.history_comparison import (
+    PolicyHistoryComparisonExport,
+    PolicyHistoryComparisonInput,
+)
+from aris.interfaces.policy.history_comparison_report import historical_comparison_report
 from aris.interfaces.policy.history_report import historical_review_report
 from aris.interfaces.policy.material_report import REPORT_CSP, comparison_report
 from aris.interfaces.policy.materials import (
@@ -320,6 +325,38 @@ def build_router(service: PolicyReadSurface) -> APIRouter:
             )
             return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
 
+    if service.historical_comparison is not None:
+
+        @router.post("/history/compare")
+        async def history_compare(request: Request) -> JSONResponse:
+            if request.query_params:
+                raise DomainError("VALIDATION_ERROR", "Unexpected comparison parameters", 422)
+            query = await bounded_input(request, PolicyHistoryComparisonInput)
+            result = await run_in_threadpool(
+                service.history_compare, authorization(request), request.state.request_id, query
+            )
+            return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
+
+        @router.post("/history/compare/report")
+        async def history_comparison_report(request: Request) -> HTMLResponse:
+            if request.query_params:
+                raise DomainError("VALIDATION_ERROR", "Unexpected comparison parameters", 422)
+            query = await bounded_input(request, PolicyHistoryComparisonExport)
+            result = await run_in_threadpool(
+                service.history_compare_export,
+                authorization(request),
+                request.state.request_id,
+                query,
+            )
+            return HTMLResponse(
+                historical_comparison_report(result),
+                headers={
+                    **PAGE_HEADERS,
+                    "Content-Security-Policy": REPORT_CSP,
+                    "Content-Disposition": 'attachment; filename="aris-historical-comparison.html"',
+                },
+            )
+
     if service.historical_usage is not None:
         if service.historical_review_implementation_ref is not None:
 
@@ -441,6 +478,7 @@ def build_router(service: PolicyReadSurface) -> APIRouter:
             "policy-scenarios.js",
             "policy-fields.js",
             "policy-history.js",
+            "policy-history-compare.js",
             "policy-history-records.js",
             "policy-approvals.js",
             "policy-approval-review.js",

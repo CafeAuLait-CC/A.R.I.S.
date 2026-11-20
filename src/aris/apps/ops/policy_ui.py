@@ -55,6 +55,7 @@ class LocalPolicyConfig(AccessContract):
     feedback_read: bool = Field(default=False, strict=True)
     historical_review_implementation_ref: ImplementationReference | None = None
     historical_review_records_read: bool = Field(default=False, strict=True)
+    historical_comparison_read: bool = Field(default=False, strict=True)
     approval_requirements: PolicyApprovalRequirements | None = None
     approval_review: PolicyApprovalReviewRequirements | None = None
 
@@ -124,6 +125,8 @@ def main(argv: list[str] | None = None) -> int:
             if config.historical_review_implementation_ref is not None
             else None
         )
+        if config.historical_comparison_read and review_configuration is None:
+            raise ValueError("historical comparison requires explicit history methods")
         if config.historical_review_records_read and review_configuration is None:
             raise ValueError("saved historical reviews require explicit historical methods")
         if (
@@ -189,6 +192,8 @@ def main(argv: list[str] | None = None) -> int:
                 summary["feedback_read"] = True
             if config.historical_review_implementation_ref is not None:
                 summary["historical_review_read"] = True
+            if config.historical_comparison_read:
+                summary["historical_comparison_read"] = True
             if config.historical_review_records_read:
                 summary["historical_review_records_read"] = True
             if config.approval_requirements is not None:
@@ -271,6 +276,7 @@ def main(argv: list[str] | None = None) -> int:
             feedback=PolicyFeedbackService(catalog) if config.feedback_read else None,
             historical_review_implementation_ref=config.historical_review_implementation_ref,
             historical_reviews=historical_reviews,
+            historical_comparison_enabled=config.historical_comparison_read,
             approvals=approvals,
             approval_summary=PolicyApprovalReviewService(approvals, config.approval_review)
             if approvals is not None and config.approval_review is not None
