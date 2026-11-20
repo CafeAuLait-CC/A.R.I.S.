@@ -57,7 +57,7 @@ input:focus, button:focus-visible { outline: 3px solid #b8e0e5; outline-offset: 
 .section-heading { margin-bottom: 18px; }
 .notice { background: #f2f7fa; border-radius: 8px; padding: 12px 14px; color: #526c80; font-size: 13px; line-height: 1.5; }
 .notice.error { background: #fff1ee; color: #a44632; }
-.table-controls { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(220px, 2fr); gap: 20px; margin: 20px 0 12px; }
+.table-controls { display: grid; grid-template-columns: minmax(160px, 420px); gap: 20px; margin: 20px 0 12px; }
 .member-filter { display: flex; align-items: center; gap: 7px; margin-bottom: 5px; }
 .member-filter input { width: auto; margin: 0; }
 .table-scroll { overflow-x: auto; margin-top: 16px; }
@@ -88,5 +88,12 @@ dialog::backdrop { background: #17263b66; }
 .review-content li { margin: 7px 0; overflow-wrap: anywhere; }
 .review-content p { margin-bottom: 9px; white-space: pre-wrap; overflow-wrap: anywhere; }
 #review-status { margin-top: 16px; }
+#review-status.working { display: flex; align-items: center; gap: 10px; }
+#review-status.working::before { content: ""; flex: 0 0 auto; width: 16px; height: 16px; border: 2px solid #147e8830; border-top-color: #147e88; border-radius: 50%; animation: processing-spin .8s linear infinite; }
+#review-dialog.preparing { max-width: 320px; padding: 36px; }
+#review-dialog.preparing .dialog-header, #review-dialog.preparing .review-content, #review-dialog.preparing .dialog-actions, #review-dialog.saving .review-content, #review-dialog.saving .dialog-actions { display: none; }
+#review-dialog.preparing #review-status { justify-content: center; margin: 0; padding: 0; background: transparent; }
+@keyframes processing-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { #review-status.working::before { animation-duration: 2s; } }
 .dialog-actions { justify-content: flex-end; margin-top: 18px; flex-wrap: wrap; }
 @media (max-width: 760px) { main { padding: 24px 14px; } .access-panel, .directory-panel { padding: 17px; } .section-heading, .access-controls { flex-wrap: wrap; } .table-controls { grid-template-columns: 1fr; gap: 13px; } .toolbar { flex-wrap: wrap; } .page-header { gap: 8px; } h1 { font-size: 27px; } }
