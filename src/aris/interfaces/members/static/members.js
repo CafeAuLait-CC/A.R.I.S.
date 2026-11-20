@@ -177,11 +177,11 @@
           if(change.active===true)lines.push('Restore this member. Issue a new credential if the old one was revoked.');
           if(change.role) {
             lines.push('Set role to '+(change.role==='admin'?'Admin':'Member')+'.');
-            const remove=change.role==='member'?(row?.revoked_when_member || []):change.previous_bindings.filter(binding=>['admin','member'].includes(binding.role_name));
+            const remove=change.role==='member'?(row?.revoked_when_member || []):change.previous_bindings.filter(binding=>['admin','member'].includes(binding.role_name) && !(binding.role_name===change.role && binding.scope.type==='global' && binding.scope.id==='*'));
             remove.forEach(binding=>lines.push('Remove access binding: '+binding.role_name+' ('+binding.scope.type+' / '+binding.scope.id+')'));
             const removed=new Set(remove.map(binding=>JSON.stringify(binding)));
             const retained=change.previous_bindings.filter(binding=>!removed.has(JSON.stringify(binding)));
-            if(retained.length)lines.push('Keep business access: '+retained.map(binding=>binding.role_name+' ('+binding.scope.id+')').join(', '));
+            if(retained.length)lines.push('Keep existing access: '+retained.map(binding=>binding.role_name+' ('+binding.scope.id+')').join(', '));
           }
         } else if(change.type==='assign_node_user')lines.push('Link '+change.node_id+' / '+change.os_username);
         else if(change.type==='remove_node_user')lines.push('Unlink '+change.node_id+' / '+change.os_username);
