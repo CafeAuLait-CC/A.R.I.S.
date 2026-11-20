@@ -27,6 +27,9 @@ from aris.interfaces.commands.api import build_router as build_command_router
 from aris.interfaces.commands.service import UserCommandSurface
 from aris.interfaces.identity.api import build_router as build_identity_router
 from aris.interfaces.identity.service import IdentityAdminSurface
+from aris.interfaces.members.api import build_router as build_member_router
+from aris.interfaces.members.api import install_session_transport
+from aris.interfaces.members.service import MemberPortalSurface
 from aris.interfaces.notifications.api import build_router as build_notification_router
 from aris.interfaces.notifications.service import NotificationAdminSurface
 from aris.interfaces.policy.api import build_router as build_policy_router
@@ -79,6 +82,7 @@ def create_app(
     usage_history: UsageHistorySurface | None = None,
     policy_sources: PolicyReadSurface | None = None,
     slack_usage: SlackUsageQueries | None = None,
+    member_portal: MemberPortalSurface | None = None,
     m2_config: M2RuntimeConfig | None = None,
 ) -> FastAPI:
     config = settings or Settings()
@@ -220,6 +224,15 @@ def create_app(
         app.include_router(build_usage_router(usage_history))
     if policy_sources is not None:
         app.include_router(build_policy_router(policy_sources))
+    if member_portal is not None:
+        if (
+            config.environment not in {"development", "test"}
+            or member_portal.commands is not user_commands
+            or member_portal.usage is not usage_history
+        ):
+            raise ValueError("member portal requires matching explicit development surfaces")
+        app.include_router(build_member_router(member_portal))
+        install_session_transport(app, member_portal)
 
     @app.middleware("http")
     async def request_context(

@@ -202,7 +202,10 @@ def build_router(service: UsageHistorySurface) -> APIRouter:
 
     @router.get("/ui", response_class=HTMLResponse)
     def page() -> HTMLResponse:
-        return HTMLResponse((ASSETS / "index.html").read_text(), headers=PAGE_HEADERS)
+        html = (ASSETS / "index.html").read_text()
+        if getattr(service.authenticator, "browser_sessions", False):
+            html = html.replace("<html ", '<html data-member-sessions="true" ', 1)
+        return HTMLResponse(html, headers=PAGE_HEADERS)
 
     @router.get("/ui/assets/{name}")
     def asset(

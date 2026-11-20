@@ -21,16 +21,49 @@ class MemberRepository:
         self.session = session
 
     def bindings(self, user_id: str) -> tuple[ExistingRoleBinding, ...]:
+        return self.bindings_for((user_id,)).get(user_id, ())
+
+    def bindings_for(self, users: tuple[str, ...]) -> dict[str, tuple[ExistingRoleBinding, ...]]:
         rows = self.session.execute(
-            select(Role.name, RoleBinding.scope_type, RoleBinding.scope_id)
+            select(RoleBinding.user_id, Role.name, RoleBinding.scope_type, RoleBinding.scope_id)
             .join(Role, Role.id == RoleBinding.role_id)
-            .where(RoleBinding.user_id == user_id)
+            .where(RoleBinding.user_id.in_(users))
             .order_by(Role.name, RoleBinding.scope_type, RoleBinding.scope_id)
-            .limit(33)
+            .limit(len(users) * 33 + 1)
         )
-        return tuple(
-            ExistingRoleBinding(role_name=row[0], scope=AccessScope(type=row[1], id=row[2]))
-            for row in rows
+        result: dict[str, list[ExistingRoleBinding]] = {}
+        for user, name, kind, scope in rows:
+            result.setdefault(user, []).append(
+                ExistingRoleBinding(role_name=name, scope=AccessScope(type=kind, id=scope))
+            )
+        return {user: tuple(bindings) for user, bindings in result.items()}
+
+    def namespace_users(
+        self, users: tuple[str, ...], namespace: IdentityNamespace
+    ) -> frozenset[str]:
+        return frozenset(
+            self.session.scalars(
+                select(ExternalIdentity.user_id).where(
+                    ExternalIdentity.user_id.in_(users),
+                    ExternalIdentity.provider == namespace.provider,
+                    ExternalIdentity.namespace == namespace.namespace,
+                )
+            )
+        )
+
+    def administrator_users(self, users: tuple[str, ...]) -> frozenset[str]:
+        return frozenset(
+            self.session.scalars(
+                select(RoleBinding.user_id)
+                .join(RolePermission, RolePermission.role_id == RoleBinding.role_id)
+                .join(Permission, Permission.id == RolePermission.permission_id)
+                .where(
+                    RoleBinding.user_id.in_(users),
+                    RoleBinding.scope_type == "global",
+                    RoleBinding.scope_id == "*",
+                    Permission.name == "identity.manage",
+                )
+            )
         )
 
     def in_namespace(self, user_id: UUID, namespace: IdentityNamespace) -> bool:

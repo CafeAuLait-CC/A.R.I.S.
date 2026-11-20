@@ -21,6 +21,14 @@ class LoginRepository:
     def user_credential(self, user_id: str) -> LoginCredential | None:
         return self.session.get(LoginCredential, user_id, populate_existing=True)
 
+    def credentials_for(self, users: tuple[str, ...]) -> dict[str, LoginCredential]:
+        return {
+            row.user_id: row
+            for row in self.session.scalars(
+                select(LoginCredential).where(LoginCredential.user_id.in_(users))
+            )
+        }
+
     def identity(self, subject: ExternalSubject) -> ExternalIdentity | None:
         return self.session.scalar(
             select(ExternalIdentity)

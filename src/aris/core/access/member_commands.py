@@ -38,6 +38,11 @@ class ManageMembersCommand(DatabaseCommand):
         principal: UserPrincipal,
         parameters: dict[str, JsonValue],
     ) -> dict[str, JsonValue]:
+        if (
+            execution.scope != AccessScope(type="global", id="*")
+            or principal.user_id != execution.actor_id
+        ):
+            raise DomainError("PERMISSION_DENIED", "Directory actor or scope differs", 403)
         request = ManageMembersRequest.model_validate(parameters)
         return self.members.manage_in_transaction(
             session,
@@ -74,6 +79,11 @@ class EditOwnProfileCommand(DatabaseCommand):
         principal: UserPrincipal,
         parameters: dict[str, JsonValue],
     ) -> dict[str, JsonValue]:
+        if (
+            execution.scope != AccessScope(type="global", id="*")
+            or principal.user_id != execution.actor_id
+        ):
+            raise DomainError("PERMISSION_DENIED", "Profile actor or scope differs", 403)
         return self.members.edit_profile_in_transaction(
             session,
             AdministrationContext(

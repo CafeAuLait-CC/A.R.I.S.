@@ -5,6 +5,7 @@ import hmac
 import secrets
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 from pydantic import AwareDatetime, Field, SecretStr
 from sqlalchemy.exc import DBAPIError
@@ -15,6 +16,7 @@ from aris.core.access.schemas import AccessContract, ExternalSubject, UserPrinci
 from aris.core.access.service import AccessService
 from aris.core.access.session_models import LoginSession
 from aris.core.access.session_repo import LoginRepository
+from aris.core.audit import AuditEntry
 from aris.core.contracts import DomainError
 from aris.core.time import utc
 
@@ -87,7 +89,9 @@ class LoginSessionService:
             raise authentication_required()
         return value
 
-    def login(self, credential: SecretStr, *, remember: bool) -> SessionGrant:
+    def login(
+        self, credential: SecretStr, *, remember: bool, request_id: str | None = None
+    ) -> SessionGrant:
         candidate = secret_digest(self._raw(credential.get_secret_value()))
         try:
             with self.sessions.begin() as session:
@@ -140,6 +144,17 @@ class LoginSessionService:
                         csrf_digest=secret_digest(csrf),
                         issued_at=now,
                         expires_at=expires,
+                    )
+                )
+                session.add(
+                    AuditEntry(
+                        id=str(uuid4()),
+                        actor=str(principal.user_id),
+                        action="access.session.started",
+                        target="member-login",
+                        request_id=request_id or str(uuid4()),
+                        recorded_at=now,
+                        changes={"remember": remember, "expires_at": expires.isoformat()},
                     )
                 )
                 session.flush()
@@ -204,12 +219,23 @@ class LoginSessionService:
         except DBAPIError:
             raise DomainError("DEPENDENCY_UNAVAILABLE", "Login is unavailable", 503) from None
 
-    def logout(self, token: str | None) -> None:
+    def logout(self, token: str | None, *, request_id: str | None = None) -> None:
         raw = self._raw(token)
         with self.sessions.begin() as session:
             record = LoginRepository(session).current(secret_digest(raw), self.now())
             if record is not None:
                 record.revoked_at = self.now()
+                session.add(
+                    AuditEntry(
+                        id=str(uuid4()),
+                        actor=record.user_id,
+                        action="access.session.ended",
+                        target="member-login",
+                        request_id=request_id or str(uuid4()),
+                        recorded_at=self.now(),
+                        changes={},
+                    )
+                )
 
 
 class SessionBearerAuthenticator:

@@ -115,27 +115,31 @@ class MemberAdministrationService:
         with self.sessions() as session, session.no_autoflush:
             self._admin(session, actor_id)
             repo = MemberRepository(session)
+            identifiers = tuple(str(user) for user in users)
+            if repo.namespace_users(identifiers, self.administration.namespace) != set(identifiers):
+                raise DomainError("PERMISSION_DENIED", "Member namespace differs", 403)
+            all_bindings = repo.bindings_for(identifiers)
+            administrators = repo.administrator_users(identifiers)
+            credentials = LoginRepository(session).credentials_for(identifiers)
+            privileged = repo.privileged_roles(self.privileged_permissions)
             result = []
             for user in users:
-                if not repo.in_namespace(user, self.administration.namespace):
-                    raise DomainError("PERMISSION_DENIED", "Member namespace differs", 403)
-                bindings = repo.bindings(str(user))
+                bindings = all_bindings.get(str(user), ())
                 if len(bindings) > 32:
                     raise DomainError(
                         "DEPENDENCY_UNAVAILABLE", "Access bindings exceed budget", 503
                     )
-                credential = LoginRepository(session).user_credential(str(user))
+                credential = credentials.get(str(user))
                 result.append(
                     MemberAccessSummary(
                         user_id=user,
-                        role=self._role(session, user),
+                        role="admin" if str(user) in administrators else "member",
                         bindings=bindings,
                         revoked_when_member=tuple(
                             binding
                             for binding in bindings
                             if binding.role_name in {"admin", "member"}
-                            or binding.role_name
-                            in repo.privileged_roles(self.privileged_permissions)
+                            or binding.role_name in privileged
                         ),
                         credential_generation=credential.generation if credential else None,
                         credential_available=credential is not None
