@@ -76,7 +76,7 @@ def status_view(
             "failed": "The changes could not be saved. Please check the details and try again.",
         }[outcome.state]
     actions = []
-    if recovery:
+    if recovery or (outcome is not None and outcome.state == "awaiting_confirmation"):
         if outcome is not None and outcome.state == "queued":
             message = "Saving is taking longer than usual. Your changes are still being checked."
         actions.append(

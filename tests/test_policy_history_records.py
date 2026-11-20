@@ -233,11 +233,8 @@ def test_historical_records_reject_update_delete_and_nonempty_downgrade(recordin
     with pytest.raises(RuntimeError, match="historical review records prevent downgrade"):
         command.downgrade(Config("alembic.ini"), "0031")
     with s.service.sessions() as db:
-        # PostgreSQL rolls back transactional DDL across later empty revisions.
-        # SQLite can already have removed those empty revisions before this guard.
-        assert db.scalar(text("SELECT version_num FROM alembic_version")) == (
-            SCHEMA_REVISION if dialect == "postgresql" else "0032"
-        )
+        # Both migration backends now roll back later empty revisions atomically.
+        assert db.scalar(text("SELECT version_num FROM alembic_version")) == SCHEMA_REVISION
     assert counts(s) == (1, 1)
 
 

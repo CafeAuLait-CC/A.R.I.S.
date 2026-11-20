@@ -144,7 +144,7 @@ def test_same_form_replay_does_not_renew_or_duplicate_and_changed_choices_confli
     click(drafts, actions(first)[CONFIRM_ACTION])
     assert drafts[1].run_once("all")["commands"]["state"] == "succeeded"
     form_submission(drafts)
-    assert "has completed" in json.dumps(drafts[2].updates[-1][1])
+    assert "saved successfully" in json.dumps(drafts[2].updates[-1][1])
     assert count(drafts[3][2], CommandRecord) == count(drafts[3][2], Reservation) == 1
 
 

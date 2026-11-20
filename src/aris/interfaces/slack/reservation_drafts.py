@@ -131,7 +131,7 @@ class ReservationReviewPresenter:
         ):
             view = status_view(review.command_id, outcome)
             view["blocks"][0]["text"] = plain(
-                "The selected GPU cannot be identified. Refresh or withdraw this request."
+                "The selected GPU cannot be identified. Reload the details or cancel this request."
             )
             return view
         selection = {"command_id": str(review.command_id)}
@@ -192,13 +192,13 @@ class ReservationReviewPresenter:
                         {
                             "type": "button",
                             "action_id": WITHDRAW_ACTION,
-                            "text": plain("Withdraw request"),
+                            "text": plain("Cancel"),
                             "value": json.dumps(selection, separators=(",", ":")),
                         },
                         {
                             "type": "button",
                             "action_id": STATUS_ACTION,
-                            "text": plain("Refresh"),
+                            "text": plain("Reload details"),
                             "value": json.dumps(selection, separators=(",", ":")),
                         },
                     ],
@@ -231,13 +231,14 @@ class ReservationReviewPresenter:
             view = status_view(review.command_id, review.outcome)
             view["blocks"][0]["text"] = plain(
                 "This reservation has changed or cannot accept this action. "
-                "Withdraw this request and start a new one."
+                "Cancel this request and start a new one."
             )
             return view
         if operation == "extend" and label is None:
             view = status_view(review.command_id, review.outcome)
             view["blocks"][0]["text"] = plain(
-                "The reservation resource cannot be identified. Refresh or withdraw this request."
+                "The reservation resource cannot be identified. "
+                "Reload the details or cancel this request."
             )
             return view
         # Resource observations are not needed to reduce an existing booking.
@@ -324,13 +325,13 @@ class ReservationReviewPresenter:
                     {
                         "type": "button",
                         "action_id": WITHDRAW_ACTION,
-                        "text": plain("Withdraw request"),
+                        "text": plain("Cancel"),
                         "value": json.dumps(selection, separators=(",", ":")),
                     },
                     {
                         "type": "button",
                         "action_id": STATUS_ACTION,
-                        "text": plain("Refresh"),
+                        "text": plain("Reload details"),
                         "value": json.dumps(selection, separators=(",", ":")),
                     },
                 ],

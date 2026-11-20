@@ -169,7 +169,7 @@
       const check=el('input');check.type='checkbox';check.checked=state.selected.has(id);check.setAttribute('aria-label','Select '+id);check.addEventListener('change',()=>{if(check.checked)state.selected.add(id);else state.selected.delete(id);controls();});
       const selectCell=el('td');selectCell.append(check);tr.append(selectCell);
       const who=el('td');who.append(el('div',row.name,'member-name'),el('div',id,'member-id'),el('p',row.user?'Registered':'Not registered','muted small'));if(!row.eligible){who.append(el('p','Not an active human Slack account','muted small'));check.disabled=true;check.classList.add('no-edit');}tr.append(who);
-      const profile=el('td'),email=field(row,'email',row.profile.email || '','email');email.type='email';email.maxLength=320;profile.append(field(row,'display_name',row.profile.display_name,'display name'),email);tr.append(profile);
+      const profile=el('td'),email=field(row,'email',row.profile.email || '','email');email.type='email';email.maxLength=254;profile.append(field(row,'display_name',row.profile.display_name,'display name'),email);tr.append(profile);
       const account=el('td'),login=field(row,'login_username',row.login_username || '','login username');login.maxLength=64;login.spellcheck=false;account.append(login,el('p',row.password_ready?'Password set':'Needs activation','muted small'));tr.append(account);
       const roleCell=el('td'),role=el('select');role.setAttribute('aria-label',id+' role');role.append(new Option('Member','member'),new Option('Admin','admin'));role.value=draft(row,'role',row.role);role.addEventListener('change',()=>edit(row,'role',role.value));if(!row.user){role.disabled=true;role.classList.add('no-edit');}roleCell.append(role);
       tr.append(roleCell);
@@ -300,11 +300,11 @@
     if(state.session.actor.role==='admin') {
       if(!await load('registered'))throw new Error('Changes saved, but the member list could not refresh. Retrying automatically.');
     } else {$('members-tab').hidden=true;tab('profile');}
-    intent.needsRefresh=false;
+    intent.needsRefresh=false;notice('Changes saved.');
   }
   function failedMessage(code) {
     const known={CONFLICT:'The member directory changed. Reload the selected members before trying again.',PERMISSION_DENIED:'Your permission changed. Sign in with an authorized account.',VALIDATION_ERROR:'Some member details were rejected. Check the entries before trying again.',DEPENDENCY_UNAVAILABLE:'A required service was unavailable.'};
-    return 'Changes were not saved. '+(known[code] || ('The request failed'+(code?' ('+code+')':'')+'.'))+' Your edits are kept.';
+    return 'Changes were not saved. '+(known[code] || 'Please check your entries and try again.')+' Your edits are kept.';
   }
   async function advanceReview() {
     const intent=state.intent;if(!intent || intent.busy)return;
