@@ -118,3 +118,40 @@ class PolicyReviewMaterialRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     fingerprint: Mapped[str] = mapped_column(String(64))
     canonical_material: Mapped[str] = mapped_column(Text)
+
+
+class PolicyReviewFeedbackRow(Base):
+    __tablename__ = "policy_review_feedback"
+    __table_args__ = (
+        UniqueConstraint("command_id", name="uq_policy_feedback_command"),
+        CheckConstraint(
+            "source_version>0 AND kind IN ('comment','changes_requested')",
+            name="ck_policy_feedback_kind",
+        ),
+        CheckConstraint(
+            "length(fingerprint)=64 AND length(source_fingerprint)=64 "
+            "AND length(canonical_feedback)>0 AND length(canonical_feedback)<=16384",
+            name="ck_policy_feedback_size",
+        ),
+        CheckConstraint(
+            "(material_id IS NULL AND material_fingerprint IS NULL) OR "
+            "(material_id IS NOT NULL AND material_fingerprint IS NOT NULL "
+            "AND length(material_fingerprint)=64)",
+            name="ck_policy_feedback_material",
+        ),
+        Index("ix_policy_feedback_source_time", "source_id", "created_at", "id"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    source_id: Mapped[str] = mapped_column(ForeignKey("policy_versions.id"))
+    name: Mapped[str] = mapped_column(String(64))
+    source_version: Mapped[int] = mapped_column(Integer)
+    source_fingerprint: Mapped[str] = mapped_column(String(64))
+    material_id: Mapped[str | None] = mapped_column(ForeignKey("policy_review_materials.id"))
+    material_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    kind: Mapped[str] = mapped_column(String(24))
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    command_id: Mapped[str] = mapped_column(ForeignKey("commands.id"))
+    request_id: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    canonical_feedback: Mapped[str] = mapped_column(Text)
