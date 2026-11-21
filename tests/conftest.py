@@ -16,6 +16,7 @@ from aris.core.config import Settings
 
 AGENT_TOKEN = "test-agent-credential-12345"
 READ_TOKEN = "test-read-credential-12345"
+FROM_POSTGRES_TEMPLATE = pytest.StashKey[bool]()
 
 
 def pytest_addoption(parser):
@@ -23,6 +24,11 @@ def pytest_addoption(parser):
         "--database-only",
         action="store_true",
         help="Run tests whose fixture closure uses the selected application database.",
+    )
+    parser.addoption(
+        "--postgres-template",
+        action="store_true",
+        help="Clone a migrated template for settings-based tests (local aris_test only).",
     )
 
 
@@ -57,11 +63,28 @@ def sqlite_schema_template(tmp_path_factory):
     return path
 
 
+@pytest.fixture(scope="session")
+def postgres_template(request):
+    from tests.postgres_template import migrated_template
+
+    value = os.environ.get("ARIS_TEST_DATABASE_URL")
+    if not value:
+        raise pytest.UsageError("--postgres-template requires ARIS_TEST_DATABASE_URL")
+    with migrated_template(value) as template:
+        yield template
+
+
 @pytest.fixture
-def database_url(tmp_path):
+def database_url(tmp_path, request):
     postgres = os.environ.get("ARIS_TEST_DATABASE_URL")
     if not postgres:
         yield f"sqlite+pysqlite:///{tmp_path / 'test.db'}"
+        return
+    if request.config.getoption("--postgres-template") and "settings" in request.fixturenames:
+        template = request.getfixturevalue("postgres_template")
+        with template.clone() as selected:
+            request.node.stash[FROM_POSTGRES_TEMPLATE] = True
+            yield selected
         return
     # Every test gets an isolated schema; never drop the user's database/tables.
     schema = f"aris_test_{uuid4().hex}"
@@ -89,7 +112,7 @@ def settings(database_url, monkeypatch, request, tmp_path):
         and not target.exists()
     ):
         shutil.copyfile(request.getfixturevalue("sqlite_schema_template"), target)
-    else:
+    elif not request.node.stash.get(FROM_POSTGRES_TEMPLATE, False):
         command.upgrade(Config("alembic.ini"), "head")
     return Settings(
         _env_file=None,
