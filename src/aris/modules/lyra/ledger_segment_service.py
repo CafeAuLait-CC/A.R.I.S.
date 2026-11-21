@@ -22,9 +22,11 @@ from aris.modules.lyra.ledger_schemas import (
     ReversedMeasurement,
     UsageLedgerEntry,
     UsageLedgerHead,
+    canonical_ledger,
 )
 from aris.modules.lyra.ledger_segment_repo import LedgerSegmentRepository, segment_inconsistent
 from aris.modules.lyra.ledger_segment_schemas import (
+    MAX_LEDGER_SEGMENT_BYTES,
     MAX_LEDGER_SEGMENT_SOURCE_BYTES,
     CaptureLedgerSegment,
     LedgerRangeBoundary,
@@ -249,6 +251,10 @@ class LedgerSegmentService:
                     created_at=created_at,
                     fingerprint="0" * 64,
                 )
+                if len(canonical_ledger(draft).encode()) > MAX_LEDGER_SEGMENT_BYTES:
+                    raise DomainError(
+                        "LEDGER_SEGMENT_TOO_LARGE", "Split the verified ledger index batch", 503
+                    )
                 value = StoredLedgerSegment.model_validate(
                     {**draft.model_dump(), "fingerprint": ledger_segment_fingerprint(draft)}
                 )

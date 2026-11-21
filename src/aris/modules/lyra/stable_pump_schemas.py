@@ -5,9 +5,10 @@ from uuid import UUID
 
 from pydantic import AwareDatetime, Field, model_validator
 
+from aris.modules.lyra.ledger_index_maintenance import LedgerIndexStep
 from aris.modules.lyra.ledger_schemas import UsagePostingConfiguration
 from aris.modules.lyra.recording_job_schemas import RecordingJobResult, RecordingWorkSelection
-from aris.modules.lyra.recording_pump_schemas import RecordingSourceStep, RecordingStageFailure
+from aris.modules.lyra.recording_pump_schemas import RecordingSourceStep
 from aris.modules.lyra.residency_layout import StableResidencyLayoutMethod
 from aris.modules.lyra.source_batching import SourceBatchSelection
 from aris.modules.lyra.stable_dispatch_schemas import StableAutoDispatchReceipt
@@ -44,6 +45,12 @@ class StableRecordingPumpConfiguration(SourceBatchSelection):
         return trace_fingerprint("stable_recording_pump_configuration", canonical_trace(self))
 
 
+class StableRecordingStageFailure(IntervalContract):
+    stage: Literal["source", "dispatch", "execute", "ledger_index"]
+    code: str = Field(pattern=r"^[A-Z][A-Z_]{1,63}$")
+    consumer_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
 class StableRecordingPumpTick(IntervalContract):
     assessment_scope: Literal["bounded_stable_recording_pump_tick"] = (
         "bounded_stable_recording_pump_tick"
@@ -56,14 +63,21 @@ class StableRecordingPumpTick(IntervalContract):
     dispatch: StableAutoDispatchReceipt | None = None
     claimed_job_id: UUID | None = None
     job: RecordingJobResult | None = None
-    failures: tuple[RecordingStageFailure, ...] = Field(default=(), max_length=3)
+    ledger_index: LedgerIndexStep | None = None
+    failures: tuple[StableRecordingStageFailure, ...] = Field(default=(), max_length=4)
 
     @model_validator(mode="after")
     def independent_stages(self) -> "StableRecordingPumpTick":
         if self.paused and (
             any(
                 value is not None
-                for value in (self.source, self.dispatch, self.claimed_job_id, self.job)
+                for value in (
+                    self.source,
+                    self.dispatch,
+                    self.claimed_job_id,
+                    self.job,
+                    self.ledger_index,
+                )
             )
             or self.failures
         ):

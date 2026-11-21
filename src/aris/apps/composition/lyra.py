@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from aris.core.access.history_service import NodeUserHistoryService
 from aris.modules.lyra.derivation_service import UsageDerivationService
+from aris.modules.lyra.ledger_index_maintenance import LedgerIndexMaintenance
 from aris.modules.lyra.ledger_schemas import UsagePostingConfiguration, UsagePostingContext
 from aris.modules.lyra.ledger_service import UsageLedgerService
 from aris.modules.lyra.partition_recording_service import PartitionRecordingService
@@ -206,7 +207,7 @@ def summarize_recording_tick(
             if dispatched is not None
             else None
         )
-    return {
+    summary: dict[str, JsonValue] = {
         "mode": "lyra-recording-stable"
         if isinstance(value, StableRecordingPumpTick)
         else "lyra-recording",
@@ -221,6 +222,11 @@ def summarize_recording_tick(
         "job": value.job.model_dump(mode="json") if value.job is not None else None,
         "failures": [failure.model_dump(mode="json") for failure in value.failures],
     }
+    if isinstance(value, StableRecordingPumpTick):
+        summary["ledger_index"] = (
+            value.ledger_index.model_dump(mode="json") if value.ledger_index is not None else None
+        )
+    return summary
 
 
 @dataclass(frozen=True)
@@ -386,6 +392,9 @@ def build_lyra_components(
             stable_jobs,
             clock=now,
             batch_reader=archive if config.source_batching is not None else None,
+            ledger_index=LedgerIndexMaintenance(
+                sessions, tuple(binding.node_id for binding in config.sources), clock=now
+            ),
             configuration=StableRecordingPumpConfiguration(
                 source_batching=config.source_batching,
                 recording=config.recording,

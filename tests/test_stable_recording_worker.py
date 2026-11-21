@@ -155,7 +155,9 @@ def test_source_page_backpressure_is_relearned_without_losing_durable_cursor(
     assert rebuilt.tick(POST).source.after_seq == 10
 
 
-def test_source_failure_does_not_cancel_ready_dispatch_and_measurement(partition_recording):
+def test_source_failure_does_not_cancel_ready_dispatch_and_measurement(
+    partition_recording, monkeypatch
+):
     state = partition_recording
     config = stable_config(state)
     config = config.model_copy(
@@ -176,8 +178,15 @@ def test_source_failure_does_not_cancel_ready_dispatch_and_measurement(partition
     healthy.refresh_identity_configuration()
     healthy.consume(POST, incoming(healthy))
     healthy.consume(POST, incoming(healthy))
-    report = graph.run_once()
+
+    def index_unavailable(*args, **kwargs):
+        raise DomainError("DEPENDENCY_UNAVAILABLE", "fixture independent index failure", 503)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(graph.pump.ledger_index, "step", index_unavailable)
+        report = graph.run_once()
     assert report["failures"][0]["stage"] == "source"
+    assert report["failures"][1]["stage"] == "ledger_index"
     assert report["dispatch"]["state"] == "enqueued" and report["job"]["state"] == "completed"
     assert recorded(state[0]) == (1, 45000000)
     assert graph.run_once()["source"]["consumer_id"] == config.sources[1].consumer_id
@@ -207,3 +216,23 @@ def test_stable_private_configuration_and_real_once_processes_resume_existing_wo
     for _ in range(3):
         assert not graph.run_once()["failures"]
     assert recorded(state[0]) == (3, 135000000)
+    # Synthetic canonical rows exercise an actual CLI restart across a full index batch.
+    # They do not claim additional GPU-qualified measurements from the source fixture.
+    from aris.modules.lyra.ledger_repo import UsageLedgerRepository
+    from tests.test_ledger_segments import measurement
+
+    with state[0].sessions() as db:
+        repo = UsageLedgerRepository(db)
+        head = repo.head(config.sources[0].node_id)
+        first = repo.revision(head.node_id, 1)
+    for _ in range(128):
+        _, head = measurement(state[0], first, head, state[4]["now"])
+    indexed = process(path, state)
+    assert indexed.returncode == 0, indexed.stdout + indexed.stderr
+    index = json.loads(indexed.stdout)["ledger_index"]
+    assert index["state"] == "advanced" and index["indexed_revision"] == 128
+    restarted = process(path, state)
+    assert restarted.returncode == 0, restarted.stdout + restarted.stderr
+    after = json.loads(restarted.stdout)["ledger_index"]
+    assert after["state"] == "within_tail" and after["indexed_revision"] == 128
+    assert after["remaining_entries"] == 3

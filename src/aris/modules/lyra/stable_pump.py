@@ -6,18 +6,20 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid5
 
 from aris.core.contracts import DomainError
+from aris.modules.lyra.ledger_index_maintenance import LedgerIndexMaintenance
 from aris.modules.lyra.ledger_schemas import UsagePostingContext
 from aris.modules.lyra.recording_job_schemas import RecordingJobClaim, RecordingJobResult
 from aris.modules.lyra.recording_job_service import RecordingJobService
 from aris.modules.lyra.recording_pipeline_schemas import RecordingPipelineRequest
 from aris.modules.lyra.recording_pump import SourceCeilingReader
-from aris.modules.lyra.recording_pump_schemas import RecordingSourceStep, RecordingStageFailure
+from aris.modules.lyra.recording_pump_schemas import RecordingSourceStep
 from aris.modules.lyra.source_batching import SourceBatchPageReader, should_buffer_source
 from aris.modules.lyra.stable_dispatch_service import StableWindowDispatcher
 from aris.modules.lyra.stable_pipeline_service import StableRecordingPipelineService
 from aris.modules.lyra.stable_pump_schemas import (
     StableRecordingPumpConfiguration,
     StableRecordingPumpTick,
+    StableRecordingStageFailure,
 )
 from aris.modules.lyra.stable_window_plan_service import StableWindowPlanService
 from aris.modules.lyra.trace_consumer_schemas import TraceConsumptionIdle, UsageTraceConsumeRequest
@@ -37,6 +39,7 @@ class StableRecordingPump:
         configuration: StableRecordingPumpConfiguration | None = None,
         clock: Callable[[], datetime] | None = None,
         batch_reader: SourceBatchPageReader | None = None,
+        ledger_index: LedgerIndexMaintenance | None = None,
     ) -> None:
         if len(pipelines) > 16:
             raise ValueError("one recording pump supports at most 16 configured sources")
@@ -51,6 +54,7 @@ class StableRecordingPump:
         self._source_limits: dict[str, int] = {}
         self.dispatcher = StableWindowDispatcher(plans)
         self.batch_reader = batch_reader
+        self.ledger_index = ledger_index
 
     def _now(self) -> datetime:
         now = self.clock()
@@ -94,13 +98,18 @@ class StableRecordingPump:
                 bindings.append((source.trace.agent_id, source.trace.node_id))
         if len(set(bindings)) != len(bindings):
             raise DomainError("CONFLICT", "Stable pump repeats a source node", 409)
+        if self.ledger_index is not None and (
+            self.ledger_index.sessions is not self.jobs.sessions
+            or set(self.ledger_index.node_ids) != {node for _, node in bindings}
+        ):
+            raise DomainError("CONFLICT", "Ledger index maintenance cohort differs", 409)
 
     @staticmethod
     def _failure(
         stage: str, error: DomainError, consumer_id: str | None = None
-    ) -> RecordingStageFailure:
+    ) -> StableRecordingStageFailure:
         code = error.code if re.fullmatch(r"[A-Z][A-Z_]{1,63}", error.code) else "PROCESSING_FAILED"
-        return RecordingStageFailure.model_validate(
+        return StableRecordingStageFailure.model_validate(
             {"stage": stage, "code": code, "consumer_id": consumer_id}
         )
 
@@ -215,6 +224,7 @@ class StableRecordingPump:
         dispatched = None
         job_result = None
         claimed_id = None
+        index_step = None
         failures = []
         if self.pipelines:
             producer = self.pipelines[self._source_index % len(self.pipelines)]
@@ -252,6 +262,15 @@ class StableRecordingPump:
             self._cohort(config)
         except DomainError as error:
             failures.append(self._failure("execute", error))
+        if self.ledger_index is not None:
+            try:
+                self._cohort(config)
+                index_step = self.ledger_index.step(
+                    context, activity=job_result is not None and job_result.state == "completed"
+                )
+                self._cohort(config)
+            except DomainError as error:
+                failures.append(self._failure("ledger_index", error))
         return StableRecordingPumpTick(
             paused=False,
             generated_at=self._now(),
@@ -259,5 +278,6 @@ class StableRecordingPump:
             dispatch=dispatched,
             claimed_job_id=claimed_id,
             job=job_result,
+            ledger_index=index_step,
             failures=tuple(failures),
         )

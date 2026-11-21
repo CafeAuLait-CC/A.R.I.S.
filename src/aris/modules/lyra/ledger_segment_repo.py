@@ -88,6 +88,20 @@ class LedgerSegmentRepository:
         )
         return self.get(UUID(id)) if id is not None else None
 
+    def latest_position(self, node_id: str) -> tuple[UUID, int, str] | None:
+        """Scheduling metadata only; capture/read authority still verifies the canonical segment."""
+        row = self.session.execute(
+            select(
+                LedgerSegmentRow.id,
+                LedgerSegmentRow.last_revision,
+                LedgerSegmentRow.configuration_fingerprint,
+            )
+            .where(LedgerSegmentRow.node_id == node_id)
+            .order_by(LedgerSegmentRow.last_revision.desc())
+            .limit(1)
+        ).one_or_none()
+        return (UUID(row[0]), row[1], row[2]) if row is not None else None
+
     def append(self, value: StoredLedgerSegment) -> None:
         self.session.add(
             LedgerSegmentRow(
