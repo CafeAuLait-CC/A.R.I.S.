@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from stat import S_ISREG
+from typing import Literal
 
 from pydantic import Field, JsonValue, model_validator
 from sqlalchemy.orm import Session, sessionmaker
@@ -29,12 +30,25 @@ from aris.modules.lyra.recording_pump_schemas import RecordingPumpConfiguration,
 from aris.modules.lyra.reservation_links import ResidencyReservationService
 from aris.modules.lyra.residency_attribution import ResidencyAttributionService
 from aris.modules.lyra.residency_evidence_service import ResidencyRunEvidenceService
+from aris.modules.lyra.residency_layout import StableResidencyLayoutMethod
+from aris.modules.lyra.residency_layout_verification_service import StableResidencyWindowService
 from aris.modules.lyra.residency_partition_schemas import ResidencyPartitionMethod
 from aris.modules.lyra.residency_partition_service import ResidencyPartitionService
 from aris.modules.lyra.residency_segment_service import ResidencySegmentService
 from aris.modules.lyra.residency_sessions import ResidencyFormationRule, residency_fingerprint
 from aris.modules.lyra.run_recording_service import ClosedRunRecordingService
 from aris.modules.lyra.segment_store_service import ResidencySegmentStore
+from aris.modules.lyra.stable_dispatch_schemas import StableAutoDispatchReceipt
+from aris.modules.lyra.stable_pipeline_schemas import StableRecordingPipelineConfiguration
+from aris.modules.lyra.stable_pipeline_service import StableRecordingPipelineService
+from aris.modules.lyra.stable_pump import StableRecordingPump
+from aris.modules.lyra.stable_pump_schemas import (
+    StableRecordingPumpConfiguration,
+    StableRecordingPumpTick,
+)
+from aris.modules.lyra.stable_window_acceptance_service import StableWindowAcceptanceService
+from aris.modules.lyra.stable_window_plan_service import StableWindowPlanService
+from aris.modules.lyra.stable_window_recording_service import StableWindowRecordingService
 from aris.modules.lyra.trace_attestation_service import TraceAttestationService
 from aris.modules.lyra.trace_consumer_schemas import (
     UsageTraceConfiguration,
@@ -64,7 +78,7 @@ class LyraRuntimeConfig(IntervalContract):
     recording: UsagePostingConfiguration | None = None
     continuity: UsageContinuityRule | None = None
     formation: ResidencyFormationRule | None = None
-    method: ResidencyPartitionMethod | None = None
+    method: ResidencyPartitionMethod | StableResidencyLayoutMethod | None = None
     identity_revision: int | None = Field(default=None, ge=1, le=9223372036854775807, strict=True)
     sources: tuple[LyraSourceBinding, ...] = Field(default=(), max_length=16)
     jobs: RecordingJobLimits | None = None
@@ -108,6 +122,14 @@ class LyraRuntimeConfig(IntervalContract):
         ):
             if len(set(values)) != len(values):
                 raise ValueError("Lyra source bindings must be unique")
+        if (
+            isinstance(self.method, StableResidencyLayoutMethod)
+            and self.formation is not None
+            and self.method.max_intervals < 2 * self.formation.minimum_intervals - 1
+        ):
+            raise ValueError(
+                "Stable Lyra capacity cannot satisfy the balanced final-tail formation rule"
+            )
         return self
 
     @property
@@ -140,17 +162,33 @@ def load_lyra_config(path: Path) -> LyraRuntimeConfig:
     return LyraRuntimeConfig.model_validate(json.loads(raw, object_pairs_hook=_unique_keys))
 
 
-def summarize_recording_tick(value: RecordingPumpTick, fingerprint: str) -> dict[str, JsonValue]:
-    dispatched = value.dispatch
+def _stable_dispatch_summary(
+    value: StableAutoDispatchReceipt | None,
+) -> dict[str, JsonValue] | None:
+    if value is None:
+        return None
+    dispatched, attempt = value.dispatch, value.attempt
     return {
-        "mode": "lyra-recording",
-        "paused": value.paused,
-        "configuration_fingerprint": fingerprint,
-        "quota_usage_available": False,
-        "time_window_coverage": "not_assessed",
-        "generated_at": value.generated_at.isoformat(),
-        "source": value.source.model_dump(mode="json") if value.source is not None else None,
-        "dispatch": (
+        "state": value.state,
+        "layout_key": dispatched.plan.key if dispatched else attempt.key if attempt else None,
+        "version": dispatched.plan.version if dispatched else None,
+        "next_window": dispatched.plan.next_window if dispatched else None,
+        "planned_windows": dispatched.plan.page.total_planned_windows if dispatched else None,
+        "enqueued": len(dispatched.job_ids) if dispatched else 0,
+        "failures": attempt.failures if attempt else 0,
+        "code": attempt.last_error_code if attempt else None,
+        "available_at": attempt.available_at.isoformat() if attempt else None,
+    }
+
+
+def summarize_recording_tick(
+    value: RecordingPumpTick | StableRecordingPumpTick, fingerprint: str
+) -> dict[str, JsonValue]:
+    if isinstance(value, StableRecordingPumpTick):
+        dispatch_summary = _stable_dispatch_summary(value.dispatch)
+    else:
+        dispatched = value.dispatch
+        dispatch_summary = (
             {
                 "plan_id": str(dispatched.progress.plan.request.id),
                 "version": dispatched.progress.version,
@@ -161,7 +199,18 @@ def summarize_recording_tick(value: RecordingPumpTick, fingerprint: str) -> dict
             }
             if dispatched is not None
             else None
-        ),
+        )
+    return {
+        "mode": "lyra-recording-stable"
+        if isinstance(value, StableRecordingPumpTick)
+        else "lyra-recording",
+        "paused": value.paused,
+        "configuration_fingerprint": fingerprint,
+        "quota_usage_available": False,
+        "time_window_coverage": "not_assessed",
+        "generated_at": value.generated_at.isoformat(),
+        "source": value.source.model_dump(mode="json") if value.source is not None else None,
+        "dispatch": dispatch_summary,
         "claimed_job_id": str(value.claimed_job_id) if value.claimed_job_id is not None else None,
         "job": value.job.model_dump(mode="json") if value.job is not None else None,
         "failures": [failure.model_dump(mode="json") for failure in value.failures],
@@ -170,14 +219,17 @@ def summarize_recording_tick(value: RecordingPumpTick, fingerprint: str) -> dict
 
 @dataclass(frozen=True)
 class LyraComponents:
-    pump: RecordingPump | None
+    pump: RecordingPump | StableRecordingPump | None
     configuration_fingerprint: str
     clock: Callable[[], datetime]
+    processing_mode: Literal["closed", "stable"] = "closed"
 
     def run_once(self) -> dict[str, JsonValue]:
         if self.pump is None:
             return summarize_recording_tick(
-                RecordingPumpTick(paused=True, generated_at=self.clock()),
+                StableRecordingPumpTick(paused=True, generated_at=self.clock())
+                if self.processing_mode == "stable"
+                else RecordingPumpTick(paused=True, generated_at=self.clock()),
                 self.configuration_fingerprint,
             )
         return summarize_recording_tick(
@@ -195,7 +247,12 @@ def build_lyra_components(
     config = LyraRuntimeConfig.model_validate(config.model_dump(mode="json"))
     now = clock or (lambda: datetime.now(UTC))
     if not config.enabled:
-        return LyraComponents(None, config.fingerprint, now)
+        return LyraComponents(
+            None,
+            config.fingerprint,
+            now,
+            "stable" if isinstance(config.method, StableResidencyLayoutMethod) else "closed",
+        )
     if (
         config.recording is None
         or config.continuity is None
@@ -224,21 +281,116 @@ def build_lyra_components(
         clock=now,
     )
     evidence = ResidencyPartitionService(
-        sessions, attestations, verifier, segments, archive, method=config.method, clock=now
-    )
-    writer = PartitionRecordingService(
         sessions,
-        evidence,
-        identities,
-        derivations,
-        ledger,
+        attestations,
+        verifier,
+        segments,
+        archive,
+        method=ResidencyPartitionMethod(max_intervals=config.method.max_intervals)
+        if isinstance(config.method, StableResidencyLayoutMethod)
+        else config.method,
         clock=now,
-        timeout_ms=config.jobs.transaction_timeout_ms,
     )
     whole = ClosedRunRecordingService(
         sessions,
         ResidencyRunEvidenceService(sessions, archive, clock=now),
         archive,
+        derivations,
+        ledger,
+        clock=now,
+        timeout_ms=config.jobs.transaction_timeout_ms,
+    )
+    if isinstance(config.method, StableResidencyLayoutMethod):
+        stable_evidence = StableResidencyWindowService(
+            sessions,
+            evidence,
+            method=config.method,
+            clock=now,
+            timeout_ms=min(config.pipeline_limits.timeout_ms, 10000),
+        )
+        accepts = StableWindowAcceptanceService(
+            sessions,
+            stable_evidence,
+            identities,
+            configuration=config.recording,
+            clock=now,
+            timeout_ms=config.jobs.transaction_timeout_ms,
+        )
+        stable_writer = StableWindowRecordingService(
+            sessions,
+            accepts,
+            derivations,
+            ledger,
+            timeout_ms=config.jobs.transaction_timeout_ms,
+        )
+        stable_jobs = RecordingJobService(
+            sessions,
+            whole,
+            stable_recorder=stable_writer,
+            limits=config.jobs,
+            clock=now,
+        )
+        stable_plans = StableWindowPlanService(
+            sessions,
+            stable_evidence,
+            accepts,
+            stable_jobs,
+            configuration=config.recording,
+            clock=now,
+            timeout_ms=config.pipeline_limits.timeout_ms,
+        )
+        stable_pipelines = []
+        for binding in config.sources:
+            stable_trace_config = UsageTraceConfiguration(
+                **binding.model_dump(),
+                source_ref=config.source_ref,
+                continuity=config.continuity,
+                formation=config.formation,
+            )
+            stable_trace = UsageTraceConsumerService(
+                sessions,
+                archive,
+                observations,
+                configuration=stable_trace_config,
+                clock=now,
+            )
+            stable_pipelines.append(
+                StableRecordingPipelineService(
+                    sessions,
+                    stable_trace,
+                    attestations,
+                    segments,
+                    stable_plans,
+                    configuration=StableRecordingPipelineConfiguration(
+                        source_ref=config.source_ref,
+                        trace=stable_trace_config,
+                        recording=config.recording,
+                        method=config.method,
+                        identity_revision=config.identity_revision,
+                    ),
+                    limits=config.pipeline_limits,
+                    identity_head=identities,
+                    clock=now,
+                )
+            )
+        stable_pump = StableRecordingPump(
+            tuple(stable_pipelines),
+            archive,
+            stable_plans,
+            stable_jobs,
+            clock=now,
+            configuration=StableRecordingPumpConfiguration(
+                recording=config.recording,
+                method=config.method,
+                source_limit=config.source_limit,
+                dispatch_limit=config.dispatch_limit,
+            ),
+        )
+        return LyraComponents(stable_pump, config.fingerprint, now, "stable")
+    writer = PartitionRecordingService(
+        sessions,
+        evidence,
+        identities,
         derivations,
         ledger,
         clock=now,

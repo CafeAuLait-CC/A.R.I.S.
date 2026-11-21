@@ -3,7 +3,7 @@
 from collections.abc import Callable
 from datetime import UTC, datetime
 from time import monotonic
-from typing import Literal, TypedDict
+from typing import Literal, Protocol, TypedDict
 from uuid import UUID, uuid4
 
 from sqlalchemy.exc import DBAPIError
@@ -52,6 +52,10 @@ class _RunSummary(TypedDict):
     observed_intervals: int
 
 
+class CurrentIdentityRevisionReader(Protocol):
+    def revision_in_transaction(self, session: Session) -> int | None: ...
+
+
 class StableRecordingPipelineService:
     def __init__(
         self,
@@ -63,6 +67,7 @@ class StableRecordingPipelineService:
         *,
         configuration: StableRecordingPipelineConfiguration | None = None,
         limits: RecordingPipelineLimits | None = None,
+        identity_head: CurrentIdentityRevisionReader | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.sessions, self.trace, self.attestations, self.segments, self.plans = (
@@ -83,6 +88,34 @@ class StableRecordingPipelineService:
             (limits or RecordingPipelineLimits()).model_dump(mode="json")
         )
         self.clock = clock or (lambda: datetime.now(UTC))
+        self.identity_head = identity_head
+
+    def refresh_identity_configuration(self) -> StableRecordingPipelineConfiguration | None:
+        """Prepare a new fixed input snapshot; historical batches retain their own revision."""
+        if self.configuration is None:
+            return None
+        original = StableRecordingPipelineConfiguration.model_validate(
+            self.configuration.model_dump(mode="json")
+        )
+        if self.identity_head is None:
+            return original  # Explicit fixed-snapshot internal use, never live Worker assembly.
+        try:
+            with self.sessions() as session, session.no_autoflush:
+                transaction_budget(session, 100, 1000, 3000)
+                revision = self.identity_head.revision_in_transaction(session)
+            if revision is None:
+                raise DomainError(
+                    "DEPENDENCY_UNAVAILABLE", "Identity history is not initialized", 503
+                )
+            if revision < original.identity_revision or self.configuration != original:
+                raise DomainError(
+                    "CONFLICT", "Identity history or source configuration regressed", 409
+                )
+            value = original.model_copy(update={"identity_revision": revision})
+            self.configuration = value
+            return value
+        except DBAPIError as error:
+            raise self._failure(error) from None
 
     def _now(self) -> datetime:
         now = self.clock()
@@ -235,6 +268,16 @@ class StableRecordingPipelineService:
                 cutoff = self._now()
                 if record is None or record.created_at > cutoff:
                     raise DomainError("CONFLICT", "Pipeline source clock or binding differs", 409)
+                if (
+                    self.identity_head is not None
+                    and self.identity_head.revision_in_transaction(session)
+                    != config.identity_revision
+                ):
+                    raise DomainError(
+                        "IDENTITY_SNAPSHOT_CHANGED",
+                        "Identity history changed before source preparation",
+                        409,
+                    )
                 proof = self.attestations.record_in_transaction(
                     session,
                     source_context,
