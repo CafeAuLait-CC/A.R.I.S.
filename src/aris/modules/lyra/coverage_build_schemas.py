@@ -6,6 +6,7 @@ from pydantic import AwareDatetime, Field, model_validator
 
 from aris.modules.lyra.coverage_schemas import ProcessingCoverageConfiguration
 from aris.modules.lyra.ledger_schemas import UsageLedgerHead
+from aris.modules.lyra.source_prefix_schemas import SourcePrefixSelection, prefix_excludes_window
 from aris.modules.lyra.trace_attestation_schemas import StoredTraceAttestation
 from aris.modules.lyra.trace_consumer_schemas import canonical_trace, trace_fingerprint
 from aris.modules.lyra.usage_intervals import IntervalContract
@@ -17,7 +18,7 @@ MAX_BUILD_PLAN_BYTES = 65536
 MAX_BUILD_STEP_BYTES = 16384
 
 
-class CreateCoverageBuild(IntervalContract):
+class CreateCoverageBuild(SourcePrefixSelection):
     id: UUID
     query: UsageWindowQuery
     expected_configuration_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -25,7 +26,7 @@ class CreateCoverageBuild(IntervalContract):
     ledger: UsageLedgerHead
 
 
-class AdmitCoverageWindow(IntervalContract):
+class AdmitCoverageWindow(SourcePrefixSelection):
     id: UUID
     query: UsageWindowQuery
     expected_configuration_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -42,6 +43,11 @@ class StoredCoverageBuild(IntervalContract):
     event_id: UUID
     created_at: AwareDatetime
     fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+    @property
+    def start_revision(self) -> int:
+        prefix = self.request.prefix_checkpoint
+        return prefix.through_revision if prefix else 0
 
     @property
     def target_revision(self) -> int:
@@ -66,7 +72,14 @@ class StoredCoverageBuild(IntervalContract):
             != (config.trace.agent_id, config.trace.node_id)
             or self.read_at < max(request.query.end_at, self.source.read_at)
             or self.created_at < self.read_at
-            or self.target_revision > MAX_WINDOW_MANIFESTS
+            or not prefix_excludes_window(
+                request.prefix_checkpoint,
+                configuration_fingerprint=config.trace.fingerprint,
+                start_at=request.query.start_at,
+                ceiling=self.source.highest_committed_seq,
+                read_at=self.read_at,
+            )
+            or not 0 <= self.target_revision - self.start_revision <= MAX_WINDOW_MANIFESTS
             or (self.tail is None)
             != (self.source.highest_committed_seq == config.trace.initial_after_seq)
             or (
@@ -92,13 +105,13 @@ def coverage_build_fingerprint(value: StoredCoverageBuild) -> str:
 class AdvanceCoverageBuild(IntervalContract):
     id: UUID
     expected_plan_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
-    expected_revision: int = Field(ge=0, lt=MAX_WINDOW_MANIFESTS, strict=True)
+    expected_revision: int = Field(ge=0, lt=9223372036854775807, strict=True)
 
 
 class StoredCoverageBuildStep(IntervalContract):
     plan_id: UUID
     plan_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
-    revision: int = Field(ge=1, le=MAX_WINDOW_MANIFESTS, strict=True)
+    revision: int = Field(ge=1, le=9223372036854775807, strict=True)
     previous_fingerprint: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     attestation_id: UUID
     attestation_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -112,8 +125,7 @@ class StoredCoverageBuildStep(IntervalContract):
     @model_validator(mode="after")
     def fixed_step(self) -> "StoredCoverageBuildStep":
         if (
-            (self.revision == 1) != (self.previous_fingerprint is None)
-            or self.first_seq > self.last_seq
+            self.first_seq > self.last_seq
             or self.fingerprint != coverage_build_step_fingerprint(self)
             or len(canonical_trace(self).encode()) > MAX_BUILD_STEP_BYTES
         ):
@@ -128,8 +140,8 @@ def coverage_build_step_fingerprint(value: StoredCoverageBuildStep) -> str:
 class CoverageBuildProgress(IntervalContract):
     plan_id: UUID
     plan_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
-    processed_revision: int = Field(ge=0, le=MAX_WINDOW_MANIFESTS, strict=True)
-    target_revision: int = Field(ge=0, le=MAX_WINDOW_MANIFESTS, strict=True)
+    processed_revision: int = Field(ge=0, le=9223372036854775807, strict=True)
+    target_revision: int = Field(ge=0, le=9223372036854775807, strict=True)
     sources_built: bool = Field(strict=True)
     window_id: UUID
     window_saved: bool = Field(strict=True)

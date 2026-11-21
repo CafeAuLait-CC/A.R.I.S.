@@ -612,9 +612,7 @@ class CoverageBuildPlanRow(Base):
 
 class CoverageBuildStepRow(Base):
     __tablename__ = "usage_coverage_build_steps"
-    __table_args__ = (
-        CheckConstraint("revision >= 1 AND revision <= 4096", name="coverage_build_step_revision"),
-    )
+    __table_args__ = (CheckConstraint("revision >= 1", name="coverage_build_step_revision"),)
 
     plan_id: Mapped[str] = mapped_column(
         ForeignKey("usage_coverage_build_plans.id"), primary_key=True
@@ -639,3 +637,23 @@ class RecordingReceiptOrderRow(Base):
     receipt_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     node_id: Mapped[str] = mapped_column(String(128))
     revision: Mapped[int] = mapped_column(BigInteger)
+
+
+class SourcePrefixCheckpointRow(Base):
+    __tablename__ = "usage_source_prefix_checkpoints"
+    __table_args__ = (
+        Index("ix_source_prefix_scope", "consumer_id", "through_revision"),
+        CheckConstraint("through_revision > 0", name="ck_source_prefix_revision"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    event_id: Mapped[str] = mapped_column(ForeignKey("domain_events.event_id"), unique=True)
+    previous_id: Mapped[str | None] = mapped_column(
+        ForeignKey("usage_source_prefix_checkpoints.id"), nullable=True
+    )
+    consumer_id: Mapped[str] = mapped_column(String(128))
+    configuration_fingerprint: Mapped[str] = mapped_column(String(64))
+    through_revision: Mapped[int] = mapped_column(BigInteger)
+    max_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    canonical_checkpoint: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

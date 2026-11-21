@@ -9,6 +9,7 @@ from pydantic import AwareDatetime, Field, field_validator, model_validator
 
 from aris.modules.lyra.coverage_schemas import ProcessingCoverageConfiguration
 from aris.modules.lyra.ledger_schemas import UsageLedgerHead
+from aris.modules.lyra.source_prefix_schemas import SourcePrefixSelection, prefix_excludes_window
 from aris.modules.lyra.trace_consumer_schemas import canonical_trace, trace_fingerprint
 from aris.modules.lyra.usage_intervals import IntervalContract
 from aris.modules.vega.usage_archive_schemas import UsageArchiveHead
@@ -78,7 +79,7 @@ class WindowCoverageCell(IntervalContract):
         return self
 
 
-class SampledUsageWindow(IntervalContract):
+class SampledUsageWindow(SourcePrefixSelection):
     assessment_scope: Literal["committed_sampled_usage_window"] = "committed_sampled_usage_window"
     weighted: Literal[False] = False
     query: UsageWindowQuery
@@ -133,6 +134,13 @@ class SampledUsageWindow(IntervalContract):
             or (self.source.query.agent_id, self.source.query.node_id)
             != (self.configuration.trace.agent_id, self.query.node_id)
             or self.read_at < max(self.query.end_at, self.source.read_at)
+            or not prefix_excludes_window(
+                self.prefix_checkpoint,
+                configuration_fingerprint=self.configuration.trace.fingerprint,
+                start_at=self.query.start_at,
+                ceiling=self.source.highest_committed_seq,
+                read_at=self.read_at,
+            )
             or (known, unknown, uncovered, verified)
             != (
                 self.covered_gpu_microseconds,

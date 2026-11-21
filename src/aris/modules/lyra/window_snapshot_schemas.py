@@ -5,6 +5,7 @@ from uuid import UUID
 from pydantic import AwareDatetime, Field, field_validator, model_validator
 
 from aris.modules.lyra.ledger_schemas import UsageLedgerHead
+from aris.modules.lyra.source_prefix_schemas import SourcePrefixSelection
 from aris.modules.lyra.trace_consumer_schemas import canonical_trace, trace_fingerprint
 from aris.modules.lyra.usage_intervals import IntervalContract
 from aris.modules.lyra.window_schemas import (
@@ -21,7 +22,7 @@ class WindowManifestSelection(IntervalContract):
     fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
-class CaptureUsageWindow(IntervalContract):
+class CaptureUsageWindow(SourcePrefixSelection):
     id: UUID
     query: UsageWindowQuery
     expected_configuration_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -57,6 +58,7 @@ class StoredUsageWindow(IntervalContract):
         request, result = self.request, self.window
         if (
             request.query != result.query
+            or request.prefix_checkpoint != result.prefix_checkpoint
             or request.ledger != result.ledger
             or request.expected_source_fingerprint != result.source.fingerprint
             or request.expected_configuration_fingerprint != result.configuration.fingerprint

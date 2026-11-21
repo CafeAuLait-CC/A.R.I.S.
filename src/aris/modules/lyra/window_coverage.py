@@ -15,6 +15,7 @@ from aris.modules.lyra.coverage_schemas import (
 )
 from aris.modules.lyra.ledger_schemas import ReversedMeasurement, UsageLedgerEntry, UsageLedgerHead
 from aris.modules.lyra.recorded_usage import _active_prefix
+from aris.modules.lyra.source_prefix_schemas import SourcePrefixReference
 from aris.modules.lyra.trace_attestation_schemas import StoredTraceAttestation
 from aris.modules.lyra.trace_consumer_schemas import canonical_trace
 from aris.modules.lyra.window_schemas import (
@@ -50,7 +51,19 @@ def _prefix(
     ledger: UsageLedgerHead,
     entries: tuple[UsageLedgerEntry, ...],
     read_at: datetime,
+    prefix_checkpoint: SourcePrefixReference | None,
+    start_at: datetime,
 ) -> bool:
+    if prefix_checkpoint is not None and (
+        prefix_checkpoint.configuration_fingerprint != config.trace.fingerprint
+        or prefix_checkpoint.last_seq > source.highest_committed_seq
+        or prefix_checkpoint.created_at > read_at
+        or (
+            prefix_checkpoint.max_observed_at is not None
+            and prefix_checkpoint.max_observed_at >= start_at
+        )
+    ):
+        raise DomainError("CONFLICT", "Source prefix is not excluded from this window", 409)
     attestations: dict[UUID, StoredTraceAttestation] = {}
     windows: dict[UUID, list[tuple[datetime, datetime]]] = defaultdict(list)
     seen = set()
@@ -91,8 +104,12 @@ def _prefix(
             raise DomainError(
                 "CONFLICT", "Select nonoverlapping versions for each source segment", 409
             )
-    expected, revision = config.trace.initial_after_seq + 1, 1
-    previous_id = previous_fingerprint = None
+    expected = (
+        prefix_checkpoint.last_seq if prefix_checkpoint else config.trace.initial_after_seq
+    ) + 1
+    revision = (prefix_checkpoint.through_revision if prefix_checkpoint else 0) + 1
+    previous_id = prefix_checkpoint.attestation_id if prefix_checkpoint else None
+    previous_fingerprint = prefix_checkpoint.attestation_fingerprint if prefix_checkpoint else None
     complete = True
     for proof in sorted(attestations.values(), key=lambda value: value.first_seq):
         if (
@@ -287,6 +304,7 @@ def sampled_usage_window(
     *,
     identity_revision: int | None,
     read_at: datetime,
+    prefix_checkpoint: SourcePrefixReference | None = None,
 ) -> SampledUsageWindow:
     if read_at.tzinfo is None or read_at.utcoffset() is None:
         raise ValueError("usage window requires an aware read time")
@@ -313,7 +331,16 @@ def sampled_usage_window(
     ):
         raise DomainError("CONFLICT", "Window source, ledger or time binding differs", 409)
     active = _active_prefix(ledger, entries, read_at)
-    prefix = _prefix(manifests, configuration, source, ledger, entries, read_at)
+    prefix = _prefix(
+        manifests,
+        configuration,
+        source,
+        ledger,
+        entries,
+        read_at,
+        prefix_checkpoint,
+        query.start_at,
+    )
     candidates, hazards = _candidates(
         manifests, active, identities, identity_revision, read_at, configuration
     )
@@ -386,6 +413,7 @@ def sampled_usage_window(
         cells=cells,
         read_at=read_at,
         fingerprint="0" * 64,
+        prefix_checkpoint=prefix_checkpoint,
     )
     return SampledUsageWindow.model_validate(
         {**result.model_dump(mode="json"), "fingerprint": usage_window_fingerprint(result)}

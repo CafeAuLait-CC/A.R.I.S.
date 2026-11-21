@@ -22,6 +22,7 @@ from aris.modules.lyra.coverage_build_schemas import (
 from aris.modules.lyra.coverage_build_service import CoverageBuildService
 from aris.modules.lyra.coverage_schemas import ProcessingCoverageConfiguration
 from aris.modules.lyra.coverage_service import ProcessingCoverageService
+from aris.modules.lyra.source_prefix_schemas import SourcePrefixSelection
 from aris.modules.lyra.trace_attestation_service import TraceAttestationService
 from aris.modules.lyra.trace_consumer_schemas import (
     UsageTraceConsumeContext,
@@ -38,7 +39,7 @@ from aris.modules.vega.usage_service import VegaUsageObservations
 MAX_CONFIG_BYTES = 65536
 
 
-class CoverageBuildTarget(IntervalContract):
+class CoverageBuildTarget(SourcePrefixSelection):
     id: UUID
     query: UsageWindowQuery
 
@@ -137,13 +138,18 @@ class LyraCoverageComponents:
             plan = self.service.admit_current(
                 UsageTraceConsumeContext(request_id="coverage-worker-admission"),
                 AdmitCoverageWindow(
+                    prefix_checkpoint=target.prefix_checkpoint,
                     id=target.id,
                     query=target.query,
                     expected_configuration_fingerprint=config.configuration.fingerprint,
                 ),
             )
             return self._summary("admitted", self.service.progress(plan.request.id))
-        if plan.request.query != target.query or plan.configuration != config.configuration:
+        if (
+            plan.request.query != target.query
+            or plan.configuration != config.configuration
+            or plan.request.prefix_checkpoint != target.prefix_checkpoint
+        ):
             raise DomainError("CONFLICT", "Coverage worker target has different fixed input", 409)
         progress = self.service.progress(target.id)
         if status_only:

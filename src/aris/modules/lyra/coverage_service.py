@@ -185,7 +185,7 @@ class ProcessingCoverageService:
             plan.configuration.trace.consumer_id,
             revision,
         )
-        if proof is None or not 1 <= revision <= plan.target_revision:
+        if proof is None or not plan.start_revision < revision <= plan.target_revision:
             raise DomainError("CONFLICT", "Coverage build source revision is absent", 409)
         request = ProcessingCoverageRequest(
             id=plan.manifest_id(revision),

@@ -21,6 +21,7 @@ from aris.modules.lyra.coverage_build_repo import CoverageBuildRepository
 from aris.modules.lyra.coverage_schemas import ProcessingCoverageConfiguration
 from aris.modules.lyra.coverage_service import ProcessingCoverageService
 from aris.modules.lyra.ledger_repo import UsageLedgerRepository
+from aris.modules.lyra.source_prefix_repo import SourcePrefixRepository
 from aris.modules.lyra.trace_consumer_schemas import UsageTraceConsumeContext
 from aris.modules.lyra.window_coverage import sampled_usage_window
 from aris.modules.lyra.window_reader import UsageWindowReader
@@ -119,6 +120,12 @@ class UsageWindowSnapshotService:
         read_at: datetime,
         deadline: float,
     ) -> SampledUsageWindow:
+        if request.prefix_checkpoint is not None:
+            SourcePrefixRepository(session).checked(
+                request.prefix_checkpoint,
+                config.trace,
+                request.query.start_at,
+            )
         UsageWindowRepository(session).check_manifest_bytes(request.manifests)
         manifests = selected_window_manifests(session, self.coverage, request.manifests, deadline)
         entries = UsageLedgerRepository(session).prefix(request.ledger)
@@ -135,6 +142,7 @@ class UsageWindowSnapshotService:
             identities,
             identity_revision=revision,
             read_at=read_at,
+            prefix_checkpoint=request.prefix_checkpoint,
         )
         self._deadline(deadline)
         return result
@@ -220,6 +228,7 @@ class UsageWindowSnapshotService:
                 or prior.window.source != plan.source
                 or prior.request.ledger != plan.request.ledger
                 or prior.window.identity_revision != plan.identity_revision
+                or prior.request.prefix_checkpoint != plan.request.prefix_checkpoint
             ):
                 raise DomainError("CONFLICT", "Coverage build window differs", 409)
             return UsageWindowReceipt(snapshot=prior, duplicate=True)
@@ -229,6 +238,7 @@ class UsageWindowSnapshotService:
         steps = plans.completed_steps(plan)
         request = CaptureUsageWindow(
             id=plan.window_id,
+            prefix_checkpoint=plan.request.prefix_checkpoint,
             query=plan.request.query,
             expected_configuration_fingerprint=plan.configuration.fingerprint,
             expected_source_fingerprint=plan.source.fingerprint,

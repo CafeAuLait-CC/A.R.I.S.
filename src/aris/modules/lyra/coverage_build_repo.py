@@ -126,13 +126,17 @@ class CoverageBuildRepository:
                 .limit(MAX_WINDOW_MANIFESTS + 1)
             )
         )
-        if revisions != tuple(range(1, plan.target_revision + 1)):
+        if revisions != tuple(range(plan.start_revision + 1, plan.target_revision + 1)):
             raise DomainError(
                 "COVERAGE_BUILD_INCOMPLETE", "Coverage source build is incomplete", 409
             )
         result = []
         previous = None
-        after = plan.configuration.trace.initial_after_seq
+        after = (
+            plan.request.prefix_checkpoint.last_seq
+            if plan.request.prefix_checkpoint
+            else plan.configuration.trace.initial_after_seq
+        )
         for revision in revisions:
             step = self.step(plan.request.id, revision)
             if step is None or (
@@ -146,7 +150,7 @@ class CoverageBuildRepository:
             result.append(step)
             previous, after = step.fingerprint, step.last_seq
         if after != plan.source.highest_committed_seq or (
-            plan.tail is not None and result[-1].attestation_id != plan.tail.request.id
+            plan.tail is not None and result and result[-1].attestation_id != plan.tail.request.id
         ):
             raise inconsistent_build()
         return tuple(result)

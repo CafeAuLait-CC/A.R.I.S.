@@ -30,6 +30,7 @@ from aris.modules.lyra.coverage_schemas import ProcessingCoverageConfiguration
 from aris.modules.lyra.coverage_service import ProcessingCoverageService
 from aris.modules.lyra.ledger_repo import UsageLedgerRepository
 from aris.modules.lyra.recording_order_repo import RecordingReceiptOrderRepository
+from aris.modules.lyra.source_prefix_repo import SourcePrefixRepository
 from aris.modules.lyra.trace_attestation_repo import TraceAttestationRepository
 from aris.modules.lyra.trace_consumer_repo import UsageTraceRepository
 from aris.modules.lyra.trace_consumer_schemas import UsageTraceConsumeContext
@@ -115,7 +116,11 @@ class CoverageBuildService:
                 self._begin(db, snapshot=True)
                 prior = CoverageBuildRepository(db).get(target.id)
                 if prior is not None:
-                    if prior.request.query != target.query or prior.configuration != config:
+                    if (
+                        prior.request.query != target.query
+                        or prior.configuration != config
+                        or prior.request.prefix_checkpoint != target.prefix_checkpoint
+                    ):
                         raise DomainError("CONFLICT", "Coverage target has different input", 409)
                     return prior
                 source = self.windows.archive.head_in_transaction(
@@ -128,6 +133,7 @@ class CoverageBuildService:
                 head = UsageLedgerRepository(db).head(config.trace.node_id)
                 request = CreateCoverageBuild(
                     id=target.id,
+                    prefix_checkpoint=target.prefix_checkpoint,
                     query=target.query,
                     expected_configuration_fingerprint=config.fingerprint,
                     expected_source_fingerprint=source.fingerprint,
@@ -186,6 +192,16 @@ class CoverageBuildService:
                     tail is not None and tail.revision != position.revision
                 ):
                     raise DomainError("CONFLICT", "Coverage source tail proof differs", 409)
+                if request.prefix_checkpoint is not None:
+                    prefix = SourcePrefixRepository(db).checked(
+                        request.prefix_checkpoint,
+                        config.trace,
+                        request.query.start_at,
+                    )
+                    if prefix.proofs[-1].revision > position.revision:
+                        raise DomainError(
+                            "CONFLICT", "Source prefix exceeds the admitted source", 409
+                        )
                 revision = self.coverage.identities.revision_in_transaction(db)
                 if revision is None:
                     raise DomainError(
@@ -242,7 +258,7 @@ class CoverageBuildService:
         if (
             step.plan_id != plan.request.id
             or step.plan_fingerprint != plan.fingerprint
-            or not 1 <= step.revision <= plan.target_revision
+            or not plan.start_revision < step.revision <= plan.target_revision
             or step.manifest.id != plan.manifest_id(step.revision)
             or manifest is None
             or manifest.fingerprint != step.manifest.fingerprint
@@ -278,7 +294,9 @@ class CoverageBuildService:
                     return self._saved_step(db, plan, existing)
                 self._active(plan.configuration)
                 previous = repo.latest(request.id)
-                if (previous.revision if previous else 0) != request.expected_revision:
+                if (
+                    previous.revision if previous else plan.start_revision
+                ) != request.expected_revision:
                     raise DomainError("CONFLICT", "Coverage build progress changed", 409)
                 if next_revision > plan.target_revision:
                     raise DomainError("COVERAGE_BUILD_FINISHED", "All source proofs are built", 409)
@@ -289,13 +307,36 @@ class CoverageBuildService:
                 if proof is None:
                     raise DomainError("CONFLICT", "Coverage next source proof is missing", 409)
                 after = (
-                    previous.last_seq if previous else plan.configuration.trace.initial_after_seq
+                    previous.last_seq
+                    if previous
+                    else (
+                        plan.request.prefix_checkpoint.last_seq
+                        if plan.request.prefix_checkpoint
+                        else plan.configuration.trace.initial_after_seq
+                    )
                 )
                 if (
                     proof.first_seq != after + 1
-                    or proof.previous_id != (previous.attestation_id if previous else None)
+                    or proof.previous_id
+                    != (
+                        previous.attestation_id
+                        if previous
+                        else (
+                            plan.request.prefix_checkpoint.attestation_id
+                            if plan.request.prefix_checkpoint
+                            else None
+                        )
+                    )
                     or proof.previous_fingerprint
-                    != (previous.attestation_fingerprint if previous else None)
+                    != (
+                        previous.attestation_fingerprint
+                        if previous
+                        else (
+                            plan.request.prefix_checkpoint.attestation_fingerprint
+                            if plan.request.prefix_checkpoint
+                            else None
+                        )
+                    )
                     or proof.created_at > plan.read_at
                     or (next_revision == plan.target_revision and proof != plan.tail)
                 ):
@@ -374,7 +415,7 @@ class CoverageBuildService:
                 step = repo.latest(id)
                 if step is not None:
                     self._saved_step(db, plan, step)
-                revision = step.revision if step else 0
+                revision = step.revision if step else plan.start_revision
                 return CoverageBuildProgress(
                     plan_id=id,
                     plan_fingerprint=plan.fingerprint,
