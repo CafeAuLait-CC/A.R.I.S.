@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from aris.core.config import Settings
 from aris.core.db import build_engine, check_database, session_factory
 from aris.core.storage import inspect_pending_events, inspect_storage
+from aris.modules.lyra.retention_service import inspect_retention_dependencies
 from aris.modules.vega.service import VegaService
 
 
@@ -13,6 +14,9 @@ def run() -> None:
     parser.add_argument("--older-than-days", type=int, help="Count old messages; never delete them")
     parser.add_argument(
         "--pending-types", action="store_true", help="Include bounded pending event-type counts"
+    )
+    parser.add_argument(
+        "--retention-dependencies", action="store_true", help="Include Lyra source dependencies"
     )
     args = parser.parse_args()
     if args.older_than_days is not None and args.older_than_days < 1:
@@ -26,7 +30,8 @@ def run() -> None:
             if args.older_than_days is not None
             else None
         )
-        observations = VegaService(session_factory(engine), settings).storage(cutoff)
+        sessions = session_factory(engine)
+        observations = VegaService(sessions, settings).storage(cutoff)
         report = {
             "read_only": True,
             "storage": inspect_storage(engine).model_dump(mode="json"),
@@ -34,6 +39,10 @@ def run() -> None:
         }
         if args.pending_types:
             report["pending_events"] = inspect_pending_events(engine).model_dump(mode="json")
+        if args.retention_dependencies:
+            report["retention_dependencies"] = inspect_retention_dependencies(sessions).model_dump(
+                mode="json"
+            )
         print(json.dumps(report))
     finally:
         engine.dispose()

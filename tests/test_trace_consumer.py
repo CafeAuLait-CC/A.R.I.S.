@@ -18,6 +18,7 @@ from aris.core.contracts import DomainError
 from aris.core.events import DomainEvent, OutboxEntry
 from aris.modules.lyra.models import UsageLedgerEntryRow, UsageTraceCursorRow, UsageTraceRecordRow
 from aris.modules.lyra.residency_sessions import ResidencyFormationRule
+from aris.modules.lyra.retention_service import inspect_retention_dependencies
 from aris.modules.lyra.trace_consumer_repo import UsageTraceRepository
 from aris.modules.lyra.trace_consumer_schemas import (
     StoredTraceConsumption,
@@ -155,6 +156,16 @@ def test_original_prefix_receipt_cursor_event_and_replay_are_one_candidate_opera
     assert "resources" not in stored.model_dump_json()
     assert all("fixture-user" not in item.model_dump_json() for item in stored.sources)
     assert stored.after_residency.open_runs[0].username == "fixture-user"
+    inventory = inspect_retention_dependencies(state.sessions)
+    assert inventory.read_only and not inventory.deletion_enabled
+    assert inventory.eligibility == "not_assessed"
+    (dependency,) = inventory.consumers
+    assert (dependency.node_id, dependency.agent_id) == ("node-a", "agent-a")
+    assert dependency.processed_through_seq == dependency.highest_committed_seq == 6
+    assert dependency.earliest_open_run_seq == 1 and dependency.open_runs == 1
+    assert dependency.last_observation_anchor_seq == 5
+    assert inventory.recording_jobs_by_state == {} and inventory.evidence.saved_windows == 0
+    assert "fixture-user" not in inventory.model_dump_json()
     with state.sessions() as session:
         public_event = session.get(DomainEvent, str(result.event_id))
         audit = session.scalar(
@@ -355,6 +366,9 @@ def test_missing_cursor_is_unavailable_instead_of_restarting_at_configured_initi
     with pytest.raises(DomainError) as error:
         state.service.position()
     assert error.value.code == "DEPENDENCY_UNAVAILABLE"
+    with pytest.raises(DomainError) as inventory_error:
+        inspect_retention_dependencies(state.sessions)
+    assert inventory_error.value.code == "DEPENDENCY_UNAVAILABLE"
     assert state.service.exact(result.id).position == result.position
 
 
