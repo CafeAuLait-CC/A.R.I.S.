@@ -140,3 +140,29 @@ class StableResidencyWindowService:
             )
             self._deadline(deadline)
             return value
+
+    def layout_witness_in_transaction(
+        self, session: Session, request: StableResidencyWindowReference
+    ) -> VerifiedResidencyObservedWindow:
+        """Verify a fixed parent anchor even when it has no dispatchable prefix yet."""
+        request = StableResidencyWindowReference.model_validate(request.model_dump(mode="json"))
+        method = StableResidencyLayoutMethod.model_validate(self.method.model_dump(mode="json"))
+        if request.window_index != 0 or request.expected_method_fingerprint != method.fingerprint:
+            raise DomainError("CONFLICT", "Stable layout witness method or origin differs", 409)
+        deadline = monotonic() + self.timeout_ms / 1000
+        with session.no_autoflush:
+            result = self._original(
+                session,
+                ResidencyObservedWindowReference(
+                    reference=request.reference,
+                    attestation_id=request.attestation_id,
+                    expected_attestation_fingerprint=request.expected_attestation_fingerprint,
+                    expected_trace_configuration_fingerprint=request.expected_trace_configuration_fingerprint,
+                    after_interval=0,
+                    through_interval=1,
+                ),
+            )
+            self._deadline(deadline)
+            if self.method != method:
+                raise DomainError("CONFLICT", "Stable layout method changed during read", 409)
+            return result

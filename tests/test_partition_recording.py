@@ -48,21 +48,30 @@ METHOD = ResidencyPartitionMethod(max_intervals=4)
 
 
 @pytest.fixture
-def partition_recording(ledger):
+def partition_recording(ledger, request):
     source, original, history = ledger[2]
     sessions = history[1]
     clock = history[5]
     assert beat(ledger[4], heartbeat(seq=8)).status_code == 200
-    for index in range(3, 10):
+    sample_count = getattr(request, "param", 10)
+    for index in range(3, sample_count):
         payload = ownership(
             resource_batch(seq=3 + 2 * index, observed_at=NOW + timedelta(seconds=10 + 15 * index)),
             [owner(username="linux-user")],
         )
         assert put(ledger[4], payload).status_code == 200
         assert beat(ledger[4], heartbeat(seq=4 + 2 * index)).status_code == 200
-    idle = resource_batch(seq=23, observed_at=NOW + timedelta(seconds=160))
+    closing_seq = 3 + 2 * sample_count
+    through_seq = closing_seq + 1
+    idle = resource_batch(
+        seq=closing_seq, observed_at=NOW + timedelta(seconds=10 + 15 * sample_count)
+    )
     idle["resources"]["compute"].update(reported_processes=0, gpus=[])
-    assert put(ledger[4], idle).status_code == beat(ledger[4], heartbeat(seq=24)).status_code == 200
+    assert (
+        put(ledger[4], idle).status_code
+        == beat(ledger[4], heartbeat(seq=through_seq)).status_code
+        == 200
+    )
     clock["now"] = max(datetime.now(UTC), clock["now"]) + timedelta(seconds=1)
 
     def now():
@@ -87,14 +96,14 @@ def partition_recording(ledger):
         ResidencySegmentService(sessions, attestations, archive, source.observations, clock=now),
         clock=now,
     )
-    while replay.position().after_seq < 24:
+    while replay.position().after_seq < through_seq:
         receipt = replay.consume(
             UsageTraceConsumeContext(request_id="partition-fixture-trace"),
             UsageTraceConsumeRequest(
                 id=uuid4(),
                 expected_configuration_fingerprint=config.fingerprint,
                 expected_revision=replay.position().revision,
-                through_seq=24,
+                through_seq=through_seq,
                 limit=8,
             ),
         )

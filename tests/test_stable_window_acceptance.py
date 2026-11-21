@@ -81,13 +81,17 @@ def counts(app):
         )
 
 
-def open_reference(app, request):
+def open_reference(app, request, *, from_end=False):
     proof = app.evidence.verify(request.window)
     with app.sessions() as db:
         row = db.scalars(
             select(UsageTraceAttestationRow)
             .where(UsageTraceAttestationRow.consumer_id == proof.original.consumer_id)
-            .order_by(UsageTraceAttestationRow.revision)
+            .order_by(
+                UsageTraceAttestationRow.revision.desc()
+                if from_end
+                else UsageTraceAttestationRow.revision
+            )
             .offset(1)
             .limit(1)
         ).one()

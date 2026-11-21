@@ -2,6 +2,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -17,6 +18,47 @@ from sqlalchemy.dialects.postgresql import ExcludeConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from aris.core.db import Base
+
+
+class StableWindowPlanRow(Base):
+    __tablename__ = "usage_stable_window_plans"
+    __table_args__ = (
+        CheckConstraint(
+            "length(key)=64 AND length(configuration_fingerprint)=64 "
+            "AND length(method_fingerprint)=64 AND length(fingerprint)=64",
+            name="ck_stable_plan_fingerprints",
+        ),
+        CheckConstraint(
+            "version>=1 AND next_window>=0 AND next_window<=planned_windows "
+            "AND planned_windows>=0 AND planned_windows<=observed_intervals "
+            "AND observed_intervals>=1 AND record_revision>=1",
+            name="ck_stable_plan_counters",
+        ),
+        CheckConstraint("updated_at>=created_at", name="ck_stable_plan_times"),
+        CheckConstraint(
+            "length(canonical_origin)>0 AND length(canonical_origin)<=16384 "
+            "AND length(canonical_plan)>0 AND length(canonical_plan)<=131072",
+            name="ck_stable_plan_size",
+        ),
+    )
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    configuration_fingerprint: Mapped[str] = mapped_column(String(64))
+    method_fingerprint: Mapped[str] = mapped_column(String(64))
+    consumer_id: Mapped[str] = mapped_column(String(128))
+    node_id: Mapped[str] = mapped_column(String(128))
+    run_id: Mapped[str] = mapped_column(String(64))
+    canonical_origin: Mapped[str] = mapped_column(Text)
+    event_id: Mapped[str] = mapped_column(ForeignKey("domain_events.event_id"), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    version: Mapped[int] = mapped_column(BigInteger)
+    next_window: Mapped[int] = mapped_column(BigInteger)
+    record_revision: Mapped[int] = mapped_column(BigInteger)
+    observed_intervals: Mapped[int] = mapped_column(BigInteger)
+    planned_windows: Mapped[int] = mapped_column(BigInteger)
+    closed: Mapped[bool] = mapped_column(Boolean)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    canonical_plan: Mapped[str] = mapped_column(Text)
+    fingerprint: Mapped[str] = mapped_column(String(64))
 
 
 class StableWindowAcceptanceRow(Base):
