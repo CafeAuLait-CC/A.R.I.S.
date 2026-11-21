@@ -1,12 +1,12 @@
 import csv
 import io
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, event, select, text
 
 from aris.apps.api.main import create_app
 from aris.core.access.models import ExternalIdentity, Permission, RoleBinding, RolePermission
@@ -18,13 +18,19 @@ from aris.interfaces.slack.config import SlackSettings
 from aris.interfaces.usage.saved_report import saved_csv, saved_report
 from aris.interfaces.usage.saved_service import SavedUsageDetail
 from aris.interfaces.usage.service import UsageHistorySurface
+from aris.modules.lyra.coverage_rollup import roll_up_saved_coverage
 from aris.modules.lyra.ledger_commands import ReverseUsageMeasurementCommand
 from aris.modules.lyra.ledger_repo import UsageLedgerRepository
 from aris.modules.lyra.ledger_schemas import PostedMeasurement
 from aris.modules.lyra.usage_history_service import UsageHistoryService
 from aris.modules.lyra.window_reader import UsageWindowReader
-from aris.modules.lyra.window_reader_schemas import WindowListQuery
-from aris.modules.lyra.window_schemas import SampledUsageWindow, usage_window_fingerprint
+from aris.modules.lyra.window_reader_schemas import SavedWindowView, WindowListQuery
+from aris.modules.lyra.window_schemas import (
+    SampledUsageWindow,
+    UsageWindowQuery,
+    WindowCoverageCell,
+    usage_window_fingerprint,
+)
 from aris.modules.lyra.window_snapshot_repo import UsageWindowRepository
 from aris.modules.lyra.window_snapshot_schemas import StoredUsageWindow, window_snapshot_fingerprint
 from aris.modules.nova.coverage_schedule_reader import CoverageScheduleReader
@@ -204,6 +210,32 @@ def test_saved_reports_and_csv_preserve_exact_snapshot_quality_and_safe_labels(s
         )
         qualities.add(details.view.coverage)
         before = counts(state.service)
+
+        def no_original_samples(conn, cursor, sql, *args):
+            assert "agent_messages" not in sql.lower()
+
+        engine = state.service.sessions.kw["bind"]
+        event.listen(engine, "before_cursor_execute", no_original_samples)
+        try:
+            for grain in ("day", "week"):
+                compact = client.post(
+                    "/internal/usage/snapshots/read",
+                    headers=HEADERS,
+                    json={**selected, "grain": grain},
+                )
+                assert compact.status_code == 200
+                view = compact.json()["rollup"]
+                assert view["snapshot_fingerprint"] == snapshot.fingerprint
+                assert view["coverage"] == details.view.coverage
+                assert view["total_usage_microseconds"] == details.view.total_usage_microseconds
+                assert "cells" not in view
+                assert sum(
+                    duration["microseconds"]
+                    for bucket in view["buckets"]
+                    for duration in bucket["durations"]
+                ) == sum(cell.microseconds for cell in details.view.cells)
+        finally:
+            event.remove(engine, "before_cursor_execute", no_original_samples)
         exported = client.post(
             "/internal/usage/snapshots/read",
             headers={**HEADERS, "Accept": "text/csv"},
@@ -567,6 +599,14 @@ def test_personal_projection_never_returns_other_owners_intervals(saved_ui, monk
     assert result.json()["view"]["cells"] == [] and result.json()["labels"] == {}
     assert str(other) not in result.text
     assert result.json()["view"]["total_usage_microseconds"] == 0
+    daily = client.post(
+        "/internal/usage/snapshots/read",
+        headers=HEADERS,
+        json={"node_id": "node-a", "mode": "mine", "id": str(saved.request.id), "grain": "day"},
+    )
+    assert daily.status_code == 200 and str(other) not in daily.text
+    assert daily.json()["rollup"]["bucket_coverage"] == "owned_recorded_cells"
+    assert all(not bucket["durations"] for bucket in daily.json()["rollup"]["buckets"])
     for format in ("report", "export"):
         exported = client.post(
             "/internal/usage/snapshots/read",
@@ -581,6 +621,63 @@ def test_personal_projection_never_returns_other_owners_intervals(saved_ui, monk
                 and rows[0]["record_type"] == "summary"
                 and rows[0]["total_usage_microseconds"] == "0"
             )
+
+
+def test_rollup_splits_a_fall_back_day_and_preserves_unknown_seconds():
+    # 31 October 23:00 EDT to 2 November 01:00 EST covers a 25h local Sunday.
+    start = datetime(2026, 11, 1, 3, tzinfo=UTC)
+    end = datetime(2026, 11, 2, 6, tzinfo=UTC)
+    owner = uuid4()
+    active_end = datetime(2026, 11, 1, 6, tzinfo=UTC)
+    minute = 60 * 1000000
+    view = SavedWindowView(
+        id=uuid4(),
+        query=UsageWindowQuery(
+            node_id="node-a", start_at=start, end_at=end, timezone="America/New_York"
+        ),
+        created_at=end,
+        captured_at=end,
+        detail_scope="node",
+        coverage="partial",
+        source_prefix_complete=True,
+        recorded_microseconds=3 * 60 * minute,
+        verified_usage_microseconds=3 * 60 * minute,
+        total_usage_microseconds=None,
+        covered_gpu_microseconds=3 * 60 * minute,
+        unknown_gpu_microseconds=24 * 60 * minute,
+        uncovered_gpu_microseconds=0,
+        cells=(
+            WindowCoverageCell(
+                gpu_uuid="GPU-a",
+                start_at=start,
+                end_at=active_end,
+                state="recorded",
+                owner_id=owner,
+                reason="VERIFIED",
+            ),
+            WindowCoverageCell(
+                gpu_uuid="GPU-a",
+                start_at=active_end,
+                end_at=end,
+                state="unknown",
+                reason="SOURCE_QUALITY_UNCERTAIN",
+            ),
+        ),
+        source_fingerprint="1" * 64,
+        snapshot_fingerprint="2" * 64,
+    )
+    daily, weekly = (roll_up_saved_coverage(view, grain) for grain in ("day", "week"))
+    assert tuple(b.end_at - b.start_at for b in daily.buckets) == (
+        timedelta(hours=1),
+        timedelta(hours=25),
+        timedelta(hours=1),
+    )
+    assert [row.microseconds for row in daily.buckets[1].durations] == [
+        2 * 60 * minute,
+        23 * 60 * minute,
+    ]
+    assert [b.local_period_start.weekday() for b in weekly.buckets] == [0, 0]
+    assert daily.total_usage_microseconds is None and weekly.total_usage_microseconds is None
 
 
 def test_disabled_reader_is_explicit_and_reserved_credentials_cannot_query(saved_ui, settings):

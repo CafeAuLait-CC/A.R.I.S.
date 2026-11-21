@@ -13,6 +13,11 @@ from aris.core.commands.schemas import ActorContext
 from aris.core.contracts import DomainError
 from aris.interfaces.usage.saved_report import saved_csv, saved_report
 from aris.interfaces.usage.service import CalendarWindow, UsageHistorySurface, UTCWindow
+from aris.modules.lyra.coverage_rollup import (
+    CoverageGrain,
+    SavedCoverageRollup,
+    roll_up_saved_coverage,
+)
 from aris.modules.lyra.ledger_window_read import MAX_LEDGER_WINDOW_INDEX_BYTES
 from aris.modules.lyra.usage_history import calendar_boundaries
 from aris.modules.lyra.window_reader_schemas import (
@@ -45,6 +50,7 @@ class SavedUsageRead(AccessContract):
     node_id: str = Field(min_length=1, max_length=128)
     mode: Literal["mine", "node"] = "mine"
     id: UUID
+    grain: CoverageGrain | None = None
 
 
 class SavedUsageDetail(AccessContract):
@@ -58,6 +64,12 @@ class SavedUsagePlanPage(AccessContract):
     plans: CoveragePlanPage
 
 
+class SavedUsageRollupDetail(AccessContract):
+    rollup: SavedCoverageRollup
+    labels: dict[str, str]
+    gpu_indices: dict[str, int] = Field(default_factory=dict)
+
+
 def saved_usage(
     surface: UsageHistorySurface,
     authorization: str | None,
@@ -65,7 +77,7 @@ def saved_usage(
     query: SavedUsageQuery | SavedUsageRead,
     *,
     output: Literal["json", "html", "csv"] = "json",
-) -> SavedWindowPage | SavedUsagePlanPage | SavedUsageDetail | bytes:
+) -> SavedWindowPage | SavedUsagePlanPage | SavedUsageDetail | SavedUsageRollupDetail | bytes:
     subject = surface.authenticator.authenticate(authorization)
     if query.node_id not in surface.node_ids:
         raise DomainError("PERMISSION_DENIED", "Node is outside this usage interface", 403)
@@ -82,8 +94,18 @@ def saved_usage(
             if principal is None:
                 raise DomainError("PERMISSION_DENIED", "Current identity is unavailable", 403)
             actor = ActorContext(actor_id=principal.user_id, request_id=request_id)
-            result: SavedWindowPage | SavedUsagePlanPage | SavedUsageDetail | bytes
+            result: (
+                SavedWindowPage
+                | SavedUsagePlanPage
+                | SavedUsageDetail
+                | SavedUsageRollupDetail
+                | bytes
+            )
             if isinstance(query, SavedUsageRead):
+                if query.grain is not None and output != "json":
+                    raise DomainError(
+                        "VALIDATION_ERROR", "Calendar rollup requires JSON output", 422
+                    )
                 if output != "json":
                     surface.history.access.require_in_transaction(
                         session,
@@ -125,13 +147,22 @@ def saved_usage(
                                 if label.node_id == view.query.node_id
                             }
                         )
-                result = (
-                    SavedUsageDetail(view=view, labels=labels, gpu_indices=gpu_indices)
-                    if output == "json"
-                    else saved_report(view, labels, gpu_indices)
-                    if output == "html"
-                    else saved_csv(view, labels)
-                )
+                if query.grain is not None:
+                    try:
+                        rollup = roll_up_saved_coverage(view, query.grain)
+                    except (ValueError, OverflowError):
+                        raise DomainError(
+                            "DEPENDENCY_UNAVAILABLE", "Saved coverage cannot be rolled up", 503
+                        ) from None
+                    result = SavedUsageRollupDetail(
+                        rollup=rollup, labels=labels, gpu_indices=gpu_indices
+                    )
+                elif output == "json":
+                    result = SavedUsageDetail(view=view, labels=labels, gpu_indices=gpu_indices)
+                elif output == "html":
+                    result = saved_report(view, labels, gpu_indices)
+                else:
+                    result = saved_csv(view, labels)
                 if isinstance(result, bytes) and len(result) > MAX_LEDGER_WINDOW_INDEX_BYTES:
                     raise DomainError("USAGE_REPORT_TOO_LARGE", "Saved export is too large", 503)
                 reader.require_in_transaction(
