@@ -189,6 +189,36 @@ def test_admin_password_setup_cuts_off_legacy_and_reset_revokes_old_sessions(acc
         assert old.revoked_at is not None
 
 
+@pytest.mark.parametrize("remember", [False, True])
+def test_password_setup_and_change_preserve_the_login_cookie_mode(portal, remember):
+    from fastapi.testclient import TestClient
+
+    app, components, _, _ = portal
+    with TestClient(app) as client:
+        login(client, remember=remember)
+        first = post(
+            client, "/internal/members/password", {"username": "admin", "password": PASSWORD}
+        )
+        assert first.status_code == 200, first.text
+        assert ("Max-Age=" in first.headers["set-cookie"]) is remember
+        current = components.portal.login.current(client.cookies.get("aris_member_session"))
+        assert current.remember is remember
+        # The password form cannot override a choice that belongs to sign-in.
+        rejected = post(
+            client,
+            "/internal/members/password",
+            {"username": "admin", "password": SECOND_PASSWORD, "remember": not remember},
+        )
+        assert rejected.status_code == 422
+        changed = post(
+            client,
+            "/internal/members/password",
+            {"username": "admin", "password": SECOND_PASSWORD, "current_password": PASSWORD},
+        )
+        assert changed.status_code == 200, changed.text
+        assert ("Max-Age=" in changed.headers["set-cookie"]) is remember
+
+
 def test_username_reservation_is_unique_revisioned_and_idempotent(accounts):
     service, _, manager, admin, member, _ = accounts
     before = manager.identity(

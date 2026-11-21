@@ -40,6 +40,7 @@ class SessionGrant(AccessContract):
 
 
 class CurrentSession(AccessContract):
+    remember: bool = False
     principal: UserPrincipal
     subject: ExternalSubject
     expires_at: AwareDatetime
@@ -254,6 +255,7 @@ class LoginSessionService:
                     principal=principal,
                     subject=subject,
                     expires_at=utc(stored.expires_at),
+                    remember=utc(stored.expires_at) - utc(stored.issued_at) == timedelta(days=7),
                     csrf=expected_csrf,
                 )
         except DBAPIError:

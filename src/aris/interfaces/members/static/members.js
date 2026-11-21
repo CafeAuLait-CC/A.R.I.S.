@@ -129,7 +129,7 @@
   }
   $('account-password-form').addEventListener('submit',async event=>{
     event.preventDefault();if(state.accountBusy || state.busy || (state.intent && (!state.intent.terminal || state.intent.needsRefresh)))return;
-    let payload;try{payload={username:username($('account-username').value),password:password($('account-password').value,$('account-confirm').value),remember:$('account-remember').checked};if(state.session.account?.password_ready)payload.current_password=$('current-password').value;}catch(error){$('account-message').textContent=error.message;return;}
+    let payload;try{payload={username:username($('account-username').value),password:password($('account-password').value,$('account-confirm').value)};if(state.session.account?.password_ready)payload.current_password=$('current-password').value;}catch(error){$('account-message').textContent=error.message;return;}
     state.accountBusy=true;controls();$('account-message').textContent='Saving…';['current-password','account-password','account-confirm'].forEach(id=>$(id).value='');
     let acknowledged=false;
     try{const data=await request('/internal/members/password',payload);if(data.signed_in!==true)throw new Error('The password change could not be verified.');acknowledged=true;await connect();tab('profile');$('account-message').textContent='Password saved.';}
@@ -227,8 +227,11 @@
   function begin(command,parameters,selected) {
     if(state.busy || state.accountBusy || (state.intent && (!state.intent.terminal || state.intent.needsRefresh)))return;
     clearTimeout(reviewTimer);reviewTimer=null;
-    state.intent={command,parameters,selected:[...selected],users:new Set([...selected].map(id=>state.rows.get(id)?.user).filter(Boolean)),key:crypto.randomUUID(),confirmKey:crypto.randomUUID(),withdrawKey:crypto.randomUUID(),commandId:null,proof:null,busy:false,terminal:false,needsRefresh:false,successApplied:false,pollCount:0,confirmedAt:null,pendingOperation:null,uncertain:false};
-    $('review-content').replaceChildren();reviewView('preparing','Processing…',false,true);$('review-dialog').showModal();advanceReview();controls();
+    state.intent={command,parameters:structuredClone(parameters),selected:[...selected],users:new Set([...selected].map(id=>state.rows.get(id)?.user).filter(Boolean)),key:crypto.randomUUID(),confirmKey:crypto.randomUUID(),withdrawKey:crypto.randomUUID(),commandId:null,proof:null,busy:false,terminal:false,needsRefresh:false,successApplied:false,pollCount:0,confirmedAt:null,pendingOperation:null,uncertain:false,awaitingUser:true,requestedSave:false};
+    state.intent.reviewParameters=structuredClone(parameters);
+    const content=$('review-content');content.replaceChildren();describeReview(content,state.intent,parameters);
+    reviewView('confirmation','Confirm these changes to save.');$('confirm-review').disabled=false;$('withdraw-review').disabled=false;
+    $('review-dialog').showModal();controls();
   }
   $('review-selected').addEventListener('click',()=>{try{begin('identity.manage_members',{expected_revision:state.revision,reason:AUDIT_REASON,changes:changes()},state.selected);}catch(error){notice(error.message,true);}});
   $('profile-form').addEventListener('submit',event=>{event.preventDefault();begin('identity.edit_own_profile',{expected_revision:state.session.actor.directory_revision,profile:{display_name:$('profile-name').value.trim(),timezone:state.session.actor.timezone,email:$('profile-email').value.trim() || null}},new Set());});
@@ -242,7 +245,7 @@
   }
   function scheduleReview(intent,immediate=false) {
     clearTimeout(reviewTimer);reviewTimer=null;
-    if(state.intent!==intent || (intent.terminal && !intent.needsRefresh))return;
+    if(state.intent!==intent || intent.awaitingUser || (intent.terminal && !intent.needsRefresh))return;
     const delay=immediate?250:Math.min(5000,500*2**Math.min(intent.pollCount++,4));
     reviewTimer=setTimeout(()=>{reviewTimer=null;advanceReview();},delay);
   }
@@ -252,6 +255,17 @@
     if(change.type==='remove_node_user')return intent.users.has(change.expected_user_id) && state.session.nodes.includes(change.node_id);
     if(change.type==='assign_node_user')return intent.users.has(change.user_id) && state.session.nodes.includes(change.node_id);
     return change.type==='edit_member' && intent.users.has(change.user_id);
+  }
+  function reviewFingerprint(parameters) {
+    // The server fills optional no-op defaults and stamps its role-policy version.
+    // Every actual value, target, array order and expected revision must still match.
+    function ordered(value) {
+      if(Array.isArray(value))return value.map(ordered);
+      if(value && typeof value==='object')return Object.fromEntries(Object.keys(value).sort().filter(key=>value[key]!==null && !(Array.isArray(value[key]) && !value[key].length)).map(key=>[key,ordered(value[key])]));
+      return value;
+    }
+    const copy=structuredClone(parameters);delete copy.role_policy_fingerprint;
+    return JSON.stringify(ordered(copy));
   }
   function describeReview(content,intent,parameters) {
     if(intent.command==='identity.edit_own_profile') {
@@ -307,12 +321,12 @@
     return 'Changes were not saved. '+(known[code] || 'Please check your entries and try again.')+' Your edits are kept.';
   }
   async function advanceReview() {
-    const intent=state.intent;if(!intent || intent.busy)return;
+    const intent=state.intent;if(!intent || intent.busy || intent.awaitingUser)return;
     clearTimeout(reviewTimer);reviewTimer=null;intent.busy=true;intent.proof=null;
     $('confirm-review').disabled=true;$('withdraw-review').disabled=true;
     try {
       if(!intent.commandId) {
-        reviewView('preparing','Processing…',false,true);
+        reviewView('saving',savingText(intent),false,true);
         const data=await request('/internal/commands',{command:intent.command,parameters:intent.parameters},'POST',intent.key);
         intent.commandId=data.outcome?.command_id;
         if(!intent.commandId)throw new Error('The request has not been verified.');
@@ -320,6 +334,7 @@
       const data=await request('/internal/commands/'+encodeURIComponent(intent.commandId)+'/review',undefined,'GET');
       if(data.command_id!==intent.commandId || data.outcome.command_id!==intent.commandId || data.request.command!==intent.command || data.request.scope.type!=='global' || data.request.scope.id!=='*')throw new Error('The canonical request target differs. Confirmation is blocked.');
       const parameters=data.request.parameters;
+      intent.reviewParameters=structuredClone(parameters);
       if(intent.command==='identity.manage_members' && !parameters.changes.every(change=>safeTarget(change,intent)))throw new Error('The canonical member selection differs. Confirmation is blocked.');
       const signature=JSON.stringify(parameters);
       if(intent.reviewSignature!==signature){const content=$('review-content');content.replaceChildren();describeReview(content,intent,parameters);intent.reviewSignature=signature;}
@@ -339,6 +354,15 @@
         intent.confirmedAt ||= Date.now();
         if(intent.pendingOperation?.kind==='confirm')intent.pendingOperation=null;
       }
+      if(outcome.state==='awaiting_confirmation' && intent.requestedSave && !intent.pendingOperation) {
+        if(reviewFingerprint(parameters)!==intent.consentSignature) {
+          intent.requestedSave=false;intent.confirmedAt=null;intent.awaitingUser=true;intent.proof=outcome.proof;
+          reviewView('confirmation','Some details changed. Review these changes before saving.');
+          $('confirm-review').disabled=false;$('withdraw-review').disabled=false;
+          return;
+        }
+        intent.pendingOperation={kind:'confirm',proof:outcome.proof};
+      }
       if(intent.pendingOperation && ['awaiting_confirmation','queued'].includes(outcome.state)) {
         const operation=intent.pendingOperation;
         reviewView(operation.kind==='withdraw'?'cancelling':'saving',operation.kind==='withdraw'?'Cancelling…':savingText(intent),false,true);
@@ -355,20 +379,17 @@
       if(outcome.state==='queued' || intent.confirmedAt) {
         reviewView('saving',savingText(intent),false,true);
       } else if(outcome.state==='awaiting_confirmation') {
-        const current=await request('/internal/members/session',undefined,'GET');
-        reviewView('confirmation','Confirm these changes to save.');$('withdraw-review').disabled=false;
-        if(current.actor.directory_revision!==parameters.expected_revision)reviewNotice('Members changed. Cancel this request, reload the selected members, and save again.',true);
-        else {intent.proof=outcome.proof;$('confirm-review').disabled=false;}
-        intent.pollCount=Math.max(intent.pollCount,3);
+        intent.awaitingUser=true;intent.proof=outcome.proof;
+        reviewView('confirmation','Confirm these changes to save.');$('withdraw-review').disabled=false;$('confirm-review').disabled=false;
       } else throw new Error('The request state is not yet verified.');
     } catch(error) {
       if(state.intent!==intent)return;
       if(!intent.commandId && !intent.uncertain && [400,401,403,409,422].includes(error.status)) {
         intent.terminal=true;
-        reviewView('terminal','Changes could not be prepared. '+error.message+' Your edits are kept.',true);
+        reviewView('terminal','Changes were not saved. '+error.message+' Your edits are kept.',true);
       } else {
         intent.uncertain=true;
-        reviewView('checking','The result is not yet verified. '+error.message+' Checking this same request automatically. You can close this window and use Resume request.',true,true);
+        reviewView('checking','The result is not yet verified. '+error.message+' Checking this same request automatically. You can close this window and use View save progress.',true,true);
       }
     } finally {
       intent.busy=false;
@@ -376,8 +397,16 @@
     }
   }
   function operate(kind) {
-    const intent=state.intent;if(!intent || intent.busy || intent.terminal || intent.pendingOperation || (kind==='confirm' && !intent.proof))return;
-    intent.pendingOperation={kind,proof:intent.proof};intent.pollCount=0;if(kind==='confirm')intent.confirmedAt=Date.now();
+    const intent=state.intent;if(!intent || intent.busy || intent.terminal || intent.pendingOperation)return;
+    if(kind==='withdraw' && !intent.commandId) {
+      intent.awaitingUser=false;intent.terminal=true;
+      reviewView('terminal','Changes cancelled. Nothing was saved. Your edits are kept.');controls();return;
+    }
+    intent.awaitingUser=false;intent.pollCount=0;
+    if(kind==='confirm') {
+      intent.consentSignature=reviewFingerprint(intent.reviewParameters);intent.requestedSave=true;intent.confirmedAt=Date.now();
+      if(intent.proof)intent.pendingOperation={kind,proof:intent.proof};
+    } else intent.pendingOperation={kind,proof:intent.proof};
     reviewView(kind==='withdraw'?'cancelling':'saving',kind==='withdraw'?'Cancelling…':'Saving…',false,true);
     advanceReview();
   }

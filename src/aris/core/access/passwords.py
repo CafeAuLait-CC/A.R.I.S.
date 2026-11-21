@@ -367,5 +367,5 @@ class PasswordAccountService:
             account = repo.user_account(str(actor.principal.user_id))
             assert account is not None
             return self._replace_password(
-                session, account, password_hash, request_id=request_id, remember=data.remember
+                session, account, password_hash, request_id=request_id, remember=latest.remember
             )

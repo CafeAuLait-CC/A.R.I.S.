@@ -14,15 +14,18 @@ def normalize_username(value: str) -> str:
     return value.strip().lower()
 
 
-class PasswordInput(AccessContract):
+class PasswordFields(AccessContract):
     username: Username
     password: SecretStr = Field(min_length=15, max_length=128, repr=False)
-    remember: bool = Field(default=True, strict=True)
 
     @field_validator("username", mode="before")
     @classmethod
     def canonical_username(cls, value: str) -> str:
         return normalize_username(value)
+
+
+class PasswordInput(PasswordFields):
+    remember: bool = Field(default=True, strict=True)
 
 
 class InvitationInput(AccessContract):
@@ -47,7 +50,7 @@ class ActivatePasswordInput(PasswordInput):
         return value
 
 
-class SetOwnPasswordInput(PasswordInput):
+class SetOwnPasswordInput(PasswordFields):
     current_password: SecretStr | None = Field(default=None, max_length=128, repr=False)
 
 

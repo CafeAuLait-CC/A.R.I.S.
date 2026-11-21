@@ -30,3 +30,17 @@ for (const script of scripts) new vm.Script(script.source, {filename: script.nam
 console.log(`JavaScript syntax: ${scripts.length} rendered scripts passed`);
 """
 subprocess.run([node, "-e", parser], input=json.dumps(scripts), text=True, check=True)
+
+assets = ROOT / "src/aris/interfaces/members/static"
+layouts = [
+    {
+        "html": layout.render((assets / "index.html").read_text()),
+        "source": layout.render((assets / "members.js").read_text()),
+        "account": layout.account,
+        "commands": layout.commands,
+        "cancel": layout.cancel,
+    }
+    for layout in (INTERNAL_PATHS, PUBLIC_PATHS)
+]
+for check in sorted((ROOT / "tests/frontend").glob("*.mjs")):
+    subprocess.run([node, str(check)], input=json.dumps(layouts), text=True, check=True)
