@@ -21,6 +21,7 @@ from aris.modules.lyra.window_reader_schemas import (
     WindowListQuery,
     WindowPageCursor,
 )
+from aris.modules.nova.coverage_schedule_reader import CoveragePlanPage
 
 
 class SavedUsageQuery(AccessContract):
@@ -30,6 +31,7 @@ class SavedUsageQuery(AccessContract):
     window: Annotated[CalendarWindow | UTCWindow, Field(discriminator="kind")]
     before: WindowPageCursor | None = None
     limit: int = Field(default=16, ge=1, le=32, strict=True)
+    include_plans: bool = Field(default=False, strict=True)
 
     @model_validator(mode="after")
     def own_scope(self) -> "SavedUsageQuery":
@@ -49,6 +51,11 @@ class SavedUsageDetail(AccessContract):
     labels: dict[str, str]
 
 
+class SavedUsagePlanPage(AccessContract):
+    snapshots: SavedWindowPage
+    plans: CoveragePlanPage
+
+
 def saved_usage(
     surface: UsageHistorySurface,
     authorization: str | None,
@@ -56,7 +63,7 @@ def saved_usage(
     query: SavedUsageQuery | SavedUsageRead,
     *,
     output: Literal["json", "html", "csv"] = "json",
-) -> SavedWindowPage | SavedUsageDetail | bytes:
+) -> SavedWindowPage | SavedUsagePlanPage | SavedUsageDetail | bytes:
     subject = surface.authenticator.authenticate(authorization)
     if query.node_id not in surface.node_ids:
         raise DomainError("PERMISSION_DENIED", "Node is outside this usage interface", 403)
@@ -73,7 +80,7 @@ def saved_usage(
             if principal is None:
                 raise DomainError("PERMISSION_DENIED", "Current identity is unavailable", 403)
             actor = ActorContext(actor_id=principal.user_id, request_id=request_id)
-            result: SavedWindowPage | SavedUsageDetail | bytes
+            result: SavedWindowPage | SavedUsagePlanPage | SavedUsageDetail | bytes
             if isinstance(query, SavedUsageRead):
                 if output != "json":
                     surface.history.access.require_in_transaction(
@@ -140,6 +147,17 @@ def saved_usage(
                         "VALIDATION_ERROR", "Saved statistics date range is invalid", 422
                     ) from None
                 result = reader.list_in_transaction(session, actor, selection, mode=query.mode)
+                if query.include_plans:
+                    if surface.coverage_plans is None:
+                        raise DomainError(
+                            "USAGE_NOT_CONFIGURED", "Coverage plan reading is not enabled", 503
+                        )
+                    result = SavedUsagePlanPage(
+                        snapshots=result,
+                        plans=surface.coverage_plans.read_in_transaction(
+                            session, actor, node_id=query.node_id, mode=query.mode
+                        ),
+                    )
             current = surface.history.access.resolve_external_in_transaction(session, subject)
             if current is None or current.user_id != principal.user_id:
                 raise DomainError("PERMISSION_DENIED", "Current identity differs", 403)

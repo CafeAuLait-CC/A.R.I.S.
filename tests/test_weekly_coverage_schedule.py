@@ -1,6 +1,7 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
+from uuid import UUID, uuid4
 
 import pytest
 from alembic import command
@@ -15,11 +16,13 @@ from aris.apps.composition.lyra_coverage import (
     build_lyra_coverage_components,
 )
 from aris.apps.ops.weekly_coverage import WeeklyCoverageConfig, main, run_tick
-from aris.core.access.models import RoleBinding
+from aris.core.access.models import Role, RoleBinding
+from aris.core.commands.schemas import ActorContext
 from aris.core.contracts import DomainError
 from aris.core.scheduler.schemas import SchedulerContext
 from aris.modules.lyra.coverage_schemas import ProcessingCoverageConfiguration
 from aris.modules.nova.coverage_schedule_models import CoveragePeriodResultRow, CoverageScheduleRow
+from aris.modules.nova.coverage_schedule_reader import CoverageScheduleReader
 from aris.modules.nova.coverage_schedule_repo import CoverageScheduleRepository
 from aris.modules.nova.coverage_schedule_schemas import CoverageScheduleDefinition
 from aris.modules.nova.coverage_schedule_service import CoverageScheduleService
@@ -310,3 +313,72 @@ def test_empty_schedule_migration_roundtrip_and_metadata_drift(database_url, mon
     command.downgrade(cfg, "0042")
     command.upgrade(cfg, "0043")
     command.check(cfg)
+
+
+def test_configured_status_tracks_due_dates_saved_quality_and_personal_scope_without_writing(
+    partition_recording, settings
+):
+    schedules, config, definition, clock, _ = setup(partition_recording, settings)
+    actor = ActorContext(actor_id=definition.calendar.owner_id, request_id="fixture-status")
+    schedules.select(CONTEXT, definition)
+    personal = definition.model_copy(
+        update={"calendar": definition.calendar.model_copy(update={"report_type": "usage.mine"})}
+    )
+    schedules.select(CONTEXT, personal)
+    other = UUID(partition_recording[2][2][2][4][1])
+    with schedules.sessions.begin() as db:
+        role = db.scalar(
+            select(Role.id)
+            .join(RoleBinding, RoleBinding.role_id == Role.id)
+            .where(
+                RoleBinding.user_id == str(actor.actor_id),
+                Role.name.like("fixture-ledger-reader-%"),
+            )
+        )
+        db.add(
+            RoleBinding(
+                id=str(uuid4()),
+                user_id=str(other),
+                role_id=role,
+                scope_type="node",
+                scope_id="node-a",
+            )
+        )
+    other_plan = personal.model_copy(
+        update={"calendar": personal.calendar.model_copy(update={"owner_id": other})}
+    )
+    schedules.select(CONTEXT, other_plan)
+    reader = CoverageScheduleReader(
+        schedules.sessions,
+        (definition.id, personal.id, other_plan.id, uuid4()),
+        clock=schedules.clock,
+    )
+
+    def read(mode):
+        with schedules.sessions() as db:
+            if db.get_bind().dialect.name == "postgresql":
+                db.execute(text("SET TRANSACTION READ ONLY"))
+            return reader.read_in_transaction(db, actor, node_id="node-a", mode=mode)
+
+    assert [item.id for item in read("mine").items] == [personal.id]
+    assert [item.id for item in read("node").items] == [definition.id]
+    assert read("node").items[0].state == "delayed"
+    saved = drain(schedules, config)
+    item = read("node").items[0]
+    assert item.state == "scheduled" and item.next_week == date(2026, 11, 23)
+    assert str(item.last_result.snapshot_id) == saved["snapshot_id"]
+    assert item.last_result.coverage == "partial" and item.worker_health == "not_assessed"
+    clock["now"] = item.next_due_at + timedelta(minutes=1)
+    assert read("node").items[0].state == "pending"
+    clock["now"] += timedelta(minutes=30)
+    assert read("node").items[0].state == "delayed"
+    raw = item.model_dump_json()
+    assert "configuration" not in raw and "agent_id" not in raw and "owner_id" not in raw
+    with schedules.sessions() as db:
+        assert db.scalar(select(func.count()).select_from(CoverageScheduleRow)) == 3
+        assert db.scalar(select(func.count()).select_from(CoveragePeriodResultRow)) == 1
+    with schedules.sessions.begin() as db:
+        db.execute(delete(RoleBinding).where(RoleBinding.user_id == str(actor.actor_id)))
+    with pytest.raises(DomainError) as rejected:
+        read("mine")
+    assert rejected.value.code == "PERMISSION_DENIED"

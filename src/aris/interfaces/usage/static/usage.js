@@ -54,6 +54,7 @@
     $('empty').hidden=count!==0; $('page-note').textContent=count ? `第 ${current.offset+1}–${current.offset+rows.length} ${continuous?'时段':'段'}，共 ${count} ${continuous?'时段':'段'}` : '0 条记录'; $('snapshot-note').textContent=`${report.node_id} · ${formatter.format(new Date(report.start_at))} 至 ${formatter.format(new Date(report.end_at))} · 固定记录快照`; $('previous').disabled=current.offset===0; $('next').disabled=!current.has_more;
   }
   const saved = window.createSavedUsage({el:$, request, lock, message, isBusy:()=>busy,
+    plansAvailable:()=>Boolean(session?.coverage_plans_available),
     selection:()=>({node_id:$('node').value,mode:$('mode').value,owner_id:$('mode').value==='node' && $('owner').value ? $('owner').value:null,
       window:{kind:'calendar',start_date:$('start').value,end_date:$('end').value,timezone:session.actor.timezone}}),
     timezone:()=>session.actor.timezone});

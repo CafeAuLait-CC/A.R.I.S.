@@ -5,6 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from urllib.parse import urlsplit
+from uuid import UUID
 
 from pydantic import Field, SecretStr, model_validator
 from sqlalchemy.orm import Session, sessionmaker
@@ -40,6 +41,7 @@ from aris.modules.lyra.general_usage import GeneralUsageService
 from aris.modules.lyra.indexed_usage_service import IndexedUsageHistoryService
 from aris.modules.lyra.weekly_report_service import WeeklyReportReader
 from aris.modules.lyra.window_reader import UsageWindowReader
+from aris.modules.nova.coverage_schedule_reader import CoverageScheduleReader
 from aris.modules.nova.weekly_plan_reader import WeeklyPlanReader
 from aris.modules.vega.gpu_hardware_service import VegaGpuHardwareObservations
 from aris.modules.vega.scope_service import VegaNodeScopes
@@ -97,9 +99,12 @@ class MemberRuntimeConfig(AccessContract):
     )
     poll_seconds: float = Field(default=1, ge=0.1, le=60)
     activity_preview: ActivityPreviewConfig | None = None
+    coverage_plan_ids: tuple[UUID, ...] = Field(default=(), max_length=8)
 
     @model_validator(mode="after")
     def fixed_namespace_and_origin(self) -> "MemberRuntimeConfig":
+        if len(set(self.coverage_plan_ids)) != len(self.coverage_plan_ids):
+            raise ValueError("coverage plan IDs must be unique")
         parts = urlsplit(self.origin)
         if (
             self.namespace.provider != "slack"
@@ -238,6 +243,13 @@ def build_member_components(
     windows.access = ceiling
     plans = WeeklyPlanReader(sessions)
     plans.access = ceiling
+    coverage_plans = (
+        CoverageScheduleReader(sessions, config.coverage_plan_ids, clock=clock)
+        if config.coverage_plan_ids
+        else None
+    )
+    if coverage_plans is not None:
+        coverage_plans.access = ceiling
     activity = None
     if config.activity_preview:
         reader = ActivityPreviewService(
@@ -256,6 +268,7 @@ def build_member_components(
         saved_windows=windows,
         weekly_reports=WeeklyReportReader(history),
         weekly_plans=plans,
+        coverage_plans=coverage_plans,
         activity=activity,
     )
     roster = None

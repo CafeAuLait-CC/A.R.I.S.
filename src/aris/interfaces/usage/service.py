@@ -37,6 +37,7 @@ from aris.modules.lyra.usage_history import (
 from aris.modules.lyra.usage_history_service import UsageHistoryService
 from aris.modules.lyra.weekly_report_service import WeeklyReportReader
 from aris.modules.lyra.window_reader import UsageWindowReader
+from aris.modules.nova.coverage_schedule_reader import CoverageScheduleReader
 from aris.modules.nova.weekly_plan_reader import WeeklyPlanReader
 
 
@@ -103,6 +104,7 @@ class UsageSession(AccessContract):
     saved_snapshots_available: bool = False
     weekly_reports_available: bool = False
     weekly_plans_available: bool = False
+    coverage_plans_available: bool = False
     group_reports_available: bool = False
     activity_preview_nodes: tuple[str, ...] = ()
 
@@ -238,6 +240,7 @@ class UsageHistorySurface:
         saved_windows: UsageWindowReader | None = None,
         weekly_reports: WeeklyReportReader | None = None,
         weekly_plans: WeeklyPlanReader | None = None,
+        coverage_plans: CoverageScheduleReader | None = None,
         activity: ActivityPreviewAccess | None = None,
     ) -> None:
         if not 1 <= len(node_ids) <= 32 or len(set(node_ids)) != len(node_ids):
@@ -248,6 +251,7 @@ class UsageHistorySurface:
         self.saved_windows = saved_windows
         self.weekly_reports = weekly_reports
         self.weekly_plans = weekly_plans
+        self.coverage_plans = coverage_plans
         if activity is not None and (
             activity.reader.sessions is not history.sessions
             or any(node not in node_ids for node in activity.node_ids)
@@ -294,6 +298,7 @@ class UsageHistorySurface:
                     saved_snapshots_available=self.saved_windows is not None,
                     weekly_reports_available=self.weekly_reports is not None,
                     weekly_plans_available=self.weekly_plans is not None,
+                    coverage_plans_available=self.coverage_plans is not None,
                     group_reports_available=len(nodes) > 1,
                     activity_preview_nodes=tuple(
                         node.node_id

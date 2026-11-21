@@ -22,6 +22,7 @@ from aris.modules.lyra.window_reader_schemas import WindowListQuery
 from aris.modules.lyra.window_schemas import SampledUsageWindow, usage_window_fingerprint
 from aris.modules.lyra.window_snapshot_repo import UsageWindowRepository
 from aris.modules.lyra.window_snapshot_schemas import StoredUsageWindow, window_snapshot_fingerprint
+from aris.modules.nova.coverage_schedule_reader import CoverageScheduleReader
 from tests.test_administration import admin_state
 from tests.test_closed_run_recording import closed
 from tests.test_mapping_history import history_state
@@ -135,6 +136,40 @@ def test_saved_list_keyset_paging_and_detail_share_authorization_without_writing
         client.post("/internal/usage/snapshots/capture", headers=HEADERS, json={}).status_code
         == 404
     )
+
+
+def test_opt_in_plan_summary_preserves_default_snapshot_response_and_cannot_choose_ids(saved_ui):
+    state, client, surface, _, _, _ = saved_ui
+    assert not client.post("/internal/usage/session", headers=HEADERS).json()[
+        "coverage_plans_available"
+    ]
+    before = counts(state.service)
+    response = client.post(
+        "/internal/usage/snapshots/query", headers=HEADERS, json=selection(include_plans=True)
+    )
+    assert response.status_code == 503
+    surface.coverage_plans = CoverageScheduleReader(surface.history.sessions, (uuid4(),))
+    assert client.post("/internal/usage/session", headers=HEADERS).json()[
+        "coverage_plans_available"
+    ]
+    default = client.post(
+        "/internal/usage/snapshots/query", headers=HEADERS, json=selection()
+    ).json()
+    assert "plans" not in default and "items" in default
+    response = client.post(
+        "/internal/usage/snapshots/query", headers=HEADERS, json=selection(include_plans=True)
+    )
+    assert response.status_code == 200 and "no-store" in response.headers["cache-control"]
+    assert response.json()["snapshots"] == default and response.json()["plans"]["items"] == []
+    assert (
+        client.post(
+            "/internal/usage/snapshots/query",
+            headers=HEADERS,
+            json=selection(include_plans=True, plan_ids=[str(uuid4())]),
+        ).status_code
+        == 422
+    )
+    assert counts(state.service) == before
 
 
 def test_saved_reports_and_csv_preserve_exact_snapshot_quality_and_safe_labels(saved_ui):

@@ -1,5 +1,5 @@
 "use strict";
-window.createSavedUsage = function ({el, request, lock, message, isBusy, selection, timezone}) {
+window.createSavedUsage = function ({el, request, lock, message, isBusy, selection, timezone, plansAvailable=()=>false}) {
   let active = false, cursor = null, chosen = null, selectedQuery = null, chosenRead = null, version = 0;
   const names = {complete:'完整', partial:'部分覆盖', unknown:'未知'};
   const states = {recorded:'已记录', observed_idle:'空闲', unknown:'未知', uncovered:'未覆盖'};
@@ -8,7 +8,21 @@ window.createSavedUsage = function ({el, request, lock, message, isBusy, selecti
   const node = (tag, value, className) => {const item=document.createElement(tag);item.textContent=value;if(className)item.className=className;return item;};
   function format(value) {return new Intl.DateTimeFormat('zh-CN',{timeZone:timezone(),month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(new Date(value));}
   function badge(status) {return node('span',names[status],`coverage-badge ${status}`);}
-  function reset() {version++;cursor=null;chosen=null;chosenRead=null;selectedQuery=null;el('saved-list').replaceChildren();el('saved-cells').replaceChildren();el('saved-timeline').replaceChildren();el('saved-detail').hidden=true;el('saved-more').hidden=true;el('saved-empty').hidden=true;}
+  function reset() {version++;cursor=null;chosen=null;chosenRead=null;selectedQuery=null;el('saved-list').replaceChildren();el('saved-cells').replaceChildren();el('saved-timeline').replaceChildren();el('saved-plan-list').replaceChildren();el('saved-plans').hidden=true;el('saved-detail').hidden=true;el('saved-more').hidden=true;el('saved-empty').hidden=true;}
+  function plans(page) {
+    const stateNames={scheduled:'尚未到期',pending:'等待生成',delayed:'生成延迟'};
+    const stamp=(value,zone)=>new Intl.DateTimeFormat('zh-CN',{timeZone:zone,month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).format(new Date(value));
+    const cards=page.items.map(item=>{
+      const card=node('article','','weekly-plan-card'),head=node('div','','weekly-plan-head');
+      head.append(node('h3',`${item.node_id} · 每周统计`),node('span',stateNames[item.state],`coverage-badge ${item.state==='delayed'?'issue':item.state==='pending'?'waiting':''}`));
+      card.append(head,node('p',`下一统计周 · ${item.next_week}`),node('p',`预计生成 · ${stamp(item.next_due_at,item.timezone)}`));
+      if(item.last_result)card.append(node('p',`最近保存 · ${item.last_result.week} · ${names[item.last_result.coverage]}`));
+      else card.append(node('p','尚未保存周期结果','muted'));
+      card.append(node('small',item.timezone));return card;
+    });
+    el('saved-plan-list').replaceChildren(...cards);el('saved-plans').hidden=false;
+    el('saved-plan-note').textContent=cards.length ? '计划状态按周历和已保存结果显示；尚未判断后台进程是否运行。日期筛选仅影响下方快照列表。' : '当前节点和视图没有已登记的自动统计计划。';
+  }
   function detail(result) {
     const view=result.view;
     el('saved-detail').hidden=false;
@@ -48,10 +62,10 @@ window.createSavedUsage = function ({el, request, lock, message, isBusy, selecti
   async function open(item, input) {if(isBusy())return;const ticket=version;lock(true);message('正在读取统计快照…');try{await openItem(item,input,ticket);if(ticket===version)message('');}catch(error){if(ticket===version){el('saved-detail').hidden=true;chosenRead=null;message(error.message,true);}}finally{if(ticket===version)lock(false);}}
   async function load(more=false) {
     if(isBusy())return;lock(true);message('正在读取统计快照…');
-    const input=more && selectedQuery ? {...selectedQuery,before:cursor}:{...selection(),limit:16};
+    const input=more && selectedQuery ? {...selectedQuery,before:cursor}:{...selection(),limit:16,...(plansAvailable()?{include_plans:true}:{})};
     if(!more)reset();const ticket=version;
     try{
-      const result=await (await request('snapshots/query',input)).json();if(ticket!==version)return;selectedQuery=input;cursor=result.next_cursor;
+      const response=await (await request('snapshots/query',input)).json();if(ticket!==version)return;const result=input.include_plans?response.snapshots:response;if(input.include_plans)plans(response.plans);selectedQuery=input;cursor=result.next_cursor;
       const cards=result.items.map(item=>{const li=document.createElement('li'),button=node('button','');button.type='button';button.dataset.snapshot=item.id;button.setAttribute('aria-current',String(chosen===item.id));button.append(node('strong',`${format(item.start_at)} – ${format(item.end_at)}`),badge(item.coverage),node('small',`保存于 ${format(item.created_at)}`));button.addEventListener('click',()=>open(item,input));li.append(button);return li;});
       el('saved-list').append(...cards);el('saved-more').hidden=!cursor;el('saved-empty').hidden=el('saved-list').children.length!==0;
       if(!more && result.items.length)await openItem(result.items[0],input,ticket);

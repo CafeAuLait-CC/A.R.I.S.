@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 from typing import Literal
+from uuid import UUID
 
 import uvicorn
 from pydantic import Field, SecretStr, ValidationError, model_validator
@@ -25,6 +26,7 @@ from aris.modules.lyra.activity_preview_service import ActivityPreviewService
 from aris.modules.lyra.indexed_usage_service import IndexedUsageHistoryService
 from aris.modules.lyra.weekly_report_service import WeeklyReportReader
 from aris.modules.lyra.window_reader import UsageWindowReader
+from aris.modules.nova.coverage_schedule_reader import CoverageScheduleReader
 from aris.modules.nova.weekly_plan_reader import WeeklyPlanReader
 from aris.modules.vega.gpu_hardware_service import VegaGpuHardwareObservations
 from aris.modules.vega.usage_archive_service import VegaUsageArchive
@@ -38,10 +40,15 @@ class LocalUsageConfig(AccessContract):
     node_ids: tuple[str, ...] = Field(min_length=1, max_length=32)
     saved_snapshots: bool = False
     weekly_reports: bool = False
+    coverage_plan_ids: tuple[UUID, ...] = Field(default=(), max_length=8)
     activity_preview: ActivityPreviewConfig | None = None
 
     @model_validator(mode="after")
     def configured_activity_nodes(self) -> "LocalUsageConfig":
+        if len(set(self.coverage_plan_ids)) != len(self.coverage_plan_ids) or (
+            self.coverage_plan_ids and not self.saved_snapshots
+        ):
+            raise ValueError("coverage plan IDs require unique IDs and saved statistics")
         if self.activity_preview is not None and any(
             item.node_id not in self.node_ids for item in self.activity_preview.sources
         ):
@@ -113,6 +120,9 @@ def main(argv: list[str] | None = None) -> int:
             weekly_reports=WeeklyReportReader(history) if config.weekly_reports else None,
             weekly_plans=WeeklyPlanReader(session_factory(engine))
             if config.weekly_reports
+            else None,
+            coverage_plans=CoverageScheduleReader(sessions, config.coverage_plan_ids)
+            if config.coverage_plan_ids
             else None,
             activity=ActivityPreviewAccess(
                 ActivityPreviewService(
