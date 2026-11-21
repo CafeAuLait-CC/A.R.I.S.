@@ -1,5 +1,6 @@
 import csv
 import io
+from datetime import timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -138,12 +139,26 @@ def test_saved_list_keyset_paging_and_detail_share_authorization_without_writing
 
 def test_saved_reports_and_csv_preserve_exact_snapshot_quality_and_safe_labels(saved_ui):
     state, client, _, _, _, _ = saved_ui
-    for original in (incoming_window(state), incoming_window(state, start=0, end=120)):
+    complete = incoming_window(state)
+    partial = complete.model_copy(
+        update={
+            "id": uuid4(),
+            "query": complete.query.model_copy(
+                update={
+                    "start_at": complete.query.start_at - timedelta(seconds=10),
+                    "end_at": complete.query.end_at + timedelta(seconds=60),
+                }
+            ),
+        }
+    )
+    qualities = set()
+    for original in (complete, partial):
         snapshot = state.service.capture(CONTEXT, original).snapshot
         selected = {"node_id": "node-a", "mode": "node", "id": str(snapshot.request.id)}
         details = SavedUsageDetail.model_validate(
             client.post("/internal/usage/snapshots/read", headers=HEADERS, json=selected).json()
         )
+        qualities.add(details.view.coverage)
         before = counts(state.service)
         exported = client.post(
             "/internal/usage/snapshots/read",
@@ -207,6 +222,7 @@ def test_saved_reports_and_csv_preserve_exact_snapshot_quality_and_safe_labels(s
             ).content
             == exported.content
         )
+    assert qualities == {"complete", "partial"}
 
 
 @pytest.mark.parametrize("format", ["export", "report"])
