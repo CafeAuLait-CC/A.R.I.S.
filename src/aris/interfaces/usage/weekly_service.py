@@ -17,6 +17,7 @@ from aris.interfaces.usage.service import (
     UTCWindow,
     history_csv,
 )
+from aris.modules.lyra.ledger_window_read import MAX_LEDGER_WINDOW_INDEX_BYTES
 from aris.modules.lyra.usage_history import UsageHistoryQuery, calendar_boundaries
 from aris.modules.lyra.weekly_report_schemas import (
     StoredWeeklyReport,
@@ -97,16 +98,23 @@ def weekly_usage(
             actor = ActorContext(actor_id=principal.user_id, request_id=request_id)
             result: WeeklyReportPage | StoredWeeklyReport | bytes
             if isinstance(query, WeeklyUsageRead):
-                report = reader.read_in_transaction(
-                    session, actor, query.id, node_id=query.node_id, mode=query.mode
-                )
-                result = (
-                    history_report(report.history, report.labels)
-                    if output == "html"
-                    else history_csv(report.history, report.labels)
-                    if output == "csv"
-                    else report
-                )
+                if output == "json":
+                    result = reader.read_in_transaction(
+                        session, actor, query.id, node_id=query.node_id, mode=query.mode
+                    )
+                else:
+                    report, details = reader.materialize_in_transaction(
+                        session, actor, query.id, node_id=query.node_id, mode=query.mode
+                    )
+                    result = (
+                        history_report(details, report.labels)
+                        if output == "html"
+                        else history_csv(details, report.labels)
+                    )
+                    if len(result) > MAX_LEDGER_WINDOW_INDEX_BYTES:
+                        raise DomainError(
+                            "USAGE_REPORT_TOO_LARGE", "Choose a smaller weekly export", 503
+                        )
                 # Export rendering must not bypass a concurrent current permission change.
                 reader.require_in_transaction(session, actor, query.node_id, query.mode)
             else:

@@ -1,5 +1,6 @@
 import json
 from datetime import UTC, date, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -15,6 +16,10 @@ from aris.core.events import DomainEvent
 from aris.core.scheduler.schemas import SchedulerContext, SchedulerLimits
 from aris.core.scheduler.service import SchedulerService
 from aris.interfaces.slack.config import SlackSettings
+from aris.modules.lyra.indexed_usage_service import IndexedUsageHistoryService
+from aris.modules.lyra.ledger_segment_schemas import CaptureLedgerSegment, ledger_read_configuration
+from aris.modules.lyra.ledger_segment_service import LedgerSegmentService
+from aris.modules.lyra.trace_consumer_schemas import UsageTraceConsumeContext
 from aris.modules.lyra.usage_history import UsageHistoryQuery
 from aris.modules.lyra.usage_history_service import UsageHistoryService
 from aris.modules.lyra.weekly_report_models import WeeklyReportRow
@@ -38,7 +43,7 @@ CONTEXT = SchedulerContext(request_id="fixture-weekly-report")
 def weekly(readings, mode="mine"):
     state, (original, actor, _, _), _ = readings
     clock = [datetime(2026, 11, 23, 1, tzinfo=UTC)]
-    history = UsageHistoryService(original.sessions, clock=lambda: clock[0])
+    history = IndexedUsageHistoryService(original.sessions, clock=lambda: clock[0])
     handler = WeeklyReportHandler(history)
     scheduler = SchedulerService(
         history.sessions,
@@ -66,6 +71,45 @@ def query():
     )
 
 
+@pytest.mark.parametrize("reader_type", [UsageHistoryService, IndexedUsageHistoryService])
+def test_frozen_history_cannot_include_a_head_recorded_after_the_original_data_time(
+    readings, reader_type
+):
+    _, (_, actor, _, _), receipt = readings
+    _, _, indexed, _, _, _ = weekly(readings)
+    service = reader_type(indexed.sessions, clock=indexed.clock)
+    selection = UsageHistoryQuery(
+        node_id="node-a",
+        start_at=datetime(2026, 11, 16, 12, tzinfo=UTC),
+        end_at=datetime(2026, 11, 16, 12, 2, tzinfo=UTC),
+        snapshot=receipt.head,
+    )
+    with service.sessions() as session:
+        with pytest.raises(DomainError) as error:
+            service.read_frozen_in_transaction(session, actor, selection, read_at=selection.end_at)
+    assert error.value.code == "VALIDATION_ERROR" and error.value.status == 422
+
+
+def test_weekly_export_rejects_reconstructed_history_with_a_different_fingerprint(
+    readings, monkeypatch
+):
+    scheduler, plan, history, actor, _, clock = weekly(readings)
+    job = enqueue_weekly_reports(scheduler, CONTEXT, plan, now=clock[0]).results[0].job.request
+    assert scheduler.run_once(CONTEXT).state == "completed"
+    original = history.read_frozen_in_transaction
+
+    def altered(*args, **options):
+        return original(*args, **options).model_copy(update={"fingerprint": "f" * 64})
+
+    monkeypatch.setattr(history, "read_frozen_in_transaction", altered)
+    with history.sessions() as session:
+        with pytest.raises(DomainError) as error:
+            WeeklyReportReader(history).materialize_in_transaction(
+                session, actor, job.id, node_id="node-a"
+            )
+    assert error.value.code == "CONFLICT"
+
+
 def test_weekly_report_survives_restart_and_keeps_the_original_ledger_prefix(readings):
     scheduler, plan, history, actor, _, clock = weekly(readings)
     batch = enqueue_weekly_reports(scheduler, CONTEXT, plan, now=clock[0])
@@ -81,11 +125,36 @@ def test_weekly_report_survives_restart_and_keeps_the_original_ledger_prefix(rea
     )
     assert len(report.history.days) == 7 and report.history.snapshot.revision == 1
     assert report.fingerprint == report.content_fingerprint()
+    assert "rows" not in report.model_dump(mode="json")["history"]
+    assert sum(gpu.recorded_microseconds for gpu in report.history.gpus) == 30000000
+    with history.sessions() as session:
+        _, original_details = reader.materialize_in_transaction(
+            session, actor, job.id, node_id="node-a"
+        )
     with history.sessions() as session:
         page = reader.list_in_transaction(session, actor, query())
         assert [value.id for value in page.items] == [job.id]
     readings[0][0].post(POST, post_window(readings[0], start=40, seq=101))
     assert history.read(actor, query()).snapshot.revision == 2
+    clock[0] += timedelta(seconds=60)
+    index_config = ledger_read_configuration("node-a")
+    segments = LedgerSegmentService(
+        history.sessions, configuration=index_config, clock=history.clock
+    )
+    segments.capture(
+        UsageTraceConsumeContext(request_id="fixture-weekly-index"),
+        CaptureLedgerSegment(
+            id=uuid4(),
+            target=history.read(actor, query()).snapshot,
+            expected_configuration_fingerprint=index_config.fingerprint,
+        ),
+    )
+    with history.sessions() as session:
+        _, repeated_details = reader.materialize_in_transaction(
+            session, actor, job.id, node_id="node-a"
+        )
+    assert repeated_details == original_details
+    assert repeated_details.read_at == report.history.read_at
     assert WeeklyReportReader(history).read(actor, job.id, node_id="node-a") == report
     assert enqueue_weekly_reports(scheduler, CONTEXT, plan, now=clock[0]).results[0].duplicate
     assert scheduler.run_once(CONTEXT).state == "idle"
@@ -163,6 +232,8 @@ def test_weekly_artifact_is_immutable_and_read_only_queries_do_not_generate_it(r
             session.execute(text("SET TRANSACTION READ ONLY"))
             assert reader.list_in_transaction(session, actor, query()).items[0].id == id
             assert reader.read_in_transaction(session, actor, id, node_id="node-a") == report
+            saved, details = reader.materialize_in_transaction(session, actor, id, node_id="node-a")
+            assert saved == report and details.recorded_microseconds == 30000000
 
 
 def test_schedule_change_is_a_conflict_and_unfinished_week_is_not_enqueued(readings):
@@ -309,8 +380,8 @@ def test_private_weekly_operator_validates_without_db_and_runs_one_explicit_batc
         assert not json.loads(capsys.readouterr().out)["database_accessed"]
     monkeypatch.setattr(
         operator,
-        "UsageHistoryService",
-        lambda sessions: UsageHistoryService(sessions, clock=readings[1][0].clock),
+        "IndexedUsageHistoryService",
+        lambda sessions: IndexedUsageHistoryService(sessions, clock=readings[1][0].clock),
     )
     assert weekly_main(["--config", str(config), "--once"]) == 0
     result = json.loads(capsys.readouterr().out)

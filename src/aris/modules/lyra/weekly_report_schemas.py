@@ -8,8 +8,14 @@ from zoneinfo import ZoneInfo
 from pydantic import AwareDatetime, Field, model_validator
 
 from aris.core.access.schemas import AccessContract, UserPrincipal
-from aris.modules.lyra.ledger_schemas import canonical_ledger, ledger_fingerprint
-from aris.modules.lyra.usage_history import UsageHistory
+from aris.modules.lyra.ledger_schemas import UsageLedgerHead, canonical_ledger, ledger_fingerprint
+from aris.modules.lyra.usage_history import (
+    UsageHistory,
+    UsageHistoryDay,
+    UsageHistoryGpu,
+    UsageHistoryOwner,
+    usage_gpu_summary,
+)
 from aris.modules.lyra.usage_intervals import IntervalContract
 
 MAX_WEEKLY_REPORT_BYTES = 4194304
@@ -34,6 +40,52 @@ class WeeklyReportRequest(AccessContract):
         return self
 
 
+class WeeklyRecordedSummary(IntervalContract):
+    """Compact stored metrics bound to the original full history fingerprint; no copied rows."""
+
+    assessment_scope: Literal["recorded_usage_only"] = "recorded_usage_only"
+    source_coverage: Literal["unknown"] = "unknown"
+    total_usage_microseconds: None = None
+    quota_usage_available: Literal[False] = False
+    node_id: str
+    owner_id: UUID | None
+    start_at: AwareDatetime
+    end_at: AwareDatetime
+    timezone: str
+    snapshot: UsageLedgerHead
+    read_at: AwareDatetime
+    recorded_microseconds: int = Field(ge=0)
+    gpu_count: int = Field(ge=0)
+    segment_count: int = Field(ge=0)
+    owners: tuple[UsageHistoryOwner, ...] = Field(max_length=128)
+    days: tuple[UsageHistoryDay, ...] = Field(max_length=7)
+    gpus: tuple[UsageHistoryGpu, ...] = Field(max_length=128)
+    fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+    @model_validator(mode="after")
+    def exact_summary(self) -> "WeeklyRecordedSummary":
+        if (
+            self.start_at >= self.end_at
+            or self.end_at > self.read_at
+            or self.snapshot.node_id != self.node_id
+            or self.gpu_count != len(self.gpus)
+            or any(
+                sum(value.recorded_microseconds for value in values) != self.recorded_microseconds
+                for values in (self.owners, self.days, self.gpus)
+            )
+            or sum(value.segment_count for value in self.owners) != self.segment_count
+            or sum(value.segment_count for value in self.gpus) != self.segment_count
+        ):
+            raise ValueError("weekly summary differs from its original recorded totals")
+        return self
+
+
+def weekly_recorded_summary(history: UsageHistory) -> WeeklyRecordedSummary:
+    return WeeklyRecordedSummary(
+        **history.model_dump(exclude={"rows"}), gpus=usage_gpu_summary(history.rows)
+    )
+
+
 class StoredWeeklyReport(IntervalContract):
     id: UUID
     event_id: UUID
@@ -41,7 +93,7 @@ class StoredWeeklyReport(IntervalContract):
     task_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
     request: WeeklyReportRequest
     created_at: AwareDatetime
-    history: UsageHistory
+    history: WeeklyRecordedSummary
     labels: dict[str, str] = Field(max_length=129)
     fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
 

@@ -56,6 +56,7 @@ class IndexedUsageHistoryService(UsageHistoryService):
         *,
         owner_id: UUID | None,
         deadline: float,
+        read_at: datetime | None = None,
     ) -> LedgerWindowRead:
         reader = LedgerWindowReader(
             self.sessions,
@@ -66,6 +67,7 @@ class IndexedUsageHistoryService(UsageHistoryService):
         return reader.read_in_transaction(
             session,
             LedgerWindowQuery(**query.model_dump(exclude={"timezone"}), owner_id=owner_id),
+            read_at=read_at,
             deadline=deadline,
         )
 
@@ -129,6 +131,28 @@ class IndexedUsageHistoryService(UsageHistoryService):
             ),
         )
 
+    def read_frozen_in_transaction(
+        self,
+        session: Session,
+        actor: ActorContext,
+        query: UsageHistoryQuery,
+        *,
+        read_at: datetime,
+        mode: Literal["mine", "node"] = "mine",
+        owner_id: UUID | None = None,
+    ) -> UsageHistory:
+        if query.snapshot is None:
+            raise DomainError("VALIDATION_ERROR", "Frozen history requires its original head", 422)
+        return self._authorized_read(
+            session,
+            actor,
+            query,
+            mode=mode,
+            owner_id=owner_id,
+            data_time=read_at,
+            reduce=lambda window: indexed_usage_history(query, window),
+        )
+
     def _authorized_read(
         self,
         session: Session,
@@ -138,6 +162,7 @@ class IndexedUsageHistoryService(UsageHistoryService):
         mode: Literal["mine", "node"],
         owner_id: UUID | None,
         reduce: Callable[[LedgerWindowRead], _Result],
+        data_time: datetime | None = None,
     ) -> _Result:
         actor = ActorContext.model_validate(actor.model_dump(mode="json"))
         query = UsageHistoryQuery.model_validate(query.model_dump(mode="json"))
@@ -152,11 +177,16 @@ class IndexedUsageHistoryService(UsageHistoryService):
                     session, min(100, self.timeout_ms), min(1000, self.timeout_ms), self.timeout_ms
                 )
                 self.access.require_in_transaction(session, access)
-                result = reduce(
+                view = (
                     self._window_in_transaction(
                         session, query, owner_id=owner_id, deadline=deadline
                     )
+                    if data_time is None
+                    else self._window_in_transaction(
+                        session, query, owner_id=owner_id, deadline=deadline, read_at=data_time
+                    )
                 )
+                result = reduce(view)
                 self.access.require_in_transaction(session, access)
                 if monotonic() >= deadline:
                     raise DomainError(

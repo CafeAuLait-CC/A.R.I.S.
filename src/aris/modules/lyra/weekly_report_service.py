@@ -16,7 +16,7 @@ from aris.core.contracts import DomainError
 from aris.core.events import DomainEvent, OutboxEntry
 from aris.core.scheduler.schemas import ScheduledTask
 from aris.core.scheduler.service import TaskDefinition
-from aris.modules.lyra.usage_history import UsageHistoryQuery
+from aris.modules.lyra.usage_history import UsageHistory, UsageHistoryQuery
 from aris.modules.lyra.usage_history_service import UsageHistoryService
 from aris.modules.lyra.weekly_report_repo import WeeklyReportRepository
 from aris.modules.lyra.weekly_report_schemas import (
@@ -24,6 +24,7 @@ from aris.modules.lyra.weekly_report_schemas import (
     WeeklyReportCursor,
     WeeklyReportPage,
     WeeklyReportRequest,
+    weekly_recorded_summary,
 )
 
 WEEKLY_KINDS = {mode: "lyra.weekly_recorded_usage." + mode for mode in ("mine", "node")}
@@ -92,7 +93,7 @@ class WeeklyReportHandler:
             task_fingerprint=request.fingerprint,
             request=payload,
             created_at=now,
-            history=report,
+            history=weekly_recorded_summary(report),
             labels=labels,
             fingerprint="0" * 64,
         )
@@ -233,3 +234,32 @@ class WeeklyReportReader:
             raise DomainError(
                 "DEPENDENCY_UNAVAILABLE", "Weekly report database is unavailable", 503
             ) from None
+
+    def materialize_in_transaction(
+        self,
+        session: Session,
+        actor: ActorContext,
+        id: UUID,
+        *,
+        node_id: str,
+        mode: Literal["mine", "node"] = "mine",
+    ) -> tuple[StoredWeeklyReport, UsageHistory]:
+        saved = self.read_in_transaction(session, actor, id, node_id=node_id, mode=mode)
+        original = saved.history
+        history = self.history.read_frozen_in_transaction(
+            session,
+            actor,
+            UsageHistoryQuery(
+                node_id=node_id,
+                start_at=original.start_at,
+                end_at=original.end_at,
+                timezone=original.timezone,
+                snapshot=original.snapshot,
+            ),
+            read_at=original.read_at,
+            mode=mode,
+        )
+        if weekly_recorded_summary(history) != original:
+            raise DomainError("CONFLICT", "Saved weekly source no longer matches its summary", 409)
+        self.require_in_transaction(session, actor, node_id, mode)
+        return saved, history

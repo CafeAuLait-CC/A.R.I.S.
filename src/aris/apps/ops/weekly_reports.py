@@ -21,7 +21,7 @@ from aris.core.contracts import DomainError
 from aris.core.db import build_engine, check_database, session_factory
 from aris.core.scheduler.schemas import SchedulerContext, SchedulerLimits, TaskQueueQuery
 from aris.core.scheduler.service import SchedulerService
-from aris.modules.lyra.usage_history_service import UsageHistoryService
+from aris.modules.lyra.indexed_usage_service import IndexedUsageHistoryService
 from aris.modules.lyra.weekly_report_service import WEEKLY_KINDS, WeeklyReportHandler
 from aris.modules.nova.report_calendar import WeeklyReportPlan
 from aris.modules.nova.weekly_plan_schemas import WeeklyPreparationLimits, plan_id, plan_key
@@ -201,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         engine = build_engine(config.database_url.get_secret_value())
         check_database(engine)
-        history = UsageHistoryService(session_factory(engine))
+        history = IndexedUsageHistoryService(session_factory(engine))
         handler = WeeklyReportHandler(history)
         worker = SchedulerService(
             history.sessions,
