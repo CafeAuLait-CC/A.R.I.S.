@@ -46,9 +46,10 @@ __all__ = [
 ]
 
 
-def service_for(writer):
+def service_for(writer, *, method="strict_sampled_residency_edges"):
     source = writer.acceptances.evidence.originals
     config = ProcessingCoverageConfiguration(
+        method=method,
         trace=source.records.configuration,
         recording=writer.ledger.configuration,
         gpu_uuids=("GPU-a",),
@@ -132,10 +133,15 @@ def post_remaining(writer, closed):
     )
 
 
-def test_live_prefix_and_closed_tails_form_reproducible_complete_sampled_window(stable_recording):
+@pytest.mark.parametrize(
+    "method", ["strict_sampled_residency_edges", "indexed_sampled_residency_edges"]
+)
+def test_live_prefix_and_closed_tails_form_reproducible_complete_sampled_window(
+    stable_recording, method
+):
     writer, closed, (app, _, fixture) = stable_recording
     first = writer.accept_and_record(POST, open_reference(app, closed))
-    service = service_for(writer)
+    service = service_for(writer, method=method)
     pending = manifests_for(service)
     partial = window_for(service, pending)
     assert partial.window.recorded_microseconds == 45_000_000
@@ -250,16 +256,20 @@ def test_missing_link_does_not_create_coverage_and_link_failure_is_atomic(
         command.downgrade(Config("alembic.ini"), "0038")
 
 
+@pytest.mark.parametrize(
+    "method", ["strict_sampled_residency_edges", "indexed_sampled_residency_edges"]
+)
 def test_postgresql_stable_reverification_and_identity_inputs_are_read_only(
     stable_recording,
     database_url,
+    method,
 ):
     if not database_url.startswith("postgresql"):
         pytest.skip("requires real read-only snapshots")
     writer, closed, (app, _, _) = stable_recording
     writer.accept_and_record(POST, open_reference(app, closed))
     post_remaining(writer, closed)
-    service = service_for(writer)
+    service = service_for(writer, method=method)
     manifests = manifests_for(service)
     with writer.sessions() as db:
         db.execute(text("SET TRANSACTION READ ONLY"))

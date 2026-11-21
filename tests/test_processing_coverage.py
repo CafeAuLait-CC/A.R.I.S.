@@ -138,9 +138,15 @@ def incoming(state, **changes):
     return value.model_copy(update=changes)
 
 
-def test_closed_processing_changes_pending_to_known_without_rewriting_the_old_manifest(coverage):
+@pytest.mark.parametrize(
+    "method", ["strict_sampled_residency_edges", "indexed_sampled_residency_edges"]
+)
+def test_closed_processing_changes_pending_to_known_without_rewriting_the_old_manifest(
+    coverage, method
+):
     state = coverage
     service = state.service
+    service.configuration = service.configuration.model_copy(update={"method": method})
     request = incoming(state)
     before = snapshot(service)
     pending = service.record(CONTEXT, request)
@@ -166,9 +172,26 @@ def test_closed_processing_changes_pending_to_known_without_rewriting_the_old_ma
     assert snapshot(service) == tuple(a + b for a, b in zip(before, (2, 5, 5, 5), strict=True))
 
 
-def test_an_ordinary_open_run_measurement_needs_a_committed_closing_receipt(coverage):
+@pytest.mark.parametrize(
+    "method", ["strict_sampled_residency_edges", "indexed_sampled_residency_edges"]
+)
+def test_an_ordinary_open_run_measurement_needs_a_committed_closing_receipt(coverage, method):
     state = coverage
+    state.service.configuration = state.service.configuration.model_copy(update={"method": method})
     measured = state.ledger[0].post(POST, state.ledger[1])
+    if method == "indexed_sampled_residency_edges":
+        from aris.modules.lyra.ledger_segment_schemas import ledger_read_configuration
+        from aris.modules.lyra.ledger_segment_service import LedgerSegmentService
+        from tests.test_ledger_segments import measurement
+
+        first = state.ledger[0].exact(measured.entries[0])
+        segments = LedgerSegmentService(
+            state.service.sessions,
+            configuration=ledger_read_configuration(first.node_id),
+            clock=state.service.clock,
+        )
+        # An eventual alias may point to a committed head outside this source window.
+        measurement(segments, first, measured.head, state.service._now())
     pending = state.service.record(CONTEXT, incoming(state)).manifest.analysis
     assert pending.unknown_gpu_microseconds == 30_000_000
     assert {cell.reason for cell in pending.cells} == {"CLOSED_RECORDING_NOT_VERIFIED"}
@@ -179,6 +202,165 @@ def test_an_ordinary_open_run_measurement_needs_a_committed_closing_receipt(cove
     assert result.recordings[0].entry_id == measured.entries[0]
     assert result.recordings[0].id == state.incoming.id
     assert state.service.reverify(result.request.id).analysis == result
+
+
+def test_indexed_local_partition_ignores_unrelated_lifetime_boundaries_and_reverifies(coverage):
+    from aris.modules.lyra.ledger_segment_schemas import ledger_read_configuration
+    from aris.modules.lyra.ledger_segment_service import LedgerSegmentService
+    from aris.modules.lyra.window_schemas import UsageWindowQuery
+    from aris.modules.lyra.window_snapshot_schemas import (
+        CaptureUsageWindow,
+        WindowManifestSelection,
+    )
+    from aris.modules.lyra.window_snapshot_service import UsageWindowSnapshotService
+    from aris.modules.vega.usage_archive_schemas import UsageArchiveHeadQuery
+    from tests.test_ledger_segments import CONTEXT as INDEX_CONTEXT
+    from tests.test_ledger_segments import measurement
+    from tests.test_ledger_segments import request as index_request
+
+    state = coverage
+    receipt = state.writer.record(POST, state.incoming)
+    first = state.ledger[0].exact(receipt.ledger.entries[0])
+    segments = LedgerSegmentService(
+        state.service.sessions,
+        configuration=ledger_read_configuration(first.node_id),
+        clock=state.service.clock,
+    )
+    point = receipt.ledger.head
+    for _ in range(24):
+        _, point = measurement(segments, first, point, state.service._now())
+    original = state.service.record(
+        CONTEXT,
+        capture_request(
+            state.service, state.first, state.run.first.compute_observed_at, state.service._now()
+        ),
+    ).manifest
+    state.service.configuration = state.service.configuration.model_copy(
+        update={"method": "indexed_sampled_residency_edges"}
+    )
+    indexed = state.service.record(
+        CONTEXT,
+        capture_request(
+            state.service, state.first, state.run.first.compute_observed_at, state.service._now()
+        ),
+    ).manifest
+    assert (
+        original.analysis.known_recorded_microseconds
+        == indexed.analysis.known_recorded_microseconds
+        == 30_000_000
+    )
+    assert (
+        original.analysis.uncovered_gpu_microseconds == indexed.analysis.uncovered_gpu_microseconds
+    )
+    assert len(original.analysis.cells) > 40 and len(indexed.analysis.cells) < 6
+    # The final report only needs the original source window. Both manifests
+    # point to head25, whose final entry is outside that time selection.
+    last = state.service.record(
+        CONTEXT,
+        capture_request(
+            state.service,
+            state.last,
+            state.run.first.compute_observed_at,
+            state.run.last.compute_observed_at,
+        ),
+    ).manifest
+    first_window = state.service.record(
+        CONTEXT,
+        capture_request(
+            state.service,
+            state.first,
+            state.run.first.compute_observed_at,
+            state.run.last.compute_observed_at,
+        ),
+    ).manifest
+    source = state.service.archive.head(UsageArchiveHeadQuery(agent_id="agent-a", node_id="node-a"))
+    windows = UsageWindowSnapshotService(
+        state.service.sessions,
+        state.service,
+        state.service.archive,
+        state.service.identities,
+        configuration=state.service.configuration,
+        clock=state.service.clock,
+    )
+    saved = windows.capture(
+        CONTEXT,
+        CaptureUsageWindow(
+            id=uuid4(),
+            query=UsageWindowQuery(
+                node_id="node-a",
+                start_at=state.run.first.compute_observed_at,
+                end_at=state.run.last.compute_observed_at,
+            ),
+            expected_configuration_fingerprint=state.service.configuration.fingerprint,
+            expected_source_fingerprint=source.fingerprint,
+            ledger=point,
+            manifests=tuple(
+                WindowManifestSelection(id=value.analysis.request.id, fingerprint=value.fingerprint)
+                for value in (first_window, last)
+            ),
+        ),
+    ).snapshot
+    assert (
+        saved.window.coverage == "complete" and saved.window.total_usage_microseconds == 30_000_000
+    )
+    segments.capture(INDEX_CONTEXT, index_request(segments, point))
+    assert state.service.reverify(indexed.analysis.request.id) == indexed
+    assert state.service.reverify(original.analysis.request.id) == original
+    assert windows.reverify(saved.request.id) == saved
+
+
+def test_indexed_source_without_positive_edges_does_not_scan_a_ledger_window(consumer, monkeypatch):
+    from aris.modules.lyra.ledger_window_service import LedgerWindowReader
+
+    state = consumer
+    assert (
+        put(
+            state.client, resource_batch(seq=1, observed_at=state.base + timedelta(seconds=10))
+        ).status_code
+        == 200
+    )
+    result = state.service.consume(CONTEXT, request(state, through_seq=1))
+    proofs = TraceAttestationService(state.sessions, state.service, clock=state.now)
+    proof = attest(proofs, state.service, state.service.exact(result.id))
+    config = ProcessingCoverageConfiguration(
+        method="indexed_sampled_residency_edges",
+        trace=state.config,
+        gpu_uuids=("GPU-a",),
+        recording=UsagePostingConfiguration(
+            source_ref="one-observation-fixture",
+            recording_start_at=state.base,
+            timing_fingerprint=residency_fingerprint(
+                state.config.continuity, state.config.formation
+            ),
+        ),
+    )
+    service = ProcessingCoverageService(
+        state.sessions,
+        proofs,
+        state.archive,
+        state.observations,
+        NodeUserHistoryService(state.sessions),
+        configuration=config,
+        clock=state.now,
+    )
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("No positive source edge must not trigger a whole or time-window ledger scan")
+
+    monkeypatch.setattr(UsageLedgerRepository, "prefix", unexpected)
+    monkeypatch.setattr(LedgerWindowReader, "read_in_transaction", unexpected)
+    value = service.record(
+        CONTEXT,
+        capture_request(
+            service, proof, state.base + timedelta(seconds=10), state.base + timedelta(seconds=40)
+        ),
+    ).manifest
+    assert value.analysis.uncovered_gpu_microseconds == 30_000_000
+    assert (
+        value.analysis.known_recorded_microseconds == value.analysis.unknown_gpu_microseconds == 0
+    )
+    assert {cell.state for cell in value.analysis.cells} == {"uncovered"}
+    assert service.reverify(value.analysis.request.id) == value
 
 
 def test_idle_edges_are_complete_locally_while_unobserved_boundaries_remain_uncovered(consumer):

@@ -18,9 +18,12 @@ from aris.core.contracts import DomainError
 from aris.core.db import commit_owned_transaction
 from aris.core.events import DomainEvent, OutboxEntry
 from aris.modules.lyra.coverage_build_repo import CoverageBuildRepository
+from aris.modules.lyra.coverage_ledger import indexed_coverage_ledger
+from aris.modules.lyra.coverage_ledger_service import CoverageLedgerReader
 from aris.modules.lyra.coverage_schemas import ProcessingCoverageConfiguration
 from aris.modules.lyra.coverage_service import ProcessingCoverageService
 from aris.modules.lyra.ledger_repo import UsageLedgerRepository
+from aris.modules.lyra.ledger_window_read import LedgerWindowQuery
 from aris.modules.lyra.source_prefix_repo import SourcePrefixRepository
 from aris.modules.lyra.trace_consumer_schemas import UsageTraceConsumeContext
 from aris.modules.lyra.window_coverage import sampled_usage_window
@@ -128,7 +131,37 @@ class UsageWindowSnapshotService:
             )
         UsageWindowRepository(session).check_manifest_bytes(request.manifests)
         manifests = selected_window_manifests(session, self.coverage, request.manifests, deadline)
-        entries = UsageLedgerRepository(session).prefix(request.ledger)
+        ledger_context = None
+        if config.method == "indexed_sampled_residency_edges":
+            reader = CoverageLedgerReader(
+                self.sessions,
+                config.trace.node_id,
+                clock=self.clock,
+                timeout_ms=min(self.timeout_ms, 10000),
+            )
+            view = reader.reader.read_in_transaction(
+                session,
+                LedgerWindowQuery(
+                    node_id=request.ledger.node_id,
+                    start_at=request.query.start_at,
+                    end_at=request.query.end_at,
+                    snapshot=request.ledger,
+                ),
+                read_at=read_at,
+                deadline=deadline,
+            )
+            ledger_context = reader.dependencies(
+                session,
+                indexed_coverage_ledger(view),
+                view,
+                tuple(value.analysis.request.ledger for value in manifests),
+                deadline=deadline,
+            )
+        entries = (
+            ()
+            if ledger_context is not None
+            else UsageLedgerRepository(session).prefix(request.ledger)
+        )
         identities = window_identities(
             session, self.identities, manifests, revision, read_at, deadline
         )
@@ -143,6 +176,7 @@ class UsageWindowSnapshotService:
             identity_revision=revision,
             read_at=read_at,
             prefix_checkpoint=request.prefix_checkpoint,
+            ledger_context=ledger_context,
         )
         self._deadline(deadline)
         return result

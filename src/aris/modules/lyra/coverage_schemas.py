@@ -29,7 +29,9 @@ def coverage_identity_key(run: ResidencyRun) -> tuple[str, str, int, str]:
 
 
 class ProcessingCoverageConfiguration(IntervalContract):
-    method: Literal["strict_sampled_residency_edges"] = "strict_sampled_residency_edges"
+    method: Literal["strict_sampled_residency_edges", "indexed_sampled_residency_edges"] = (
+        "strict_sampled_residency_edges"
+    )
     trace: UsageTraceConfiguration
     recording: UsagePostingConfiguration
     gpu_uuids: tuple[str, ...] = Field(min_length=1, max_length=128)

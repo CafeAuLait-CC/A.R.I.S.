@@ -17,10 +17,13 @@ from aris.core.events import DomainEvent, OutboxEntry
 from aris.modules.lyra.coverage_build_repo import CoverageBuildRepository
 from aris.modules.lyra.coverage_inputs import (
     coverage_parents,
+    coverage_recording_candidates,
     find_coverage_recordings,
     get_coverage_recording,
     resolve_coverage_identities,
 )
+from aris.modules.lyra.coverage_ledger import CoverageLedgerEntry
+from aris.modules.lyra.coverage_ledger_service import CoverageLedgerReader
 from aris.modules.lyra.coverage_replay import CoverageReplay, replay_coverage
 from aris.modules.lyra.coverage_repo import ProcessingCoverageRepository
 from aris.modules.lyra.coverage_schemas import (
@@ -32,7 +35,12 @@ from aris.modules.lyra.coverage_schemas import (
     coverage_manifest_fingerprint,
 )
 from aris.modules.lyra.ledger_repo import UsageLedgerRepository
-from aris.modules.lyra.processing_coverage import CoverageRecording, processing_coverage
+from aris.modules.lyra.processing_coverage import (
+    CoverageRecording,
+    processing_coverage,
+    recording_id,
+    recording_reference,
+)
 from aris.modules.lyra.trace_attestation_repo import TraceAttestationRepository
 from aris.modules.lyra.trace_attestation_schemas import StoredTraceAttestation
 from aris.modules.lyra.trace_attestation_service import TraceAttestationService
@@ -129,9 +137,36 @@ class ProcessingCoverageService:
         recording_revision: int | None = None,
     ) -> ProcessingCoverageAnalysis:
         attested, replay = self._replay(session, request, config)
-        entries = UsageLedgerRepository(session).prefix(request.ledger)
+        indexed = config.method == "indexed_sampled_residency_edges"
+        ledger_context = None
+        view = None
+        reader = None
+        deadline = monotonic() + self.timeout_ms / 1000
+        if indexed:
+            reader = CoverageLedgerReader(
+                self.sessions, config.trace.node_id, clock=self.clock, timeout_ms=self.timeout_ms
+            )
+            ledger_context, view = reader.local(
+                session, request, config, replay, read_at, deadline=deadline
+            )
+        entries = () if indexed else UsageLedgerRepository(session).prefix(request.ledger)
         recordings: tuple[CoverageRecording, ...]
-        if previous is None:
+        candidates: tuple[tuple[CoverageLedgerEntry, CoverageRecording], ...] = ()
+        if previous is None and ledger_context is not None:
+            candidates = coverage_recording_candidates(
+                session,
+                replay,
+                request.start_at,
+                request.end_at,
+                request.ledger,
+                ledger_context.active,
+                config,
+                read_at,
+                through_recording_revision=recording_revision,
+            )
+            unique = {str(recording_id(value)): value for _, value in candidates}
+            recordings = tuple(unique[key] for key in sorted(unique))
+        elif previous is None:
             recordings = find_coverage_recordings(
                 session,
                 replay,
@@ -155,8 +190,25 @@ class ProcessingCoverageService:
                     raise DomainError("CONFLICT", "Coverage closing receipt changed", 409)
                 found.append(value)
             recordings = tuple(found)
+        if reader is not None and ledger_context is not None:
+            ledger_context = reader.dependencies(
+                session,
+                ledger_context,
+                view,
+                tuple(value.ledger.head for value in recordings),
+                deadline=deadline,
+            )
+            for entry, value in candidates:
+                if recording_reference(value, entry, config, ledger_context) is None:
+                    raise DomainError("CONFLICT", "Stored closing receipt binding differs", 409)
         runs = coverage_parents(
-            replay, request.start_at, request.end_at, recordings, entries, config
+            replay,
+            request.start_at,
+            request.end_at,
+            recordings,
+            entries,
+            config,
+            ledger_context=ledger_context,
         )
         identities = resolve_coverage_identities(
             session,
@@ -167,7 +219,15 @@ class ProcessingCoverageService:
             through_revision=identity_revision,
         )
         return processing_coverage(
-            request, config, attested, replay, entries, recordings, identities, read_at=read_at
+            request,
+            config,
+            attested,
+            replay,
+            entries,
+            recordings,
+            identities,
+            read_at=read_at,
+            ledger_context=ledger_context,
         )
 
     def record_build_step_in_transaction(

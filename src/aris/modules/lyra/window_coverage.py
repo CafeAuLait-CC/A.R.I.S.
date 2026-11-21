@@ -7,14 +7,18 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from aris.core.contracts import DomainError
+from aris.modules.lyra.coverage_ledger import (
+    CoverageLedger,
+    CoverageLedgerEntry,
+    original_coverage_ledger,
+)
 from aris.modules.lyra.coverage_schemas import (
     CoverageIdentity,
     ProcessingCoverageConfiguration,
     StoredProcessingCoverage,
     coverage_identity_key,
 )
-from aris.modules.lyra.ledger_schemas import ReversedMeasurement, UsageLedgerEntry, UsageLedgerHead
-from aris.modules.lyra.recorded_usage import _active_prefix
+from aris.modules.lyra.ledger_schemas import UsageLedgerEntry, UsageLedgerHead
 from aris.modules.lyra.source_prefix_schemas import SourcePrefixReference
 from aris.modules.lyra.trace_attestation_schemas import StoredTraceAttestation
 from aris.modules.lyra.trace_consumer_schemas import canonical_trace
@@ -49,7 +53,7 @@ def _prefix(
     config: ProcessingCoverageConfiguration,
     source: UsageArchiveHead,
     ledger: UsageLedgerHead,
-    entries: tuple[UsageLedgerEntry, ...],
+    ledger_context: CoverageLedger,
     read_at: datetime,
     prefix_checkpoint: SourcePrefixReference | None,
     start_at: datetime,
@@ -83,10 +87,7 @@ def _prefix(
             or analysis.configuration != config
             or manifest.created_at > read_at
             or request.ledger.revision > ledger.revision
-            or (
-                request.ledger.revision > 0
-                and entries[request.ledger.revision - 1].fingerprint != request.ledger.fingerprint
-            )
+            or (request.ledger.revision > 0 and not ledger_context.contains(request.ledger))
             or proof.last_seq > source.highest_committed_seq
         ):
             raise DomainError("CONFLICT", "Window manifest scope or committed prefix differs", 409)
@@ -126,7 +127,7 @@ def _prefix(
 
 def _candidates(
     manifests: tuple[StoredProcessingCoverage, ...],
-    active: tuple[UsageLedgerEntry, ...],
+    active: tuple[CoverageLedgerEntry, ...],
     identities: tuple[CoverageIdentity, ...],
     identity_revision: int | None,
     read_at: datetime,
@@ -179,11 +180,10 @@ def _candidates(
                     state, reason = "unknown", "REVERSED_AWAITING_REVIEW"
                 elif (
                     entry.fingerprint != reference.entry_fingerprint
-                    or entry.details.measurement.owner_id != owner
-                    or entry.details.measurement.gpu_uuid != cell.gpu_uuid
-                    or entry.details.measurement.model != parent.model
-                    or entry.details.measurement.timing_fingerprint
-                    != config.recording.timing_fingerprint
+                    or entry.measurement.owner_id != owner
+                    or entry.measurement.gpu_uuid != cell.gpu_uuid
+                    or entry.measurement.model != parent.model
+                    or entry.measurement.timing_fingerprint != config.recording.timing_fingerprint
                 ):
                     raise DomainError(
                         "CONFLICT", "Window recorded entry differs from its receipt", 409
@@ -216,17 +216,14 @@ def _gpu_cells(
     config: ProcessingCoverageConfiguration,
     sources: tuple[_Candidate, ...],
     hazards: tuple[tuple[datetime, datetime], ...],
-    active: tuple[UsageLedgerEntry, ...],
-    entries: tuple[UsageLedgerEntry, ...],
+    active: tuple[CoverageLedgerEntry, ...],
+    reversed_entries: tuple[CoverageLedgerEntry, ...],
     global_reason: str | None,
 ) -> list[WindowCoverageCell]:
     candidates = [value for value in sources if value.gpu_uuid == gpu]
-    measurements = [entry for entry in active if entry.details.measurement.gpu_uuid == gpu]
+    measurements = [entry for entry in active if entry.measurement.gpu_uuid == gpu]
     reversals = [
-        entry.details.measurement
-        for entry in entries
-        if isinstance(entry.details, ReversedMeasurement)
-        and entry.details.measurement.gpu_uuid == gpu
+        entry.measurement for entry in reversed_entries if entry.measurement.gpu_uuid == gpu
     ]
     events: dict[datetime, list[tuple[int, int, bool]]] = defaultdict(list)
     events[query.start_at], events[query.end_at] = [], []
@@ -240,7 +237,7 @@ def _gpu_cells(
     for index, cell in enumerate(candidates):
         add(0, index, cell.start_at, cell.end_at)
     for index, measurement in enumerate(measurements):
-        value = measurement.details.measurement
+        value = measurement.measurement
         add(1, index, value.start_at, value.end_at)
     for index, value in enumerate(reversals):
         add(2, index, value.start_at, value.end_at)
@@ -305,6 +302,7 @@ def sampled_usage_window(
     identity_revision: int | None,
     read_at: datetime,
     prefix_checkpoint: SourcePrefixReference | None = None,
+    ledger_context: CoverageLedger | None = None,
 ) -> SampledUsageWindow:
     if read_at.tzinfo is None or read_at.utcoffset() is None:
         raise ValueError("usage window requires an aware read time")
@@ -330,13 +328,28 @@ def sampled_usage_window(
         or read_at < max(query.end_at, source.read_at)
     ):
         raise DomainError("CONFLICT", "Window source, ledger or time binding differs", 409)
-    active = _active_prefix(ledger, entries, read_at)
+    indexed = configuration.method == "indexed_sampled_residency_edges"
+    if indexed != (ledger_context is not None):
+        raise ValueError("window coverage requires its configured ledger evidence method")
+    comparison = ledger_context or original_coverage_ledger(ledger, entries, read_at)
+    if comparison.head != ledger or comparison.read_at != read_at or comparison.indexed != indexed:
+        raise ValueError("window coverage ledger boundary differs")
+    if indexed:
+        selection = comparison.selection
+        if (
+            selection is None
+            or (selection.start_at, selection.end_at) != (query.start_at, query.end_at)
+            or selection.snapshot != ledger
+            or selection.owner_id is not None
+        ):
+            raise ValueError("window ledger selection must retain every owner in its full scope")
+    active = comparison.active
     prefix = _prefix(
         manifests,
         configuration,
         source,
         ledger,
-        entries,
+        comparison,
         read_at,
         prefix_checkpoint,
         query.start_at,
@@ -346,9 +359,9 @@ def sampled_usage_window(
     )
     global_reason = None if prefix else "SOURCE_PREFIX_INCOMPLETE"
     if any(
-        entry.details.measurement.gpu_uuid not in configuration.gpu_uuids
-        and entry.details.measurement.start_at < query.end_at
-        and entry.details.measurement.end_at > query.start_at
+        entry.measurement.gpu_uuid not in configuration.gpu_uuids
+        and entry.measurement.start_at < query.end_at
+        and entry.measurement.end_at > query.start_at
         for entry in active
     ):
         global_reason = "LEDGER_GPU_INVENTORY_CONFLICT"
@@ -356,7 +369,14 @@ def sampled_usage_window(
         cell
         for gpu in configuration.gpu_uuids
         for cell in _gpu_cells(
-            gpu, query, configuration, candidates, hazards, active, entries, global_reason
+            gpu,
+            query,
+            configuration,
+            candidates,
+            hazards,
+            active,
+            comparison.reversals,
+            global_reason,
         )
     )
     if len(cells) > MAX_WINDOW_CELLS:
@@ -372,7 +392,7 @@ def sampled_usage_window(
     recorded = sum(
         (min(query.end_at, value.end_at) - max(query.start_at, value.start_at)) // MICROSECOND
         for entry in active
-        if (value := entry.details.measurement).start_at < query.end_at
+        if (value := entry.measurement).start_at < query.end_at
         and value.end_at > query.start_at
         and (query.owner_id is None or value.owner_id == query.owner_id)
     )

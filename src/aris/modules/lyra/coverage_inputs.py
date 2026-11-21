@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from aris.core.access.history_schemas import HistoricalNodeUserBatch, HistoricalNodeUserQuery
 from aris.core.access.history_service import NodeUserHistoryService
 from aris.core.contracts import DomainError
+from aris.modules.lyra.coverage_ledger import CoverageLedger, CoverageLedgerEntry, coverage_entry
 from aris.modules.lyra.coverage_replay import CoverageReplay
 from aris.modules.lyra.coverage_schemas import (
     CoverageIdentity,
@@ -40,6 +41,8 @@ def coverage_parents(
     recordings: tuple[CoverageRecording, ...],
     entries: tuple[UsageLedgerEntry, ...],
     configuration: ProcessingCoverageConfiguration,
+    *,
+    ledger_context: CoverageLedger | None = None,
 ) -> tuple[ResidencyRun, ...]:
     runs: dict[str, ResidencyRun] = {}
     for edge in replay.edges:
@@ -54,8 +57,8 @@ def coverage_parents(
         if local is None:
             raise DomainError("CONFLICT", "Coverage receipt has no relevant source residency", 409)
         if not any(
-            recording_reference(recording, entry, configuration, entries)
-            for entry in entries
+            recording_reference(recording, entry, configuration, ledger_context or entries)
+            for entry in (ledger_context.active if ledger_context is not None else entries)
             if entry.id in recording.ledger.entries
         ):
             raise DomainError("CONFLICT", "Coverage receipt does not bind the captured ledger", 409)
@@ -93,13 +96,45 @@ def find_coverage_recordings(
     through_recording_revision: int | None = None,
 ) -> tuple[CoverageRecording, ...]:
     active = _active_prefix(head, entries, read_at)
-    local = coverage_parents(replay, start_at, end_at, (), entries, configuration)
+    result = coverage_recording_candidates(
+        session,
+        replay,
+        start_at,
+        end_at,
+        head,
+        tuple(coverage_entry(entry) for entry in active),
+        configuration,
+        read_at,
+        through_recording_revision=through_recording_revision,
+    )
+    unique: dict[str, CoverageRecording] = {}
+    for entry, value in result:
+        if recording_reference(value, entry, configuration, entries) is None:
+            raise DomainError("CONFLICT", "Stored closing receipt binding differs", 409)
+        unique[str(recording_id(value))] = value
+    return tuple(unique[key] for key in sorted(unique))
+
+
+def coverage_recording_candidates(
+    session: Session,
+    replay: CoverageReplay,
+    start_at: datetime,
+    end_at: datetime,
+    head: UsageLedgerHead,
+    active: tuple[CoverageLedgerEntry, ...],
+    configuration: ProcessingCoverageConfiguration,
+    read_at: datetime,
+    *,
+    through_recording_revision: int | None = None,
+) -> tuple[tuple[CoverageLedgerEntry, CoverageRecording], ...]:
+    """Load candidate original receipts; callers must verify their entry and head bindings."""
+    local = coverage_parents(replay, start_at, end_at, (), (), configuration)
     repo = ClosedRunRecordingRepository(session)
-    result: dict[str, CoverageRecording] = {}
+    result: list[tuple[CoverageLedgerEntry, CoverageRecording]] = []
     attempts = 0
     for run in local:
         for entry in active:
-            window = entry.details.measurement
+            window = entry.measurement
             if window.gpu_uuid != run.gpu_uuid or not any(
                 edge.run is not None
                 and edge.run.id == run.id
@@ -132,10 +167,8 @@ def find_coverage_recordings(
                     through_recording_revision=through_recording_revision,
                 )
             if value is not None:
-                if recording_reference(value, entry, configuration, entries) is None:
-                    raise DomainError("CONFLICT", "Stored closing receipt binding differs", 409)
-                result[str(recording_id(value))] = value
-    return tuple(result[key] for key in sorted(result))
+                result.append((entry, value))
+    return tuple(result)
 
 
 def resolve_coverage_identities(

@@ -3,6 +3,12 @@
 from datetime import datetime
 from uuid import UUID
 
+from aris.modules.lyra.coverage_ledger import (
+    CoverageLedger,
+    CoverageLedgerEntry,
+    coverage_entry,
+    original_coverage_ledger,
+)
 from aris.modules.lyra.coverage_replay import CoverageEdge, CoverageReplay
 from aris.modules.lyra.coverage_schemas import (
     CoverageIdentity,
@@ -14,13 +20,8 @@ from aris.modules.lyra.coverage_schemas import (
     coverage_identity_key,
     processing_coverage_fingerprint,
 )
-from aris.modules.lyra.ledger_schemas import (
-    PostedMeasurement,
-    ReversedMeasurement,
-    UsageLedgerEntry,
-)
+from aris.modules.lyra.ledger_schemas import UsageLedgerEntry
 from aris.modules.lyra.partition_recording_schemas import StoredPartitionRecording
-from aris.modules.lyra.recorded_usage import _active_prefix
 from aris.modules.lyra.residency_state import ResidencyRun
 from aris.modules.lyra.run_recording_schemas import StoredClosedRunRecording
 from aris.modules.lyra.stable_window_recording_schemas import StableWindowRecordingEvidence
@@ -47,10 +48,12 @@ def recording_id(value: CoverageRecording) -> UUID:
 
 def recording_reference(
     value: CoverageRecording,
-    entry: UsageLedgerEntry,
+    entry: UsageLedgerEntry | CoverageLedgerEntry,
     config: ProcessingCoverageConfiguration,
-    head_entries: tuple[UsageLedgerEntry, ...],
+    head_entries: tuple[UsageLedgerEntry, ...] | CoverageLedger,
 ) -> CoverageRecordingReference | None:
+    if isinstance(entry, UsageLedgerEntry):
+        entry = coverage_entry(entry)
     parent = recording_parent(value)
     if isinstance(value, StableWindowRecordingEvidence):
         trace_fp = value.acceptance.request.window.expected_trace_configuration_fingerprint
@@ -75,6 +78,13 @@ def recording_reference(
             else value.request.partition.expected_trace_configuration_fingerprint
         )
     receipt = value.ledger
+    committed_head = (
+        head_entries.contains(receipt.head)
+        if isinstance(head_entries, CoverageLedger)
+        else receipt.head.revision > 0
+        and receipt.head.revision <= len(head_entries)
+        and head_entries[receipt.head.revision - 1].fingerprint == receipt.head.fingerprint
+    )
     if (
         trace_fp != config.trace.fingerprint
         or recording_fp != config.recording.fingerprint
@@ -82,13 +92,12 @@ def recording_reference(
         != (config.trace.agent_id, config.trace.node_id)
         or parent.rule_fingerprint != config.recording.timing_fingerprint
         or entry.id not in receipt.entries
-        or receipt.head.revision > len(head_entries)
         or receipt.head.revision == 0
-        or head_entries[receipt.head.revision - 1].fingerprint != receipt.head.fingerprint
+        or not committed_head
         or receipt.entry_fingerprints[receipt.entries.index(entry.id)] != entry.fingerprint
     ):
         return None
-    measured = entry.details.measurement
+    measured = entry.measurement
     if (
         measured.gpu_uuid,
         measured.start_at,
@@ -113,6 +122,21 @@ def recording_reference(
     )
 
 
+def processing_ledger_range(
+    replay: CoverageReplay, start_at: datetime, end_at: datetime, recording_start_at: datetime
+) -> tuple[datetime, datetime] | None:
+    ranges = [
+        (max(start_at, edge.start_at, recording_start_at), min(end_at, edge.end_at))
+        for edge in replay.edges
+        if edge.gpu.state in {"stable_owner", "observed_idle"}
+        and max(start_at, edge.start_at, recording_start_at) < min(end_at, edge.end_at)
+        and not any(edge.start_at <= value <= edge.end_at for value in replay.invalid_times)
+    ]
+    return (
+        (min(value[0] for value in ranges), max(value[1] for value in ranges)) if ranges else None
+    )
+
+
 def processing_coverage(
     request: ProcessingCoverageRequest,
     configuration: ProcessingCoverageConfiguration,
@@ -123,8 +147,30 @@ def processing_coverage(
     identities: tuple[CoverageIdentity, ...],
     *,
     read_at: datetime,
+    ledger_context: CoverageLedger | None = None,
 ) -> ProcessingCoverageAnalysis:
-    active = _active_prefix(request.ledger, entries, read_at)
+    indexed = configuration.method == "indexed_sampled_residency_edges"
+    if indexed != (ledger_context is not None):
+        raise ValueError("processing coverage requires its configured ledger evidence method")
+    ledger = ledger_context or original_coverage_ledger(request.ledger, entries, read_at)
+    if ledger.head != request.ledger or ledger.read_at != read_at or ledger.indexed != indexed:
+        raise ValueError("processing coverage ledger boundary differs")
+    if indexed:
+        required = processing_ledger_range(
+            replay, request.start_at, request.end_at, configuration.recording.recording_start_at
+        )
+        selection = ledger.selection
+        if (required is None and (selection is not None or ledger.active or ledger.reversals)) or (
+            required is not None
+            and (
+                selection is None
+                or (selection.start_at, selection.end_at) != required
+                or selection.snapshot != request.ledger
+                or selection.owner_id is not None
+            )
+        ):
+            raise ValueError("processing ledger selection does not cover its original edges")
+    active = ledger.active
     by_identity = {
         coverage_identity_key(value.run): index for index, value in enumerate(identities)
     }
@@ -141,7 +187,7 @@ def processing_coverage(
         for entry in active:
             if entry.id not in recording.ledger.entries:
                 continue
-            ref = recording_reference(recording, entry, configuration, entries)
+            ref = recording_reference(recording, entry, configuration, ledger)
             if ref is not None and (ref.run_id, entry.id) not in by_recording:
                 by_recording[(ref.run_id, entry.id)] = len(refs)
                 parent_index = by_identity.get(coverage_identity_key(recording_parent(recording)))
@@ -162,15 +208,22 @@ def processing_coverage(
         current = [
             entry
             for entry in active
-            if entry.details.measurement.gpu_uuid == gpu_uuid
-            and entry.details.measurement.start_at < request.end_at
-            and entry.details.measurement.end_at > request.start_at
+            if entry.measurement.gpu_uuid == gpu_uuid
+            and entry.measurement.start_at < request.end_at
+            and entry.measurement.end_at > request.start_at
+            and (
+                not indexed
+                or any(
+                    edge.start_at < entry.measurement.end_at
+                    and edge.end_at > entry.measurement.start_at
+                    for edge in edges
+                )
+            )
         ]
         reversals = [
-            entry.details.measurement
-            for entry in entries
-            if isinstance(entry.details, ReversedMeasurement)
-            and entry.details.measurement.gpu_uuid == gpu_uuid
+            entry.measurement
+            for entry in ledger.reversals
+            if entry.measurement.gpu_uuid == gpu_uuid
         ]
         boundaries = {request.start_at, request.end_at}
         for window_edge in edges:
@@ -183,8 +236,8 @@ def processing_coverage(
         for entry in current:
             boundaries.update(
                 (
-                    max(request.start_at, entry.details.measurement.start_at),
-                    min(request.end_at, entry.details.measurement.end_at),
+                    max(request.start_at, entry.measurement.start_at),
+                    min(request.end_at, entry.measurement.end_at),
                 )
             )
         windows = [(value.start_at, value.end_at) for value in replay.hazards]
@@ -202,8 +255,7 @@ def processing_coverage(
             overlaps = [
                 entry
                 for entry in current
-                if entry.details.measurement.start_at < end
-                and entry.details.measurement.end_at > start
+                if entry.measurement.start_at < end and entry.measurement.end_at > start
             ]
             state, reason = "uncovered", "SOURCE_BOUNDARY_NOT_OBSERVED"
             edge: CoverageEdge | None = candidates[0] if len(candidates) == 1 else None
@@ -250,8 +302,8 @@ def processing_coverage(
                         )
                     else:
                         entry = overlaps[0]
-                        measurement = entry.details.measurement
-                        assert isinstance(entry.details, PostedMeasurement)
+                        measurement = entry.measurement
+                        assert entry.kind == "measurement"
                         if (
                             measurement.owner_id != identity.user_id
                             or measurement.model != edge.gpu.model
