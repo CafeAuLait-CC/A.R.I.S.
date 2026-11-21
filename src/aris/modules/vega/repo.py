@@ -164,6 +164,13 @@ class VegaRepository:
     def usage_messages(
         self, agent_id: str, message_ids: tuple[str, ...]
     ) -> tuple[StoredUsageMessage, ...]:
+        if len(message_ids) > MAX_ARCHIVE_MESSAGES:
+            raise ValueError("original message lookup exceeds its bounded ID set")
+        if not message_ids:
+            return ()
+        # The unique (agent_id, message_id) key bounds the result. SQL ordering
+        # plus a parameterized LIMIT can make a prepared generic plan scan the
+        # agent's unrelated history; sort this small verified set in memory.
         rows = self.session.execute(
             select(
                 AgentMessage.agent_id,
@@ -175,27 +182,25 @@ class VegaRepository:
                 AgentMessage.received_at,
                 AgentMessage.fingerprint,
                 AgentMessage.payload,
-            )
-            .where(AgentMessage.agent_id == agent_id, AgentMessage.message_id.in_(message_ids))
-            .order_by(AgentMessage.seq)
-            .limit(MAX_ARCHIVE_MESSAGES)
+            ).where(AgentMessage.agent_id == agent_id, AgentMessage.message_id.in_(message_ids))
         )
-        return tuple(StoredUsageMessage(*row) for row in rows)
+        return tuple(sorted((StoredUsageMessage(*row) for row in rows), key=lambda row: row.seq))
 
     def usage_message_metadata(
         self, agent_id: str, message_ids: tuple[str, ...]
     ) -> tuple[tuple[str, int, int], ...]:
+        if len(message_ids) > MAX_ARCHIVE_MESSAGES:
+            raise ValueError("original metadata lookup exceeds its bounded ID set")
+        if not message_ids:
+            return ()
         rows = self.session.execute(
             select(
                 AgentMessage.message_id,
                 AgentMessage.seq,
                 func.length(cast(AgentMessage.payload, String)),
-            )
-            .where(AgentMessage.agent_id == agent_id, AgentMessage.message_id.in_(message_ids))
-            .order_by(AgentMessage.seq)
-            .limit(MAX_ARCHIVE_MESSAGES)
+            ).where(AgentMessage.agent_id == agent_id, AgentMessage.message_id.in_(message_ids))
         )
-        return tuple((row[0], row[1], row[2]) for row in rows)
+        return tuple(sorted(((row[0], row[1], row[2]) for row in rows), key=lambda row: row[1]))
 
     def sequence_exists(self, agent_id: str, seq: int) -> bool:
         return (
