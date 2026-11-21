@@ -171,6 +171,7 @@ def test_other_owner_cannot_read_or_prepare_private_change(changes, operation, m
         f"extend {uuid4()} 2026-12-01T12:00:00 reason",
         f"extend {uuid4()} bad reason",
     ],
+    ids=("invalid-id", "missing-id", "missing-reason", "naive-end", "invalid-end"),
 )
 def test_invalid_change_syntax_does_not_open_or_admit(changes, text):
     response = slash(changes[0], text, trigger_id="fixture-change-trigger")
