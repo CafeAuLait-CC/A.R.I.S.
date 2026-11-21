@@ -76,6 +76,7 @@ class UsageHistoryService(RecordedUsageService):
         *,
         mode: Literal["mine", "node"] = "mine",
         owner_id: UUID | None = None,
+        read_at: datetime | None = None,
     ) -> ContinuousUsageHistory:
         return self._authorized_original_read(
             session,
@@ -83,6 +84,7 @@ class UsageHistoryService(RecordedUsageService):
             query,
             mode=mode,
             owner_id=owner_id,
+            data_time=read_at,
             reduce=lambda owner, head, entries, at: continuous_usage_history(
                 usage_history(query, owner_id=owner, head=head, entries=entries, read_at=at),
                 tuple(

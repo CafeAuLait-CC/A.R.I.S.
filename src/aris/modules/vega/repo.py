@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
 
-from sqlalchemy import String, case, cast, func, select
+from sqlalchemy import String, case, cast, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
@@ -201,6 +201,23 @@ class VegaRepository:
             ).where(AgentMessage.agent_id == agent_id, AgentMessage.message_id.in_(message_ids))
         )
         return tuple(sorted(((row[0], row[1], row[2]) for row in rows), key=lambda row: row[1]))
+
+    def usage_spans_metadata(
+        self, agent_id: str, spans: tuple[tuple[int, int], ...]
+    ) -> tuple[tuple[str, int, int], ...]:
+        if not 1 <= len(spans) <= 64 or any(not 1 <= a <= b < a + 128 for a, b in spans):
+            raise ValueError("source spans exceed their bounded sequence set")
+        rows = self.session.execute(
+            select(
+                AgentMessage.message_id,
+                AgentMessage.seq,
+                func.length(cast(AgentMessage.payload, String)),
+            ).where(
+                AgentMessage.agent_id == agent_id,
+                or_(*(AgentMessage.seq.between(a, b) for a, b in spans)),
+            )
+        )
+        return tuple(sorted(((r[0], r[1], r[2]) for r in rows), key=lambda r: r[1]))
 
     def sequence_exists(self, agent_id: str, seq: int) -> bool:
         return (

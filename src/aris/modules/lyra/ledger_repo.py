@@ -127,6 +127,28 @@ class UsageLedgerRepository:
             )
         )
 
+    def entries(self, entry_ids: tuple[UUID, ...]) -> dict[UUID, UsageLedgerEntry]:
+        if len(entry_ids) > 128 or len(set(entry_ids)) != len(entry_ids):
+            raise ValueError("ledger boundaries require at most 128 unique IDs")
+        if not entry_ids:
+            return {}
+        ids = tuple(str(i) for i in entry_ids)
+        sizes = self.session.execute(
+            select(UsageLedgerEntryRow.id, func.length(UsageLedgerEntryRow.canonical_entry)).where(
+                UsageLedgerEntryRow.id.in_(ids)
+            )
+        ).all()
+        if sum(r[1] for r in sizes) > 2 * 1024 * 1024:
+            raise DomainError(
+                "USAGE_SOURCE_TOO_LARGE", "Ledger boundaries exceed their budget", 503
+            )
+        rows = self.session.execute(
+            select(*UsageLedgerEntryRow.__table__.c).where(
+                UsageLedgerEntryRow.id.in_(tuple(r[0] for r in sizes))
+            )
+        ).mappings()
+        return {UUID(r["id"]): self._entry(dict(r)) for r in rows}
+
     def measured(self, key: str) -> UsageLedgerEntry | None:
         return self._one(
             select(*UsageLedgerEntryRow.__table__.c).where(

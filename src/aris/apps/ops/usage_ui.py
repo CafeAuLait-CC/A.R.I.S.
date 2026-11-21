@@ -14,6 +14,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from aris.apps.api.main import create_app
 from aris.apps.ops.identity import read_private
+from aris.core.access.history_service import NodeUserHistoryService
 from aris.core.access.schemas import AccessContract
 from aris.core.config import Settings
 from aris.core.contracts import DomainError
@@ -24,12 +25,15 @@ from aris.interfaces.usage.activity_service import ActivityPreviewAccess, Activi
 from aris.interfaces.usage.service import UsageHistorySurface
 from aris.modules.lyra.activity_preview_service import ActivityPreviewService
 from aris.modules.lyra.indexed_usage_service import IndexedUsageHistoryService
+from aris.modules.lyra.session_occupancy_service import SessionOccupancyService
 from aris.modules.lyra.weekly_report_service import WeeklyReportReader
 from aris.modules.lyra.window_reader import UsageWindowReader
 from aris.modules.nova.coverage_schedule_reader import CoverageScheduleReader
 from aris.modules.nova.weekly_plan_reader import WeeklyPlanReader
 from aris.modules.vega.gpu_hardware_service import VegaGpuHardwareObservations
+from aris.modules.vega.target_service import VegaTargetService
 from aris.modules.vega.usage_archive_service import VegaUsageArchive
+from aris.modules.vega.usage_span import VegaUsageSpans
 
 
 class LocalUsageConfig(AccessContract):
@@ -43,6 +47,7 @@ class LocalUsageConfig(AccessContract):
     weekly_reports: bool = False
     coverage_plan_ids: tuple[UUID, ...] = Field(default=(), max_length=8)
     activity_preview: ActivityPreviewConfig | None = None
+    session_occupancy: bool = False
 
     @model_validator(mode="after")
     def configured_activity_nodes(self) -> "LocalUsageConfig":
@@ -117,8 +122,16 @@ def main(argv: list[str] | None = None) -> int:
             history,
             auth,
             config.node_ids,
+            gpu_labels=VegaTargetService(sessions, settings),
+            session_occupancy=SessionOccupancyService(
+                VegaUsageSpans(), NodeUserHistoryService(sessions)
+            )
+            if config.session_occupancy
+            else None,
             saved_windows=UsageWindowReader(
-                session_factory(engine), personal_node_projection=config.personal_node_snapshots
+                sessions,
+                personal_node_projection=config.personal_node_snapshots,
+                clock=history.clock,
             )
             if config.saved_snapshots
             else None,
