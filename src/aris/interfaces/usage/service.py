@@ -4,6 +4,7 @@ import csv
 import io
 from datetime import date
 from decimal import Decimal
+from time import monotonic
 from typing import Annotated, Literal, Protocol
 from uuid import UUID
 
@@ -30,6 +31,8 @@ from aris.modules.lyra.ledger_window_read import (
     MAX_LEDGER_WINDOW_ENTRIES,
     MAX_LEDGER_WINDOW_INDEX_BYTES,
 )
+from aris.modules.lyra.session_occupancy import SessionOccupancySummary
+from aris.modules.lyra.session_occupancy_service import SessionOccupancyService
 from aris.modules.lyra.usage_history import (
     UsageHistory,
     UsageHistoryQuery,
@@ -82,9 +85,22 @@ class UsageHistoryInput(AccessContract):
     offset: int = Field(default=0, ge=0, le=MAX_LEDGER_WINDOW_ENTRIES, strict=True)
     limit: int = Field(default=25, ge=1, le=100, strict=True)
     presentation: Literal["segments", "continuous"] = "segments"
+    include_sessions: bool = False
+    session_read_at: AwareDatetime | None = None
+    session_identity_revision: int | None = Field(
+        default=None, ge=1, le=9223372036854775807, strict=True
+    )
 
     @model_validator(mode="after")
     def fixed_pages(self) -> "UsageHistoryInput":
+        if self.include_sessions and self.presentation != "continuous":
+            raise ValueError("session occupancy requires continuous recorded history")
+        if self.include_sessions and self.snapshot is not None and self.session_read_at is None:
+            raise ValueError("fixed session history requires its original source cutoff")
+        if (self.session_read_at is not None or self.session_identity_revision is not None) and (
+            not self.include_sessions or self.snapshot is None
+        ):
+            raise ValueError("session evidence cutoffs require a fixed session history snapshot")
         if (self.mode == "mine" and self.owner_id is not None) or (
             self.offset > 0 and (self.snapshot is None or self.window.kind != "utc")
         ):
@@ -113,6 +129,7 @@ class UsageSession(AccessContract):
     weekly_plans_available: bool = False
     group_reports_available: bool = False
     activity_preview_nodes: tuple[str, ...] = ()
+    session_occupancy_available: bool = False
 
 
 class UsageHistoryPage(AccessContract):
@@ -127,6 +144,7 @@ class UsageHistoryPage(AccessContract):
     interruption_count: int = 0
     gap_microseconds: int = 0
     gpu_indices: dict[str, int] = Field(default_factory=dict)
+    session_occupancy: SessionOccupancySummary | None = None
 
 
 def csv_text(value: str) -> str:
@@ -185,7 +203,11 @@ def history_csv(report: UsageHistory, labels: dict[str, str]) -> bytes:
     return ("\ufeff" + output.getvalue()).encode("utf-8")
 
 
-def continuous_history_csv(view: ContinuousUsageHistory, labels: dict[str, str]) -> bytes:
+def continuous_history_csv(
+    view: ContinuousUsageHistory,
+    labels: dict[str, str],
+    sessions: SessionOccupancySummary | None = None,
+) -> bytes:
     report = view.history
     output = io.StringIO(newline="")
     writer = csv.writer(output)
@@ -210,9 +232,28 @@ def continuous_history_csv(view: ContinuousUsageHistory, labels: dict[str, str])
             "report_fingerprint",
             "source_coverage",
             "quota_usage_available",
+            *(
+                (
+                    "retained_microseconds",
+                    "unverified_gap_microseconds",
+                    "session_microseconds",
+                    "session_fingerprint",
+                    "session_as_of",
+                    "session_rule_fingerprint",
+                )
+                if sessions is not None
+                else ()
+            ),
         )
     )
     for row in view.intervals:
+        gaps = (
+            tuple(g for g in sessions.gaps if g.interval_fingerprint == row.fingerprint)
+            if sessions
+            else ()
+        )
+        retained = sum(g.duration_microseconds for g in gaps if g.state == "retained")
+        unverified = sum(g.duration_microseconds for g in gaps if g.state == "unknown")
         writer.writerow(
             (
                 csv_text(report.node_id),
@@ -238,6 +279,18 @@ def continuous_history_csv(view: ContinuousUsageHistory, labels: dict[str, str])
                 report.fingerprint,
                 "unknown",
                 "false",
+                *(
+                    (
+                        retained,
+                        unverified,
+                        "" if unverified else row.recorded_microseconds + retained,
+                        sessions.fingerprint,
+                        sessions.as_of.isoformat(),
+                        sessions.rule.fingerprint,
+                    )
+                    if sessions is not None
+                    else ()
+                ),
             )
         )
     return ("\ufeff" + output.getvalue()).encode("utf-8")
@@ -255,6 +308,7 @@ class UsageHistorySurface:
         weekly_plans: WeeklyPlanReader | None = None,
         activity: ActivityPreviewAccess | None = None,
         gpu_labels: UsageGpuLabels | None = None,
+        session_occupancy: SessionOccupancyService | None = None,
     ) -> None:
         if not 1 <= len(node_ids) <= 32 or len(set(node_ids)) != len(node_ids):
             raise ValueError("usage history requires explicit unique nodes")
@@ -271,6 +325,7 @@ class UsageHistorySurface:
             raise ValueError("activity preview requires the same database and allowed nodes")
         self.activity = activity
         self.gpu_labels = gpu_labels
+        self.session_occupancy = session_occupancy
 
     def session(self, authorization: str | None) -> UsageSession:
         subject = self.authenticator.authenticate(authorization)
@@ -308,6 +363,7 @@ class UsageHistorySurface:
                     if getattr(self.authenticator, "browser_sessions", False)
                     else "development_bound_user",
                     nodes=tuple(nodes),
+                    session_occupancy_available=self.session_occupancy is not None,
                     saved_snapshots_available=self.saved_windows is not None,
                     weekly_reports_available=self.weekly_reports is not None,
                     weekly_plans_available=self.weekly_plans is not None,
@@ -360,6 +416,9 @@ class UsageHistorySurface:
             )
         except ValueError:
             raise DomainError("VALIDATION_ERROR", "Usage date range is invalid", 422) from None
+        if query.include_sessions and self.session_occupancy is None:
+            raise DomainError("FEATURE_UNAVAILABLE", "Session occupancy is not enabled", 503)
+        deadline = monotonic() + self.history.timeout_ms / 1000
         try:
             with self.history.sessions() as session:
                 transaction_budget(session, 100, 1000, self.history.timeout_ms)
@@ -369,7 +428,12 @@ class UsageHistorySurface:
                 actor = ActorContext(actor_id=principal.user_id, request_id=request_id)
                 continuous = (
                     self.history.read_continuous_in_transaction(
-                        session, actor, selection, mode=query.mode, owner_id=query.owner_id
+                        session,
+                        actor,
+                        selection,
+                        mode=query.mode,
+                        owner_id=query.owner_id,
+                        read_at=query.session_read_at,
                     )
                     if query.presentation == "continuous"
                     else None
@@ -381,6 +445,19 @@ class UsageHistorySurface:
                         session, actor, selection, mode=query.mode, owner_id=query.owner_id
                     )
                 )
+                occupancy = (
+                    self.session_occupancy.read_in_transaction(
+                        session,
+                        continuous,
+                        deadline=deadline,
+                        identity_revision=query.session_identity_revision,
+                        freeze_identity=query.session_read_at is not None,
+                    )
+                    if query.include_sessions
+                    and self.session_occupancy is not None
+                    and continuous is not None
+                    else None
+                )
                 labels = {
                     str(label.user_id): label.display_name
                     for label in self.history.access.labels_in_transaction(
@@ -389,7 +466,7 @@ class UsageHistorySurface:
                     )
                 }
                 gpu_indices = {}
-                if output == "page" and self.gpu_labels is not None:
+                if output in ("page", "html") and self.gpu_labels is not None:
                     uuids = tuple(sorted({row.gpu_uuid for row in report.rows}))
                     for offset in range(0, len(uuids), 100):
                         gpu_indices.update(
@@ -404,7 +481,7 @@ class UsageHistorySurface:
                 result = (
                     (
                         (
-                            continuous_history_csv(continuous, labels)
+                            continuous_history_csv(continuous, labels, occupancy)
                             if continuous is not None
                             else history_csv(report, labels)
                         )
@@ -413,6 +490,8 @@ class UsageHistorySurface:
                             history_report(
                                 report,
                                 labels,
+                                session_occupancy=occupancy,
+                                gpu_indices=gpu_indices,
                                 continuous_interval_count=len(continuous.intervals),
                                 continuous_gap_microseconds=sum(
                                     row.gap_microseconds for row in continuous.intervals
@@ -422,7 +501,7 @@ class UsageHistorySurface:
                                 ),
                             )
                             if continuous is not None
-                            else history_report(report, labels)
+                            else history_report(report, labels, gpu_indices=gpu_indices)
                         )
                     )
                     if output != "page"
@@ -459,11 +538,16 @@ class UsageHistorySurface:
                         if continuous is not None
                         else 0,
                         gpu_indices=gpu_indices,
+                        session_occupancy=occupancy,
                     )
                 )
                 if isinstance(result, bytes) and len(result) > MAX_LEDGER_WINDOW_INDEX_BYTES:
                     raise DomainError(
                         "USAGE_REPORT_TOO_LARGE", "Choose a shorter usage export window", 503
+                    )
+                if query.include_sessions and monotonic() >= deadline:
+                    raise DomainError(
+                        "RETRYABLE_DATABASE_ERROR", "Session history read budget exceeded", 503
                     )
                 # Recheck both domain scope and external-to-platform identity after presentation.
                 self.history.access.require_in_transaction(

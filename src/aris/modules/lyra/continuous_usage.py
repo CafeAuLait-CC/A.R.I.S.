@@ -21,6 +21,13 @@ class UsageRowContext:
     timing_fingerprint: str
 
 
+@dataclass(frozen=True)
+class UsagePresentationGap:
+    before: UsageHistoryRow
+    after: UsageHistoryRow
+    interval_fingerprint: str
+
+
 class ContinuousUsageInterval(IntervalContract):
     owner_id: UUID
     gpu_uuid: str
@@ -59,6 +66,7 @@ class _IntervalMembers(IntervalContract):
 class ContinuousUsageHistory:
     history: UsageHistory
     intervals: tuple[ContinuousUsageInterval, ...]
+    gaps: tuple[UsagePresentationGap, ...] = ()
 
 
 def continuous_usage_history(
@@ -88,6 +96,7 @@ def continuous_usage_history(
             previous[row.gpu_uuid] = len(groups)
             groups.append((context.timing_fingerprint, [row]))
     intervals = []
+    gaps: list[UsagePresentationGap] = []
     for timing, rows in groups:
         first, last = rows[0], rows[-1]
         fingerprint = ledger_fingerprint(
@@ -97,6 +106,11 @@ def continuous_usage_history(
                     node_id=history.node_id, timing_fingerprint=timing, rows=tuple(rows)
                 )
             ),
+        )
+        gaps.extend(
+            UsagePresentationGap(a, b, fingerprint)
+            for a, b in zip(rows, rows[1:], strict=False)
+            if b.start_at > a.end_at
         )
         intervals.append(
             ContinuousUsageInterval(
@@ -124,4 +138,5 @@ def continuous_usage_history(
         tuple(
             sorted(intervals, key=lambda row: (row.start_at, row.gpu_uuid, str(row.first_entry_id)))
         ),
+        tuple(gaps),
     )

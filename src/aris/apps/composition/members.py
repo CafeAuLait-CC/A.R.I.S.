@@ -13,6 +13,7 @@ from aris.core.access.admin_schemas import DefineRole, IdentityNamespace, Regist
 from aris.core.access.administration import AccessAdministrationService
 from aris.core.access.directory import AccessDirectoryQueries
 from aris.core.access.guards import GuardedAccessService
+from aris.core.access.history_service import NodeUserHistoryService
 from aris.core.access.member_commands import EditOwnProfileCommand, ManageMembersCommand
 from aris.core.access.members import MemberAdministrationService
 from aris.core.access.passwords import InvitationSender, PasswordAccountService
@@ -38,6 +39,7 @@ from aris.interfaces.usage.service import UsageHistorySurface
 from aris.modules.lyra.activity_preview_service import ActivityPreviewService
 from aris.modules.lyra.general_usage import GeneralUsageService
 from aris.modules.lyra.indexed_usage_service import IndexedUsageHistoryService
+from aris.modules.lyra.session_occupancy_service import SessionOccupancyService
 from aris.modules.lyra.weekly_report_service import WeeklyReportReader
 from aris.modules.lyra.window_reader import UsageWindowReader
 from aris.modules.nova.weekly_plan_reader import WeeklyPlanReader
@@ -46,6 +48,7 @@ from aris.modules.vega.scope_service import VegaNodeScopes
 from aris.modules.vega.service import VegaService
 from aris.modules.vega.target_service import VegaTargetService
 from aris.modules.vega.usage_archive_service import VegaUsageArchive
+from aris.modules.vega.usage_span import VegaUsageSpans
 
 PORTAL_ROLES = (
     DefineRole(
@@ -98,6 +101,7 @@ class MemberRuntimeConfig(AccessContract):
     )
     poll_seconds: float = Field(default=1, ge=0.1, le=60)
     activity_preview: ActivityPreviewConfig | None = None
+    session_occupancy: bool = False
 
     @model_validator(mode="after")
     def fixed_namespace_and_origin(self) -> "MemberRuntimeConfig":
@@ -256,6 +260,11 @@ def build_member_components(
         config.node_ids,
         saved_windows=windows,
         gpu_labels=VegaTargetService(sessions, settings),
+        session_occupancy=SessionOccupancyService(
+            VegaUsageSpans(), NodeUserHistoryService(sessions)
+        )
+        if config.session_occupancy
+        else None,
         weekly_reports=WeeklyReportReader(history),
         weekly_plans=plans,
         activity=activity,

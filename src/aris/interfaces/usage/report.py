@@ -6,6 +6,7 @@ from pathlib import Path
 from string import Template
 from zoneinfo import ZoneInfo
 
+from aris.modules.lyra.session_occupancy import SessionOccupancySummary
 from aris.modules.lyra.usage_history import UsageHistory, UsageHistoryDay, usage_gpu_summary
 
 
@@ -54,6 +55,8 @@ def history_report(
     continuous_interval_count: int | None = None,
     continuous_gap_microseconds: int = 0,
     continuous_interruption_count: int = 0,
+    session_occupancy: SessionOccupancySummary | None = None,
+    gpu_indices: dict[str, int] | None = None,
 ) -> bytes:
     zone = ZoneInfo(report.timezone)
     start = report.start_at.astimezone(zone).strftime("%Y/%m/%d %H:%M:%S")
@@ -73,7 +76,11 @@ def history_report(
         "<tr><td>"
         + escape(", ".join(gpu.models))
         + "<small>"
-        + escape(gpu.gpu_uuid)
+        + (
+            f"GPU {gpu_indices[gpu.gpu_uuid]}"
+            if gpu_indices is not None and gpu.gpu_uuid in gpu_indices
+            else "GPU ?"
+        )
         + f"</small></td><td>{hours(gpu.recorded_microseconds)}</td>"
         + f"<td>{gpu.owner_count}</td><td>{gpu.segment_count}</td></tr>"
         for gpu in usage_gpu_summary(report.rows)
@@ -91,6 +98,23 @@ def history_report(
         end=end,
         timezone=escape(report.timezone),
         total=hours(report.recorded_microseconds),
+        session_note=(
+            "已记录会话占用 "
+            + (
+                hours(session_occupancy.session_microseconds) + " GPU 小时"
+                if session_occupancy.session_microseconds is not None
+                else "尚未完全核实"
+            )
+            + f"；其中已核实短空档 {hours(session_occupancy.retained_microseconds)} 小时"
+            + (
+                f"，待核实 {hours(session_occupancy.unverified_microseconds)} 小时"
+                if session_occupancy.unverified_microseconds
+                else ""
+            )
+            + "。原始进程驻留单独保留，未启用配额扣减。"
+            if session_occupancy is not None
+            else ""
+        ),
         gpu_count=report.gpu_count,
         segment_count=report.segment_count,
         records_label="连续使用时段" if continuous_interval_count is not None else "原始记账分段",
@@ -101,7 +125,7 @@ def history_report(
             f"来自 {report.segment_count} 个原始记账分段"
             + (
                 f" · {continuous_interruption_count} 次短中断，"
-                f"{hours(continuous_gap_microseconds)} 小时未计入用量"
+                f"{hours(continuous_gap_microseconds)} 小时未计入原始驻留"
                 if continuous_interruption_count
                 else ""
             )

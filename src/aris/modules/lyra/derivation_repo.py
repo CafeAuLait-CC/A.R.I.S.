@@ -3,7 +3,7 @@ import json
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from aris.core.contracts import DomainError
@@ -89,6 +89,31 @@ class UsageDerivationRepository:
             .one_or_none()
         )
         return self._stored(dict(row), duplicate=duplicate) if row is not None else None
+
+    def get_many(self, record_ids: tuple[UUID, ...]) -> dict[UUID, StoredUsageDerivation]:
+        """Bound original bodies before loading a small evidence set, never scan history."""
+        if len(record_ids) > 128 or len(set(record_ids)) != len(record_ids):
+            raise ValueError("derivation evidence requires at most 128 unique IDs")
+        if not record_ids:
+            return {}
+        ids = tuple(str(i) for i in record_ids)
+        sizes = self.session.execute(
+            select(
+                UsageDerivation.id,
+                func.length(UsageDerivation.canonical_request),
+                func.length(UsageDerivation.canonical_result),
+            ).where(UsageDerivation.id.in_(ids))
+        ).all()
+        if sum(r[1] + r[2] for r in sizes) > 2 * 1024 * 1024:
+            raise DomainError(
+                "USAGE_SOURCE_TOO_LARGE", "Derivation evidence exceeds its budget", 503
+            )
+        rows = self.session.execute(
+            select(*UsageDerivation.__table__.c).where(
+                UsageDerivation.id.in_(tuple(r[0] for r in sizes))
+            )
+        ).mappings()
+        return {UUID(r["id"]): self._stored(dict(r), duplicate=True) for r in rows}
 
     def append(self, row: UsageDerivation) -> None:
         self.session.add(row)

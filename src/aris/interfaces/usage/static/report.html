@@ -9,7 +9,7 @@
 <p class="subtitle">$node · $subject</p>
 <div class="period">$start 至 $end<br>时区 $timezone</div>
 <div class="metrics"><div class="metric"><p>已记录 GPU 小时</p><strong>$total</strong></div><div class="metric"><p>使用过的 GPU</p><strong>$gpu_count</strong></div><div class="metric"><p>$records_label</p><strong>$records_count</strong><p>$records_note</p></div></div>
-$empty<section><h2>每日用量 <small>已记录 GPU 小时</small></h2>$chart</section>
+<p>$session_note</p>$empty<section><h2>每日用量 <small>已记录 GPU 小时</small></h2>$chart</section>
 <section><h2>用户汇总</h2><div class="table-scroll"><table><thead><tr><th>用户</th><th>GPU 小时</th><th>GPU 数</th><th>记录段数</th></tr></thead><tbody>$owner_rows</tbody></table></div></section>
 <section><h2>GPU 汇总</h2><div class="table-scroll"><table><thead><tr><th>GPU</th><th>GPU 小时</th><th>用户数</th><th>记录段数</th></tr></thead><tbody>$gpu_rows</tbody></table></div></section>
 <p class="coverage">本报告只包含已进入账本的 GPU 计算进程驻留时间，已扣除撤销的记录。观测覆盖尚未验证，因此不代表全部实际用量，也不用于配额扣减。</p>
