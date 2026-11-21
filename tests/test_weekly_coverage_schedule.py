@@ -1,6 +1,6 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from alembic import command
@@ -145,6 +145,7 @@ def test_restart_resumes_original_steps_and_saved_snapshot_cursor_without_promot
         assert schedules.select(CONTEXT, definition, status_only=True).next_week == date(
             2026, 11, 16
         )
+        clock["now"] += timedelta(seconds=1)
     result = drain(schedules, config)
     assert result["coverage"] == "partial" and result["recorded_microseconds"] == 135000000
     assert result["total_usage_microseconds"] is None and not result["current_quota_authorization"]

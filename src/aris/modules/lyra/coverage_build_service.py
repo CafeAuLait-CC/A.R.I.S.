@@ -434,7 +434,8 @@ class CoverageBuildService:
             saved.request.query != plan.request.query
             or saved.window.configuration != plan.configuration
             or saved.request.ledger != plan.request.ledger
-            or saved.window.read_at != plan.read_at
+            or saved.window.read_at < plan.read_at
+            or saved.window.identity_revision != plan.identity_revision
             or saved.window.source != plan.source
             or saved.request.prefix_checkpoint != plan.request.prefix_checkpoint
             or {value.id for value in saved.request.manifests}
