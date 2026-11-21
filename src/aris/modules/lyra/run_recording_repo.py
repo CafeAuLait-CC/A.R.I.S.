@@ -14,6 +14,7 @@ from aris.core.contracts import DomainError
 from aris.core.time import utc
 from aris.modules.lyra.models import ClosedRunRecordingRow
 from aris.modules.lyra.partition_recording_schemas import StoredPartitionRecording
+from aris.modules.lyra.recording_order_repo import RecordingReceiptOrderRepository
 from aris.modules.lyra.run_recording_schemas import (
     MAX_RUN_RECORD_BYTES,
     StoredClosedRunRecording,
@@ -97,6 +98,7 @@ class ClosedRunRecordingRepository:
         trace_fingerprint: str,
         recording_fingerprint: str,
         read_at: datetime,
+        through_recording_revision: int | None = None,
     ) -> StoredRunRecording | None:
         """Find a closing receipt, including aliases that reused an earlier measurement."""
         column = ClosedRunRecordingRow.canonical_record
@@ -107,7 +109,7 @@ class ClosedRunRecordingRepository:
             contains_entry = exists(
                 select(1).select_from(values).where(values.c.value == str(entry_id))
             )
-        id = self.session.scalar(
+        query = (
             select(ClosedRunRecordingRow.id)
             .where(
                 ClosedRunRecordingRow.node_id == node_id,
@@ -120,6 +122,16 @@ class ClosedRunRecordingRepository:
             .order_by(ClosedRunRecordingRow.created_at, ClosedRunRecordingRow.id)
             .limit(1)
         )
+        if through_recording_revision is not None:
+            query = query.where(
+                RecordingReceiptOrderRepository.membership(
+                    "closed",
+                    ClosedRunRecordingRow.id,
+                    node_id,
+                    through_recording_revision,
+                )
+            )
+        id = self.session.scalar(query)
         return self.get_any(UUID(id)) if id is not None else None
 
     def get_partition(self, operation_id: UUID) -> StoredPartitionRecording | None:
@@ -143,4 +155,9 @@ class ClosedRunRecordingRepository:
                 fingerprint=record.fingerprint,
                 canonical_record=canonical_run_recording(record),
             )
+        )
+        RecordingReceiptOrderRepository(self.session).append(
+            "closed",
+            record.request.id,
+            record.ledger.head.node_id,
         )

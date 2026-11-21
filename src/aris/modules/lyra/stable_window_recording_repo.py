@@ -16,6 +16,7 @@ from aris.modules.lyra.models import (
     StableWindowAcceptanceRow,
     UsageLedgerOperationRow,
 )
+from aris.modules.lyra.recording_order_repo import RecordingReceiptOrderRepository
 from aris.modules.lyra.stable_window_acceptance_repo import StableWindowAcceptanceRepository
 from aris.modules.lyra.stable_window_acceptance_schemas import StoredAcceptedStableWindow
 from aris.modules.lyra.stable_window_recording_schemas import (
@@ -36,6 +37,11 @@ class StableWindowRecordingRepository:
             )
         )
         session.flush()
+        RecordingReceiptOrderRepository(session).append(
+            "stable",
+            receipt.id,
+            receipt.ledger.head.node_id,
+        )
 
     def evidence_for_operation(
         self, session: Session, operation_id: UUID
@@ -80,8 +86,9 @@ class StableWindowRecordingRepository:
         trace_fingerprint: str,
         recording_fingerprint: str,
         read_at: datetime,
+        through_recording_revision: int | None = None,
     ) -> StableWindowRecordingEvidence | None:
-        operation_id = session.scalar(
+        query = (
             select(StableRecordingLinkRow.operation_id)
             .join(
                 StableWindowAcceptanceRow,
@@ -105,6 +112,16 @@ class StableWindowRecordingRepository:
             .order_by(UsageLedgerOperationRow.created_at, StableRecordingLinkRow.operation_id)
             .limit(1)
         )
+        if through_recording_revision is not None:
+            query = query.where(
+                RecordingReceiptOrderRepository.membership(
+                    "stable",
+                    StableRecordingLinkRow.operation_id,
+                    node_id,
+                    through_recording_revision,
+                )
+            )
+        operation_id = session.scalar(query)
         return self.evidence_for_operation(session, UUID(operation_id)) if operation_id else None
 
     @staticmethod

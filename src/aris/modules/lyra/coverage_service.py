@@ -14,6 +14,7 @@ from aris.core.commands.budgets import database_failure, transaction_budget
 from aris.core.contracts import DomainError
 from aris.core.db import commit_owned_transaction, transaction_savepoint
 from aris.core.events import DomainEvent, OutboxEntry
+from aris.modules.lyra.coverage_build_repo import CoverageBuildRepository
 from aris.modules.lyra.coverage_inputs import (
     coverage_parents,
     find_coverage_recordings,
@@ -32,6 +33,7 @@ from aris.modules.lyra.coverage_schemas import (
 )
 from aris.modules.lyra.ledger_repo import UsageLedgerRepository
 from aris.modules.lyra.processing_coverage import CoverageRecording, processing_coverage
+from aris.modules.lyra.trace_attestation_repo import TraceAttestationRepository
 from aris.modules.lyra.trace_attestation_schemas import StoredTraceAttestation
 from aris.modules.lyra.trace_attestation_service import TraceAttestationService
 from aris.modules.lyra.trace_consumer_repo import UsageTraceRepository
@@ -122,6 +124,9 @@ class ProcessingCoverageService:
         config: ProcessingCoverageConfiguration,
         read_at: datetime,
         previous: ProcessingCoverageAnalysis | None = None,
+        *,
+        identity_revision: int | None = None,
+        recording_revision: int | None = None,
     ) -> ProcessingCoverageAnalysis:
         attested, replay = self._replay(session, request, config)
         entries = UsageLedgerRepository(session).prefix(request.ledger)
@@ -136,6 +141,7 @@ class ProcessingCoverageService:
                 entries,
                 config,
                 read_at,
+                through_recording_revision=recording_revision,
             )
         else:
             found: list[CoverageRecording] = []
@@ -158,9 +164,66 @@ class ProcessingCoverageService:
             runs,
             read_at,
             previous=previous.identities if previous is not None else None,
+            through_revision=identity_revision,
         )
         return processing_coverage(
             request, config, attested, replay, entries, recordings, identities, read_at=read_at
+        )
+
+    def record_build_step_in_transaction(
+        self,
+        session: Session,
+        context: UsageTraceConsumeContext,
+        plan_id: UUID,
+        revision: int,
+    ) -> ProcessingCoverageReceipt:
+        """Only an already admitted persistent build can capture a historical boundary."""
+        plan = CoverageBuildRepository(session).get(plan_id)
+        if plan is None:
+            raise DomainError("NOT_FOUND", "Coverage build not found", 404)
+        proof = TraceAttestationRepository(session).at_revision(
+            plan.configuration.trace.consumer_id,
+            revision,
+        )
+        if proof is None or not 1 <= revision <= plan.target_revision:
+            raise DomainError("CONFLICT", "Coverage build source revision is absent", 409)
+        request = ProcessingCoverageRequest(
+            id=plan.manifest_id(revision),
+            attestation_id=proof.request.id,
+            expected_attestation_fingerprint=proof.fingerprint,
+            expected_configuration_fingerprint=plan.configuration.fingerprint,
+            start_at=plan.request.query.start_at,
+            end_at=plan.request.query.end_at,
+            ledger=plan.request.ledger,
+        )
+        repo = ProcessingCoverageRepository(session)
+        repo.lock(request.id)
+        existing = repo.get(request.id)
+        if existing is not None:
+            if (
+                existing.analysis.request != request
+                or existing.analysis.configuration != plan.configuration
+                or existing.analysis.read_at != plan.read_at
+                or (
+                    existing.analysis.identities
+                    and existing.analysis.identity_revision != plan.identity_revision
+                )
+            ):
+                raise DomainError("CONFLICT", "Build manifest has different fixed input", 409)
+            return ProcessingCoverageReceipt(manifest=existing, duplicate=True)
+        if self.configuration != plan.configuration:
+            raise DomainError("USAGE_NOT_CONFIGURED", "Coverage build configuration is paused", 503)
+        analysis = self._analysis(
+            session,
+            request,
+            plan.configuration,
+            plan.read_at,
+            identity_revision=plan.identity_revision,
+            recording_revision=plan.recording_revision,
+        )
+        return ProcessingCoverageReceipt(
+            manifest=self._save_analysis(repo, context, analysis),
+            duplicate=False,
         )
 
     def exact(self, id: UUID) -> StoredProcessingCoverage:
@@ -262,25 +325,34 @@ class ProcessingCoverageService:
                 raise DomainError("CONFLICT", "Coverage inputs changed during capture", 409)
             if ledger.head(config.trace.node_id) != request.ledger:
                 raise DomainError("CONFLICT", "Coverage ledger advanced during capture", 409)
-            draft = StoredProcessingCoverage.model_construct(
-                analysis=analysis,
-                event_id=uuid4(),
-                created_at=self._now(),
-                fingerprint="0" * 64,
-            )
-            result = StoredProcessingCoverage.model_validate(
-                {
-                    **draft.model_dump(mode="json"),
-                    "fingerprint": coverage_manifest_fingerprint(draft),
-                }
-            )
-            self._append(repo, context, result)
-            session.flush()
+            result = self._save_analysis(repo, context, analysis)
             if monotonic() >= deadline:
                 raise DomainError(
                     "RETRYABLE_DATABASE_ERROR", "Coverage capture budget exceeded", 503
                 )
             return ProcessingCoverageReceipt(manifest=result, duplicate=False)
+
+    def _save_analysis(
+        self,
+        repo: ProcessingCoverageRepository,
+        context: UsageTraceConsumeContext,
+        analysis: ProcessingCoverageAnalysis,
+    ) -> StoredProcessingCoverage:
+        draft = StoredProcessingCoverage.model_construct(
+            analysis=analysis,
+            event_id=uuid4(),
+            created_at=self._now(),
+            fingerprint="0" * 64,
+        )
+        result = StoredProcessingCoverage.model_validate(
+            {
+                **draft.model_dump(mode="json"),
+                "fingerprint": coverage_manifest_fingerprint(draft),
+            }
+        )
+        self._append(repo, context, result)
+        repo.session.flush()
+        return result
 
     @staticmethod
     def _append(

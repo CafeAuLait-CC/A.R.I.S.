@@ -88,3 +88,12 @@ class TraceAttestationRepository:
                 canonical_record=canonical_trace(value),
             )
         )
+
+    def at_revision(self, consumer_id: str, revision: int) -> StoredTraceAttestation | None:
+        id = self.session.scalar(
+            select(UsageTraceAttestationRow.id).where(
+                UsageTraceAttestationRow.consumer_id == consumer_id,
+                UsageTraceAttestationRow.revision == revision,
+            )
+        )
+        return self.get(UUID(id)) if id is not None else None

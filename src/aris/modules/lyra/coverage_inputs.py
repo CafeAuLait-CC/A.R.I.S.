@@ -89,6 +89,8 @@ def find_coverage_recordings(
     entries: tuple[UsageLedgerEntry, ...],
     configuration: ProcessingCoverageConfiguration,
     read_at: datetime,
+    *,
+    through_recording_revision: int | None = None,
 ) -> tuple[CoverageRecording, ...]:
     active = _active_prefix(head, entries, read_at)
     local = coverage_parents(replay, start_at, end_at, (), entries, configuration)
@@ -115,6 +117,7 @@ def find_coverage_recordings(
                 trace_fingerprint=configuration.trace.fingerprint,
                 recording_fingerprint=configuration.recording.fingerprint,
                 read_at=read_at,
+                through_recording_revision=through_recording_revision,
             )
             if value is None:
                 value = repo.for_entry(
@@ -124,6 +127,7 @@ def find_coverage_recordings(
                     trace_fingerprint=configuration.trace.fingerprint,
                     recording_fingerprint=configuration.recording.fingerprint,
                     read_at=read_at,
+                    through_recording_revision=through_recording_revision,
                 )
             if value is not None:
                 if recording_reference(value, entry, configuration, entries) is None:
@@ -139,6 +143,7 @@ def resolve_coverage_identities(
     read_at: datetime,
     *,
     previous: tuple[CoverageIdentity, ...] | None = None,
+    through_revision: int | None = None,
 ) -> tuple[CoverageIdentity, ...]:
     if previous is not None:
         if tuple(value.run for value in previous) != runs:
@@ -148,7 +153,7 @@ def resolve_coverage_identities(
             return previous
     if not runs:
         return ()
-    revision = previous[0].identity.directory_revision if previous else None
+    revision = previous[0].identity.directory_revision if previous else through_revision
     answers = service.resolve_many_in_transaction(
         session,
         HistoricalNodeUserBatch(

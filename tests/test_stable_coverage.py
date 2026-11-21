@@ -13,6 +13,7 @@ from aris.modules.lyra.coverage_service import ProcessingCoverageService
 from aris.modules.lyra.ledger_repo import UsageLedgerRepository
 from aris.modules.lyra.ledger_schemas import UsagePostingRequest
 from aris.modules.lyra.models import StableRecordingLinkRow, UsageTraceAttestationRow
+from aris.modules.lyra.recording_order_repo import RecordingReceiptOrderRepository
 from aris.modules.lyra.stable_window_recording_repo import StableWindowRecordingRepository
 from aris.modules.lyra.window_schemas import UsageWindowQuery
 from aris.modules.lyra.window_snapshot_inputs import window_identities
@@ -279,16 +280,17 @@ def test_nonempty_schema38_receipts_backfill_without_changing_original_results(
 ):
     writer, closed, (app, _, fixture) = stable_recording
     command.downgrade(Config("alembic.ini"), "0038")
-    if legacy_first:
-        fixture[0].record(POST, fixture[1])
     # Model only the old schema38 writer: same receipt, no new derived index call.
     with monkeypatch.context() as patch:
+        patch.setattr(RecordingReceiptOrderRepository, "append", lambda *args: None)
+        if legacy_first:
+            fixture[0].record(POST, fixture[1])
         patch.setattr(StableWindowRecordingRepository, "link", lambda *args: None)
         receipts = (
             writer.accept_and_record(POST, open_reference(app, closed)),
             *post_remaining(writer, closed),
         )
-    command.upgrade(Config("alembic.ini"), "0039")
+    command.upgrade(Config("alembic.ini"), "head")
     command.check(Config("alembic.ini"))
     with writer.sessions() as db:
         assert db.scalar(select(func.count()).select_from(StableRecordingLinkRow)) == 3

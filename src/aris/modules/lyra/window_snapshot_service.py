@@ -17,6 +17,7 @@ from aris.core.commands.schemas import ActorContext
 from aris.core.contracts import DomainError
 from aris.core.db import commit_owned_transaction
 from aris.core.events import DomainEvent, OutboxEntry
+from aris.modules.lyra.coverage_build_repo import CoverageBuildRepository
 from aris.modules.lyra.coverage_schemas import ProcessingCoverageConfiguration
 from aris.modules.lyra.coverage_service import ProcessingCoverageService
 from aris.modules.lyra.ledger_repo import UsageLedgerRepository
@@ -198,6 +199,71 @@ class UsageWindowSnapshotService:
                 return UsageWindowReceipt(snapshot=stored, duplicate=False)
         except DBAPIError as error:
             raise self._failure(error) from None
+
+    def capture_build_in_transaction(
+        self,
+        session: Session,
+        context: UsageTraceConsumeContext,
+        plan_id: UUID,
+    ) -> UsageWindowReceipt:
+        """Finish the existing admitted build; arbitrary historical heads are not accepted."""
+        plans = CoverageBuildRepository(session)
+        plan = plans.get(plan_id)
+        if plan is None:
+            raise DomainError("NOT_FOUND", "Coverage build not found", 404)
+        repo = UsageWindowRepository(session)
+        prior = repo.get(plan.window_id)
+        if prior is not None:
+            if (
+                prior.request.query != plan.request.query
+                or prior.window.configuration != plan.configuration
+                or prior.window.source != plan.source
+                or prior.request.ledger != plan.request.ledger
+                or prior.window.identity_revision != plan.identity_revision
+            ):
+                raise DomainError("CONFLICT", "Coverage build window differs", 409)
+            return UsageWindowReceipt(snapshot=prior, duplicate=True)
+        if self.configuration != plan.configuration:
+            raise DomainError("USAGE_NOT_CONFIGURED", "Coverage build configuration is paused", 503)
+        deadline = monotonic() + self.timeout_ms / 1000
+        steps = plans.completed_steps(plan)
+        request = CaptureUsageWindow(
+            id=plan.window_id,
+            query=plan.request.query,
+            expected_configuration_fingerprint=plan.configuration.fingerprint,
+            expected_source_fingerprint=plan.source.fingerprint,
+            ledger=plan.request.ledger,
+            manifests=tuple(step.manifest for step in steps),
+        )
+        read_at = self._now()
+        result = self._build(
+            session,
+            request,
+            plan.configuration,
+            plan.source,
+            plan.identity_revision,
+            read_at,
+            deadline,
+        )
+        if not result.source_prefix_complete:
+            raise DomainError("CONFLICT", "Coverage build source prefix is incomplete", 409)
+        draft = StoredUsageWindow.model_construct(
+            request=request,
+            window=result,
+            event_id=uuid4(),
+            created_at=self._now(),
+            fingerprint="0" * 64,
+        )
+        stored = StoredUsageWindow.model_validate(
+            {
+                **draft.model_dump(mode="json"),
+                "fingerprint": window_snapshot_fingerprint(draft),
+            }
+        )
+        self._append(repo, context, stored)
+        session.flush()
+        self._deadline(deadline)
+        return UsageWindowReceipt(snapshot=stored, duplicate=False)
 
     def exact(self, id: UUID) -> StoredUsageWindow:
         """Internal historical receipt. User-facing reads must call read()."""

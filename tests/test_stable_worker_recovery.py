@@ -173,3 +173,27 @@ def test_composed_worker_records_long_live_prefixes_and_final_tail_with_bounded_
         not report["quota_usage_available"] and report["time_window_coverage"] == "not_assessed"
         for report in reports
     )
+    # Extend the same real long-run fixture through resumable source coverage; no second replay.
+    from aris.modules.lyra.coverage_schemas import ProcessingCoverageConfiguration
+    from aris.modules.lyra.coverage_service import ProcessingCoverageService
+    from tests.test_coverage_builds import build_request, build_service, drain
+    from tests.test_usage_ledger import POST
+
+    pipeline = graph.pump.pipelines[0]
+    coverage = ProcessingCoverageService(
+        state[0].sessions,
+        pipeline.attestations,
+        pipeline.trace.archive,
+        pipeline.trace.observations,
+        pipeline.plans.acceptances.identities,
+        configuration=ProcessingCoverageConfiguration(
+            trace=pipeline.configuration.trace, recording=config.recording, gpu_uuids=("GPU-a",)
+        ),
+        clock=lambda: state[4]["now"],
+    )
+    builds = build_service(coverage, timeout_ms=300000)
+    plan = builds.create(POST, build_request(builds, end=10 + 15 * 1029))
+    assert plan.target_revision == 17
+    window = drain(builds, plan).snapshot.window
+    assert window.source_prefix_complete and window.coverage == "complete"
+    assert window.total_usage_microseconds == 1029 * 15000000

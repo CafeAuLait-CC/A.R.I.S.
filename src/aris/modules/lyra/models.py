@@ -595,3 +595,47 @@ class ClosedRunRecordingRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     fingerprint: Mapped[str] = mapped_column(String(64))
     canonical_record: Mapped[str] = mapped_column(Text)
+
+
+class CoverageBuildPlanRow(Base):
+    __tablename__ = "usage_coverage_build_plans"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    event_id: Mapped[str] = mapped_column(ForeignKey("domain_events.event_id"), unique=True)
+    consumer_id: Mapped[str] = mapped_column(String(128), index=True)
+    node_id: Mapped[str] = mapped_column(String(128))
+    configuration_fingerprint: Mapped[str] = mapped_column(String(64))
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    canonical_plan: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class CoverageBuildStepRow(Base):
+    __tablename__ = "usage_coverage_build_steps"
+    __table_args__ = (
+        CheckConstraint("revision >= 1 AND revision <= 4096", name="coverage_build_step_revision"),
+    )
+
+    plan_id: Mapped[str] = mapped_column(
+        ForeignKey("usage_coverage_build_plans.id"), primary_key=True
+    )
+    revision: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    attestation_id: Mapped[str] = mapped_column(ForeignKey("usage_trace_attestations.id"))
+    manifest_id: Mapped[str] = mapped_column(ForeignKey("usage_coverage_manifests.id"), unique=True)
+    event_id: Mapped[str] = mapped_column(ForeignKey("domain_events.event_id"), unique=True)
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    canonical_step: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class RecordingReceiptOrderRow(Base):
+    __tablename__ = "usage_recording_receipt_order"
+    __table_args__ = (
+        UniqueConstraint("node_id", "revision", name="uq_recording_receipt_revision"),
+        CheckConstraint("revision > 0", name="ck_recording_receipt_revision"),
+        CheckConstraint("kind IN ('closed','stable')", name="ck_recording_receipt_kind"),
+    )
+    kind: Mapped[str] = mapped_column(String(16), primary_key=True)
+    receipt_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    node_id: Mapped[str] = mapped_column(String(128))
+    revision: Mapped[int] = mapped_column(BigInteger)
