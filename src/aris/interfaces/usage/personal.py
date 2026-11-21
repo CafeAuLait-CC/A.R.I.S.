@@ -56,7 +56,7 @@ class PersonalUsageQueries:
             AccessScope(type="node", id=node)
         self.namespace, self.node_ids = namespace, node_ids
         self.clock = clock or (lambda: datetime.now(UTC))
-        self.usage = IndexedUsageHistoryService(sessions, clock=self.clock, timeout_ms=750)
+        self.usage = IndexedUsageHistoryService(sessions, clock=self.clock, timeout_ms=1200)
         self.sessions, self.access = sessions, self.usage.access
 
     @staticmethod
