@@ -57,6 +57,11 @@ class SavedCoverageRollup(IntervalContract):
     buckets: tuple[CoverageBucket, ...] = Field(min_length=1, max_length=368)
     fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
 
+    def content_fingerprint(self) -> str:
+        return trace_fingerprint(
+            "saved_coverage_rollup", canonical_trace(self, exclude={"fingerprint"})
+        )
+
 
 def _periods(
     query: UsageWindowQuery, grain: CoverageGrain
@@ -158,10 +163,4 @@ def roll_up_saved_coverage(view: SavedWindowView, grain: CoverageGrain) -> Saved
         buckets=buckets,
         fingerprint="0" * 64,
     )
-    return result.model_copy(
-        update={
-            "fingerprint": trace_fingerprint(
-                "saved_coverage_rollup", canonical_trace(result, exclude={"fingerprint"})
-            )
-        }
-    )
+    return result.model_copy(update={"fingerprint": result.content_fingerprint()})
