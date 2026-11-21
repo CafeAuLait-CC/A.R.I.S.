@@ -16,8 +16,8 @@ from aris.modules.lyra.ledger_schemas import (
     canonical_ledger,
     ledger_fingerprint,
 )
+from aris.modules.lyra.ledger_window_read import MAX_LEDGER_WINDOW_ENTRIES
 from aris.modules.lyra.recorded_usage import (
-    MAX_REPORT_ENTRIES,
     MICROSECOND,
     RecordedUsageQuery,
     _active_prefix,
@@ -105,7 +105,7 @@ class UsageHistory(IntervalContract):
     segment_count: int = Field(ge=0)
     owners: tuple[UsageHistoryOwner, ...] = Field(max_length=128)
     days: tuple[UsageHistoryDay, ...] = Field(max_length=368)
-    rows: tuple[UsageHistoryRow, ...] = Field(max_length=MAX_REPORT_ENTRIES)
+    rows: tuple[UsageHistoryRow, ...] = Field(max_length=MAX_LEDGER_WINDOW_ENTRIES)
     fingerprint: str
 
 
@@ -156,6 +156,26 @@ def usage_history(
                 entry_fingerprint=entry.fingerprint,
             )
         )
+    return _history_from_rows(
+        query,
+        owner_id=owner_id,
+        head=head,
+        rows=tuple(rows),
+        read_at=read_at,
+        method="usage_history",
+    )
+
+
+def _history_from_rows(
+    query: UsageHistoryQuery,
+    *,
+    owner_id: UUID | None,
+    head: UsageLedgerHead,
+    rows: tuple[UsageHistoryRow, ...],
+    read_at: datetime,
+    method: Literal["usage_history", "indexed_usage_history"],
+) -> UsageHistory:
+    """Reduce already-verified rows; each public caller must establish its own evidence method."""
     ordered = tuple(sorted(rows, key=lambda row: (row.start_at, row.gpu_uuid, str(row.entry_id))))
     by_owner: dict[UUID, list[UsageHistoryRow]] = defaultdict(list)
     for row in ordered:
@@ -208,7 +228,7 @@ def usage_history(
     return result.model_copy(
         update={
             "fingerprint": ledger_fingerprint(
-                "usage_history", canonical_ledger(result, exclude={"fingerprint", "read_at"})
+                method, canonical_ledger(result, exclude={"fingerprint", "read_at"})
             )
         }
     )

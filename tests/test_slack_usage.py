@@ -71,13 +71,13 @@ def test_signed_usage_is_current_subject_only_ephemeral_and_never_writes_or_send
     help = request(client, "usage")
     assert help.status_code == 200 and "node-a" in help.text and "node-b" not in help.text
     seen = []
-    original = queries.usage.mine_in_transaction
+    original = queries.usage.read_in_transaction
 
     def observe(session, context, query):
         seen.append(context.actor_id)
         return original(session, context, query)
 
-    monkeypatch.setattr(queries.usage, "mine_in_transaction", observe)
+    monkeypatch.setattr(queries.usage, "read_in_transaction", observe)
     response = request(client, owner_id=str(other), actor_id=str(other), node_id="node-b")
     assert response.status_code == 200 and response.json()["response_type"] == "ephemeral"
     assert seen == [actor.actor_id] and "30 GPU seconds recorded" in response.text
@@ -227,13 +227,13 @@ def test_postgresql_personal_usage_is_read_only_and_recovers_after_ledger_lock(
     if engine.dialect.name != "postgresql":
         pytest.skip("requires PostgreSQL read-only and real lock wait")
     before = counts(readings[0])
-    original = queries.usage.mine_in_transaction
+    original = queries.usage.read_in_transaction
 
     def checked(session, actor, query):
         assert session.scalar(text("SHOW transaction_read_only")) == "on"
         return original(session, actor, query)
 
-    monkeypatch.setattr(queries.usage, "mine_in_transaction", checked)
+    monkeypatch.setattr(queries.usage, "read_in_transaction", checked)
     assert "30 GPU seconds recorded" in request(client).text
     with queries.sessions() as blocker:
         blocker.execute(

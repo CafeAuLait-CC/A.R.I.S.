@@ -36,6 +36,13 @@ class LedgerSegmentConfiguration(IntervalContract):
         return ledger_fingerprint("segment_configuration", canonical_ledger(self))
 
 
+def ledger_read_configuration(node_id: str) -> LedgerSegmentConfiguration:
+    """One application index method shared by statistics and its recording worker."""
+    return LedgerSegmentConfiguration(
+        node_id=node_id, source_ref="aris.lyra.committed-ledger-read-index"
+    )
+
+
 class LedgerEntryIndex(IntervalContract):
     entry_id: UUID
     revision: int = Field(ge=1, le=9223372036854775807, strict=True)
@@ -50,6 +57,7 @@ class LedgerEntryIndex(IntervalContract):
     end_at: AwareDatetime
     timing_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
     window_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    source_derivation_id: UUID | None
     target_id: UUID | None = None
     target_fingerprint: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
@@ -65,6 +73,7 @@ class LedgerEntryIndex(IntervalContract):
             or self.recorded_at < self.end_at
             or (self.revision == 1) != (self.previous_fingerprint is None)
             or (self.kind == "measurement") != (self.target_id is None)
+            or (self.kind == "measurement") != (self.source_derivation_id is not None)
             or (self.target_id is None) != (self.target_fingerprint is None)
             or self.target_id == self.entry_id
         ):
@@ -106,6 +115,11 @@ def ledger_entry_index(entry: UsageLedgerEntry) -> LedgerEntryIndex:
         end_at=window.end_at,
         timing_fingerprint=window.timing_fingerprint,
         window_fingerprint=measurement_key(window),
+        source_derivation_id=(
+            entry.details.measurement.source_derivation_id
+            if isinstance(entry.details, PostedMeasurement)
+            else None
+        ),
         target_id=reversal.target_id if reversal else None,
         target_fingerprint=reversal.target_fingerprint if reversal else None,
     )

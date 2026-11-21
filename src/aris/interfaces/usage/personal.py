@@ -18,9 +18,8 @@ from aris.core.commands.budgets import transaction_budget
 from aris.core.commands.gateway_schemas import ExternalCommandActor
 from aris.core.commands.schemas import ActorContext
 from aris.core.contracts import DomainError
-from aris.modules.lyra.recorded_usage import RecordedUsageQuery
-from aris.modules.lyra.recorded_usage_service import RecordedUsageService
-from aris.modules.lyra.usage_history import calendar_boundaries
+from aris.modules.lyra.indexed_usage_service import IndexedUsageHistoryService
+from aris.modules.lyra.usage_history import UsageHistoryQuery, calendar_boundaries
 
 ReportPeriod = Literal["today", "week"]
 
@@ -57,7 +56,7 @@ class PersonalUsageQueries:
             AccessScope(type="node", id=node)
         self.namespace, self.node_ids = namespace, node_ids
         self.clock = clock or (lambda: datetime.now(UTC))
-        self.usage = RecordedUsageService(sessions, clock=self.clock, timeout_ms=750)
+        self.usage = IndexedUsageHistoryService(sessions, clock=self.clock, timeout_ms=750)
         self.sessions, self.access = sessions, self.usage.access
 
     @staticmethod
@@ -137,10 +136,12 @@ class PersonalUsageQueries:
                 raise DomainError(
                     "WINDOW_NOT_STARTED", "The reporting window has just started", 409
                 )
-            result = self.usage.mine_in_transaction(
+            result = self.usage.read_in_transaction(
                 session,
                 ActorContext(actor_id=principal.user_id, request_id=context.request_id),
-                RecordedUsageQuery(node_id=node_id, start_at=start, end_at=now),
+                UsageHistoryQuery(
+                    node_id=node_id, start_at=start, end_at=now, timezone=principal.timezone
+                ),
             )
             if result.owner_id != principal.user_id:
                 raise DomainError("DEPENDENCY_UNAVAILABLE", "Personal usage owner differs", 503)
@@ -153,8 +154,8 @@ class PersonalUsageQueries:
                 read_at=result.read_at,
                 ledger_revision=result.snapshot.revision,
                 recorded_microseconds=result.recorded_microseconds,
-                gpu_count=len({row.gpu_uuid for row in result.contributions}),
-                segment_count=len(result.contributions),
+                gpu_count=result.gpu_count,
+                segment_count=result.segment_count,
             )
             self.access.require_in_transaction(session, access)
             return summary

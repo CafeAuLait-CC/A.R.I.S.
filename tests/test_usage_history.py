@@ -20,9 +20,9 @@ from aris.interfaces.usage.service import (
     UsageHistorySurface,
     history_csv,
 )
+from aris.modules.lyra.indexed_usage_service import IndexedUsageHistoryService
 from aris.modules.lyra.ledger_schemas import PostedMeasurement, make_ledger_entry
 from aris.modules.lyra.usage_history import UsageHistoryQuery, calendar_boundaries, usage_history
-from aris.modules.lyra.usage_history_service import UsageHistoryService
 from tests.test_administration import admin_state
 from tests.test_mapping_history import history_state
 from tests.test_recorded_usage import BASE, OWNER, head, measured, readings, reversed_measurement
@@ -204,7 +204,7 @@ def test_calendar_and_page_inputs_reject_ambiguous_or_unbounded_requests():
 
 def surface_for(readings, settings):
     state, (original, actor, _, ids), _ = readings
-    history = UsageHistoryService(original.sessions, clock=original.clock)
+    history = IndexedUsageHistoryService(original.sessions, clock=original.clock)
     with history.sessions() as db:
         identity = db.scalar(
             select(ExternalIdentity).where(ExternalIdentity.user_id == str(actor.actor_id))
@@ -363,7 +363,7 @@ def test_postgresql_history_is_select_only_and_rechecks_current_permissions(
     finally:
         event.remove(engine, "before_cursor_execute", capture)
     assert report.recorded_microseconds == 30000000
-    assert len(statements) <= 8
+    assert len(statements) <= 20
     assert all(sql.startswith(("SELECT", "SET TRANSACTION READ ONLY")) for sql in statements)
     from aris.interfaces.usage import service as module
 

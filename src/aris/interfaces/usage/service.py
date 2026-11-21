@@ -24,6 +24,10 @@ from aris.interfaces.commands.auth import UserCommandAuthenticator
 from aris.interfaces.usage.activity_service import ActivityPreviewAccess
 from aris.interfaces.usage.report import history_report
 from aris.modules.lyra.ledger_schemas import UsageLedgerHead
+from aris.modules.lyra.ledger_window_read import (
+    MAX_LEDGER_WINDOW_ENTRIES,
+    MAX_LEDGER_WINDOW_INDEX_BYTES,
+)
 from aris.modules.lyra.usage_history import (
     UsageHistory,
     UsageHistoryQuery,
@@ -66,7 +70,7 @@ class UsageHistoryInput(AccessContract):
     owner_id: UUID | None = None
     window: Annotated[CalendarWindow | UTCWindow, Field(discriminator="kind")]
     snapshot: UsageLedgerHead | None = None
-    offset: int = Field(default=0, ge=0, le=4096, strict=True)
+    offset: int = Field(default=0, ge=0, le=MAX_LEDGER_WINDOW_ENTRIES, strict=True)
     limit: int = Field(default=25, ge=1, le=100, strict=True)
 
     @model_validator(mode="after")
@@ -314,6 +318,10 @@ class UsageHistorySurface:
                         has_more=query.offset + query.limit < report.segment_count,
                     )
                 )
+                if isinstance(result, bytes) and len(result) > MAX_LEDGER_WINDOW_INDEX_BYTES:
+                    raise DomainError(
+                        "USAGE_REPORT_TOO_LARGE", "Choose a shorter usage export window", 503
+                    )
                 # Recheck both domain scope and external-to-platform identity after presentation.
                 self.history.access.require_in_transaction(
                     session, self.history.access_request(actor, selection, query.mode)

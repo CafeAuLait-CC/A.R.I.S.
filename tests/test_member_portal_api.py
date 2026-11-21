@@ -1,5 +1,4 @@
 from datetime import timedelta
-from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -324,7 +323,11 @@ def test_general_response_is_anonymous_while_own_queries_exclude_other_users(por
     issue(manager, admin, user)
     first = measured(owner_id=user)
     second = measured(previous=first, owner_id=admin, start=40, end=100)
-    head = UsageLedgerHead(node_id="node-a", revision=2, fingerprint=second.fingerprint)
+    from tests.test_ledger_segments import raw_append
+
+    original = UsageLedgerHead(node_id="node-a", revision=0)
+    one = raw_append(components.portal.usage.history, first, original)
+    raw_append(components.portal.usage.history, second, one)
     with TestClient(app) as client:
         assert (
             put(
@@ -333,37 +336,30 @@ def test_general_response_is_anonymous_while_own_queries_exclude_other_users(por
             == 200
         )
         login(client, MEMBER_TOKEN)
-        with (
-            patch("aris.modules.lyra.ledger_repo.UsageLedgerRepository.head", return_value=head),
-            patch(
-                "aris.modules.lyra.ledger_repo.UsageLedgerRepository.prefix",
-                return_value=(first, second),
-            ),
-        ):
-            result = post(
-                client, "/internal/members/general", {"node_id": "node-a", "window": window()}
+        result = post(
+            client, "/internal/members/general", {"node_id": "node-a", "window": window()}
+        )
+        assert result.status_code == 200, result.text
+        assert result.json()["recorded_usage"]["recorded_microseconds"] == 90000000
+        assert not any(
+            value in result.text
+            for value in (
+                "other-private-linux-user",
+                "owner_id",
+                "username",
+                "identity_id",
+                str(admin),
+                str(user),
             )
-            assert result.status_code == 200, result.text
-            assert result.json()["recorded_usage"]["recorded_microseconds"] == 90000000
-            assert not any(
-                value in result.text
-                for value in (
-                    "other-private-linux-user",
-                    "owner_id",
-                    "username",
-                    "identity_id",
-                    str(admin),
-                    str(user),
-                )
-            )
-            own = post(
-                client,
-                "/internal/usage/query",
-                {"node_id": "node-a", "mode": "mine", "window": window()},
-            )
-            assert own.status_code == 200, own.text
-            assert own.json()["report"]["recorded_microseconds"] == 30000000
-            assert str(admin) not in own.text
+        )
+        own = post(
+            client,
+            "/internal/usage/query",
+            {"node_id": "node-a", "mode": "mine", "window": window()},
+        )
+        assert own.status_code == 200, own.text
+        assert own.json()["report"]["recorded_microseconds"] == 30000000
+        assert str(admin) not in own.text
 
 
 def test_member_cannot_use_legacy_read_all_binding_for_any_detail_endpoint(portal):

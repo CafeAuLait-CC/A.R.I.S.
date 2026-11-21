@@ -9,7 +9,7 @@ from pydantic import AwareDatetime, Field, field_validator, model_validator
 
 from aris.core.access.schemas import Identifier, UserPrincipal
 from aris.modules.lyra.ledger_schemas import UsageLedgerHead, ledger_fingerprint
-from aris.modules.lyra.recorded_usage import MAX_REPORT_ENTRIES
+from aris.modules.lyra.ledger_window_read import MAX_LEDGER_WINDOW_ENTRIES
 from aris.modules.lyra.usage_history import UsageHistory, UsageHistoryDay
 from aris.modules.lyra.usage_intervals import IntervalContract
 
@@ -75,7 +75,7 @@ class GroupUsageReport(IntervalContract):
     read_finished_at: AwareDatetime
     recorded_microseconds: int = Field(ge=0)
     gpu_instance_count: int = Field(ge=0)
-    segment_count: int = Field(ge=0, le=MAX_REPORT_ENTRIES)
+    segment_count: int = Field(ge=0, le=MAX_LEDGER_WINDOW_ENTRIES)
     owners: tuple[GroupUsageOwner, ...] = Field(max_length=1024)
     days: tuple[UsageHistoryDay, ...] = Field(max_length=368)
     fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")

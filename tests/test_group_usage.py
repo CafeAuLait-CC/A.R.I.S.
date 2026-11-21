@@ -15,9 +15,9 @@ from aris.interfaces.slack.config import SlackSettings
 from aris.interfaces.usage.group_report import group_html_report, group_summary_csv
 from aris.modules.lyra.group_usage import GroupUsageQuery, group_usage_report
 from aris.modules.lyra.group_usage_service import GroupUsageService
+from aris.modules.lyra.indexed_usage_service import IndexedUsageHistoryService
 from aris.modules.lyra.ledger_schemas import UsageLedgerHead
 from aris.modules.lyra.usage_history import UsageHistoryQuery, usage_history
-from aris.modules.lyra.usage_history_service import UsageHistoryService
 from tests.test_administration import admin_state
 from tests.test_mapping_history import history_state
 from tests.test_recorded_usage import BASE, OWNER, measured, readings
@@ -134,7 +134,7 @@ def test_group_input_does_not_accept_missing_nodes_duplicate_heads_or_partial_ch
 @pytest.fixture
 def grouped(readings):
     _, (original, actor, _, ids), _ = readings
-    history = UsageHistoryService(original.sessions, clock=original.clock)
+    history = IndexedUsageHistoryService(original.sessions, clock=original.clock)
     with history.sessions.begin() as session:
         session.add(
             RoleBinding(

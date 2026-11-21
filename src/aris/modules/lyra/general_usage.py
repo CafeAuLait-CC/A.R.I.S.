@@ -1,5 +1,6 @@
 """Anonymous recorded totals for general statistics, never individual usage details."""
 
+from time import monotonic
 from typing import Literal
 
 from pydantic import AwareDatetime, Field
@@ -8,9 +9,8 @@ from aris.core.access.schemas import AccessContract, AccessRequest, AccessScope
 from aris.core.commands.budgets import transaction_budget
 from aris.core.commands.schemas import ActorContext
 from aris.core.contracts import DomainError
-from aris.modules.lyra.ledger_repo import UsageLedgerRepository
-from aris.modules.lyra.usage_history import UsageHistoryQuery, usage_history
-from aris.modules.lyra.usage_history_service import UsageHistoryService
+from aris.modules.lyra.indexed_usage_service import IndexedUsageHistoryService
+from aris.modules.lyra.usage_history import UsageHistoryQuery
 
 
 class GeneralUsageTotal(AccessContract):
@@ -24,7 +24,7 @@ class GeneralUsageTotal(AccessContract):
     quota_usage_available: Literal[False] = False
 
 
-class GeneralUsageService(UsageHistoryService):
+class GeneralUsageService(IndexedUsageHistoryService):
     def total(self, actor: ActorContext, query: UsageHistoryQuery) -> GeneralUsageTotal:
         query = UsageHistoryQuery.model_validate(query.model_dump(mode="json"))
         authority = AccessRequest(
@@ -37,14 +37,11 @@ class GeneralUsageService(UsageHistoryService):
             self.access.require_in_transaction(session, authority)
             if query.end_at > self._now():
                 raise DomainError("VALIDATION_ERROR", "Usage window has not ended", 422)
-            repo = UsageLedgerRepository(session)
-            head = repo.head(query.node_id)
-            history = usage_history(
+            history = self._indexed_in_transaction(
+                session,
                 query,
                 owner_id=None,
-                head=head,
-                entries=repo.prefix(head),
-                read_at=self._now(),
+                deadline=monotonic() + self.timeout_ms / 1000,
             )
             result = GeneralUsageTotal(
                 node_id=history.node_id,

@@ -11,7 +11,10 @@ from aris.core.commands.schemas import ActorContext
 from aris.core.contracts import DomainError
 from aris.modules.lyra.group_usage import GroupUsageQuery, GroupUsageReport, group_usage_report
 from aris.modules.lyra.ledger_schemas import canonical_ledger
-from aris.modules.lyra.recorded_usage import MAX_REPORT_BYTES, MAX_REPORT_ENTRIES
+from aris.modules.lyra.ledger_window_read import (
+    MAX_LEDGER_WINDOW_ENTRIES,
+    MAX_LEDGER_WINDOW_INDEX_BYTES,
+)
 from aris.modules.lyra.usage_history import UsageHistoryQuery
 from aris.modules.lyra.usage_history_service import UsageHistoryService
 
@@ -79,7 +82,7 @@ class GroupUsageService:
                 )
                 size += len(canonical_ledger(value).encode())
                 rows += len(value.rows)
-                if size > MAX_REPORT_BYTES or rows > MAX_REPORT_ENTRIES:
+                if size > MAX_LEDGER_WINDOW_INDEX_BYTES or rows > MAX_LEDGER_WINDOW_ENTRIES:
                     raise DomainError(
                         "USAGE_REPORT_TOO_LARGE", "Selected-node report exceeds its budget", 503
                     )
@@ -95,7 +98,7 @@ class GroupUsageService:
                 started_at=start,
                 finished_at=self.history._now(),
             )
-            if len(canonical_ledger(result).encode()) > MAX_REPORT_BYTES:
+            if len(canonical_ledger(result).encode()) > MAX_LEDGER_WINDOW_INDEX_BYTES:
                 raise DomainError(
                     "USAGE_REPORT_TOO_LARGE", "Selected-node report exceeds its budget", 503
                 )

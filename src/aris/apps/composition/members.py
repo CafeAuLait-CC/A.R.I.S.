@@ -37,7 +37,7 @@ from aris.interfaces.usage.activity_service import ActivityPreviewAccess, Activi
 from aris.interfaces.usage.service import UsageHistorySurface
 from aris.modules.lyra.activity_preview_service import ActivityPreviewService
 from aris.modules.lyra.general_usage import GeneralUsageService
-from aris.modules.lyra.usage_history_service import UsageHistoryService
+from aris.modules.lyra.indexed_usage_service import IndexedUsageHistoryService
 from aris.modules.lyra.weekly_report_service import WeeklyReportReader
 from aris.modules.lyra.window_reader import UsageWindowReader
 from aris.modules.nova.weekly_plan_reader import WeeklyPlanReader
@@ -232,7 +232,7 @@ def build_member_components(
         authentication,
     )
     ceiling = GuardedAccessService(sessions, {"usage.read_all": "identity.manage"})
-    history = UsageHistoryService(sessions, clock=clock)
+    history = IndexedUsageHistoryService(sessions, clock=clock)
     history.access = ceiling
     windows = UsageWindowReader(sessions)
     windows.access = ceiling

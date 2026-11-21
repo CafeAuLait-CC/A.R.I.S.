@@ -80,7 +80,7 @@ class LedgerWindowReader:
         clock: Callable[[], datetime] | None = None,
         timeout_ms: int = 10000,
     ) -> None:
-        if type(timeout_ms) is not int or not 1000 <= timeout_ms <= 10000:
+        if type(timeout_ms) is not int or not 1 <= timeout_ms <= 10000:
             raise ValueError("ledger windows require a bounded read timeout")
         self.sessions = sessions
         self.configuration = LedgerSegmentConfiguration.model_validate(
@@ -154,6 +154,9 @@ class LedgerWindowReader:
             point = ledger.revision(head.node_id, head.revision)
             if point is None or point.fingerprint != head.fingerprint:
                 raise DomainError("CONFLICT", "Ledger snapshot has different original content", 409)
+            if read_at is None:
+                now = self._now()
+                at = now
             if point.recorded_at > at:
                 raise DomainError("VALIDATION_ERROR", "Ledger snapshot exceeds its data time", 422)
         query = query.model_copy(update={"snapshot": head})
@@ -166,7 +169,7 @@ class LedgerWindowReader:
             else None
         )
         if anchor is not None:
-            if anchor.configuration != self.configuration or anchor.created_at > now:
+            if anchor.configuration != self.configuration:
                 raise DomainError(
                     "CONFLICT", "Ledger index configuration or verification time differs", 409
                 )
@@ -191,8 +194,6 @@ class LedgerWindowReader:
                 max_segments=MAX_LEDGER_WINDOW_SEGMENTS,
                 max_bytes=MAX_LEDGER_WINDOW_SEGMENT_BYTES,
             ):
-                if segment.created_at > now:
-                    raise inconsistent()
                 refs.append(segment.reference())
                 for entry in segment.entries:
                     if entry.revision <= head.revision and self._matches(query, entry):
@@ -216,11 +217,18 @@ class LedgerWindowReader:
         entries = tuple(selected)
         active, reversals = _active_indexes(entries)
         self._within(deadline)
+        verified_at = self._now()
+        if (
+            verified_at < at
+            or (anchor is not None and anchor.created_at > verified_at)
+            or any(ref.created_at > verified_at for ref in refs)
+        ):
+            raise inconsistent()
         return LedgerWindowRead(
             query=query,
             head=head,
             read_at=at,
-            verified_at=now,
+            verified_at=verified_at,
             anchor=anchor.reference() if anchor else None,
             segments=tuple(refs),
             entries=entries,

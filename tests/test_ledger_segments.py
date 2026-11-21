@@ -266,9 +266,18 @@ def test_segment_history_is_immutable_and_prevents_downgrade(ledger):
     not os.environ.get("ARIS_TEST_DATABASE_URL"),
     reason="large ledger integration uses owned PostgreSQL",
 )
-def test_segment_verification_continues_past_the_legacy_4096_history_limit(ledger):
+def test_segment_verification_continues_past_the_legacy_4096_history_limit(ledger, settings):
+    import csv
+    import io
+    from unittest.mock import patch
+
+    from aris.interfaces.usage.service import UsageHistoryInput
+    from aris.modules.lyra.indexed_usage_service import IndexedUsageHistoryService
     from aris.modules.lyra.ledger_window_service import LedgerWindowReader
+    from aris.modules.lyra.usage_history import UsageHistoryQuery
     from tests.test_ledger_window_reading import reverse, window
+    from tests.test_recorded_usage import reading_service
+    from tests.test_usage_history import TOKEN, surface_for
 
     service, first, now = fixture(ledger)
     head = UsageLedgerHead(node_id=first.node_id, revision=1, fingerprint=first.fingerprint)
@@ -309,6 +318,62 @@ def test_segment_verification_continues_past_the_legacy_4096_history_limit(ledge
         sum((value.end_at - value.start_at) // timedelta(microseconds=1) for value in full.active)
         == first.details.measurement.observed_microseconds + 4096 * 30000000
     )
+    scope = reading_service(ledger)
+    surface, actor, _ = surface_for((ledger, scope, None), settings)
+    surface.history = IndexedUsageHistoryService(
+        service.sessions,
+        clock=lambda: now,
+        timeout_ms=10000,
+        index_configuration=lambda node: service.configuration,
+    )
+    selected = UsageHistoryInput(
+        node_id=head.node_id,
+        mode="node",
+        snapshot=head,
+        limit=100,
+        window={
+            "kind": "utc",
+            "start_at": week.start_at,
+            "end_at": week.end_at,
+            "timezone": "UTC",
+        },
+    )
+    with (
+        patch.object(UsageLedgerRepository, "prefix", side_effect=AssertionError("whole history")),
+        patch.object(
+            LedgerSegmentRepository, "entries", side_effect=AssertionError("original bodies")
+        ),
+    ):
+        page = surface.read("Bearer " + TOKEN, "fixture-long-stats", selected)
+        assert page.report.segment_count == 4097 and len(page.report.rows) == 100
+        assert page.has_more and page.report.snapshot == head
+        last_page = surface.read(
+            "Bearer " + TOKEN, "fixture-long-stats", selected.model_copy(update={"offset": 4096})
+        )
+        assert len(last_page.report.rows) == 1 and not last_page.has_more
+        assert last_page.report.fingerprint == page.report.fingerprint
+        exported = surface.read("Bearer " + TOKEN, "fixture-long-stats", selected, output="csv")
+        rows = list(csv.DictReader(io.StringIO(exported.decode("utf-8-sig"))))
+        assert len(rows) == 4097
+        assert (
+            sum(int(row["recorded_microseconds"]) for row in rows)
+            == page.report.recorded_microseconds
+        )
+        assert {row["report_fingerprint"] for row in rows} == {page.report.fingerprint}
+        assert {row["source_derivation_id"] for row in rows} == {
+            str(first.details.measurement.source_derivation_id)
+        }
+        html = surface.read("Bearer " + TOKEN, "fixture-long-stats", selected, output="html")
+        assert page.report.fingerprint.encode() in html
+        stats = surface.history.read(
+            actor,
+            UsageHistoryQuery(**week.model_dump(exclude={"owner_id"})),
+            mode="node",
+        )
+        assert (
+            stats.segment_count == 4097
+            and sum(day.recorded_microseconds for day in stats.days) == stats.recorded_microseconds
+        )
     _, changed = reverse(service, first, head, now)
     adjusted = reads.read(window(first, head=changed))
     assert not adjusted.active and len(adjusted.reversals) == 1

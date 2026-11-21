@@ -22,6 +22,7 @@ from aris.interfaces.slack.config import SlackSettings
 from aris.interfaces.usage.activity_service import ActivityPreviewAccess, ActivityPreviewConfig
 from aris.interfaces.usage.service import UsageHistorySurface
 from aris.modules.lyra.activity_preview_service import ActivityPreviewService
+from aris.modules.lyra.indexed_usage_service import IndexedUsageHistoryService
 from aris.modules.lyra.usage_history_service import UsageHistoryService
 from aris.modules.lyra.weekly_report_service import WeeklyReportReader
 from aris.modules.lyra.window_reader import UsageWindowReader
@@ -103,7 +104,7 @@ def main(argv: list[str] | None = None) -> int:
         check_database(engine)
         sessions = session_factory(engine)
         surface = UsageHistorySurface(
-            UsageHistoryService(sessions),
+            IndexedUsageHistoryService(sessions),
             auth,
             config.node_ids,
             saved_windows=UsageWindowReader(session_factory(engine))

@@ -182,3 +182,23 @@ def test_overlapping_original_short_tail_is_rejected_before_partial_statistics(l
     with pytest.raises(DomainError) as error:
         reader(service, now).read(window(first))
     assert error.value.code == "DEPENDENCY_UNAVAILABLE"
+
+
+def test_live_query_can_see_a_commit_and_index_completed_after_the_request_started(ledger):
+    service, first, started = fixture(ledger)
+    original = UsageLedgerHead(node_id=first.node_id, revision=1, fingerprint=first.fingerprint)
+    committed = started + timedelta(seconds=1)
+    indexing = LedgerSegmentService(
+        service.sessions, configuration=service.configuration, clock=lambda: committed
+    )
+    _, grown = measurement(indexing, first, original, committed)
+    indexing.capture(CONTEXT, request(indexing, grown))
+    ticks = iter((started, committed + timedelta(seconds=1), committed + timedelta(seconds=2)))
+    reads = LedgerWindowReader(service.sessions, service.configuration, clock=lambda: next(ticks))
+    result = reads.read(window(first))
+    assert result.head == grown and result.read_at >= committed
+    assert len(result.active) == 1 and result.verified_at >= result.read_at
+    # A deliberately fixed historical data cutoff still excludes that later business commit.
+    with pytest.raises(DomainError) as error:
+        reader(indexing, committed + timedelta(seconds=3)).read(window(first), read_at=started)
+    assert error.value.code == "VALIDATION_ERROR"
