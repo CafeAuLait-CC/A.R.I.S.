@@ -35,7 +35,11 @@ from aris.modules.lyra.trace_attestation_repo import TraceAttestationRepository
 from aris.modules.lyra.trace_consumer_repo import UsageTraceRepository
 from aris.modules.lyra.trace_consumer_schemas import UsageTraceConsumeContext
 from aris.modules.lyra.window_snapshot_repo import UsageWindowRepository
-from aris.modules.lyra.window_snapshot_schemas import UsageWindowReceipt, WindowManifestSelection
+from aris.modules.lyra.window_snapshot_schemas import (
+    StoredUsageWindow,
+    UsageWindowReceipt,
+    WindowManifestSelection,
+)
 from aris.modules.lyra.window_snapshot_service import UsageWindowSnapshotService
 from aris.modules.vega.usage_archive_schemas import UsageArchiveHeadQuery
 
@@ -403,6 +407,33 @@ class CoverageBuildService:
                 return result
         except DBAPIError as error:
             raise self._failure(error) from None
+
+    def completed_in_transaction(
+        self, session: Session, target: AdmitCoverageWindow
+    ) -> StoredUsageWindow:
+        """Internal evidence lookup; callers still enforce their current access policy."""
+        target = AdmitCoverageWindow.model_validate(target.model_dump(mode="json"))
+        plan = CoverageBuildRepository(session).get(target.id)
+        if plan is None:
+            raise DomainError("NOT_FOUND", "Coverage build not found", 404)
+        if (
+            plan.request.query != target.query
+            or plan.configuration.fingerprint != target.expected_configuration_fingerprint
+        ):
+            raise DomainError("CONFLICT", "Coverage result has different fixed input", 409)
+        saved = UsageWindowRepository(session).get(plan.window_id)
+        if saved is None:
+            raise DomainError("COVERAGE_BUILD_PENDING", "Coverage snapshot is not saved", 409)
+        if (
+            saved.request.query != plan.request.query
+            or saved.window.configuration != plan.configuration
+            or saved.request.ledger != plan.request.ledger
+            or saved.window.read_at != plan.read_at
+            or saved.window.source != plan.source
+            or saved.request.prefix_checkpoint != plan.request.prefix_checkpoint
+        ):
+            raise inconsistent_build()
+        return saved
 
     def progress(self, id: UUID) -> CoverageBuildProgress:
         try:

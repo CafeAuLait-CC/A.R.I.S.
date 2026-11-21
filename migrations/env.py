@@ -13,8 +13,11 @@ from aris.core.scheduler import models as scheduler_models  # noqa: F401
 from aris.interfaces.slack import models as slack_models  # noqa: F401
 from aris.modules.lyra import models as lyra_models  # noqa: F401
 from aris.modules.lyra import weekly_report_models  # noqa: F401
+from aris.modules.nova import (
+    coverage_schedule_models,  # noqa: F401
+    weekly_plan_models,  # noqa: F401
+)
 from aris.modules.nova import models as nova_models  # noqa: F401
-from aris.modules.nova import weekly_plan_models  # noqa: F401
 from aris.modules.vega import models  # noqa: F401
 
 target_metadata = Base.metadata
