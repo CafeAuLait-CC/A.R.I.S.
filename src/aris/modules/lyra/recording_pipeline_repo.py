@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from typing import Literal, overload
 from uuid import UUID
 
 from sqlalchemy import select, text
@@ -19,6 +20,7 @@ from aris.modules.lyra.recording_pipeline_schemas import (
     MAX_PIPELINE_BATCH_BYTES,
     StoredRecordingPipelineBatch,
 )
+from aris.modules.lyra.stable_pipeline_schemas import StoredStableRecordingPipelineBatch
 from aris.modules.lyra.trace_consumer_schemas import canonical_trace
 
 
@@ -33,7 +35,19 @@ class RecordingPipelineRepository:
             )
             self.session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
 
-    def get(self, id: UUID) -> StoredRecordingPipelineBatch | None:
+    @overload
+    def get(
+        self, id: UUID, *, mode: Literal["closed"] = "closed"
+    ) -> StoredRecordingPipelineBatch | None: ...
+
+    @overload
+    def get(
+        self, id: UUID, *, mode: Literal["stable"]
+    ) -> StoredStableRecordingPipelineBatch | None: ...
+
+    def get(
+        self, id: UUID, *, mode: Literal["closed", "stable"] = "closed"
+    ) -> StoredRecordingPipelineBatch | StoredStableRecordingPipelineBatch | None:
         row = (
             self.session.execute(
                 select(
@@ -81,7 +95,21 @@ class RecordingPipelineRepository:
             raw = row["canonical_batch"]
             if len(raw.encode()) > MAX_PIPELINE_BATCH_BYTES:
                 raise ValueError("oversized pipeline batch")
-            value = StoredRecordingPipelineBatch.model_validate(json.loads(raw))
+            decoded = json.loads(raw)
+            model = (
+                StoredStableRecordingPipelineBatch
+                if mode == "stable"
+                else StoredRecordingPipelineBatch
+            )
+            if (
+                isinstance(decoded, dict)
+                and decoded.get("assessment_scope")
+                != model.model_fields["assessment_scope"].default
+            ):
+                raise DomainError(
+                    "CONFLICT", "Pipeline batch belongs to another preparation mode", 409
+                )
+            value = model.model_validate(decoded)
             if (
                 canonical_trace(value) != raw
                 or (
@@ -125,7 +153,9 @@ class RecordingPipelineRepository:
                 "DEPENDENCY_UNAVAILABLE", "Stored pipeline batch is inconsistent", 503
             ) from None
 
-    def append(self, value: StoredRecordingPipelineBatch) -> None:
+    def append(
+        self, value: StoredRecordingPipelineBatch | StoredStableRecordingPipelineBatch
+    ) -> None:
         self.session.add(
             UsageRecordingPipelineBatchRow(
                 id=str(value.request.source.id),
