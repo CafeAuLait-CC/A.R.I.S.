@@ -429,6 +429,9 @@ class UsageDerivation(Base):
 class UsageLedgerEntryRow(Base):
     __tablename__ = "usage_ledger_entries"
     __table_args__ = (
+        Index(
+            "ix_ledger_original_overlap", "node_id", "gpu_uuid", "end_at", "start_at", "revision"
+        ),
         UniqueConstraint("node_id", "revision", name="uq_usage_ledger_revision"),
         UniqueConstraint("id", "kind", name="uq_usage_ledger_entry_kind"),
         ForeignKeyConstraint(
@@ -656,4 +659,41 @@ class SourcePrefixCheckpointRow(Base):
     max_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     fingerprint: Mapped[str] = mapped_column(String(64))
     canonical_checkpoint: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class LedgerSegmentRow(Base):
+    """Immutable index of a bounded, previously verified part of the original ledger."""
+
+    __tablename__ = "usage_ledger_segments"
+    __table_args__ = (
+        UniqueConstraint("node_id", "last_revision", name="uq_ledger_segment_end"),
+        CheckConstraint(
+            "first_revision > 0 AND last_revision >= first_revision AND "
+            "last_revision-first_revision < 256",
+            name="ck_ledger_segment_revisions",
+        ),
+        CheckConstraint("minimum_start < maximum_end", name="ck_ledger_segment_time"),
+        CheckConstraint(
+            "length(fingerprint)=64 AND length(configuration_fingerprint)=64",
+            name="ck_ledger_segment_fingerprints",
+        ),
+        CheckConstraint(
+            "length(canonical_segment)>0 AND length(canonical_segment)<=262144",
+            name="ck_ledger_segment_size",
+        ),
+        Index("ix_ledger_segment_scope", "node_id", "minimum_start", "maximum_end"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    event_id: Mapped[str] = mapped_column(ForeignKey("domain_events.event_id"), unique=True)
+    previous_id: Mapped[str | None] = mapped_column(ForeignKey("usage_ledger_segments.id"))
+    node_id: Mapped[str] = mapped_column(String(128))
+    configuration_fingerprint: Mapped[str] = mapped_column(String(64))
+    first_revision: Mapped[int] = mapped_column(BigInteger)
+    last_revision: Mapped[int] = mapped_column(BigInteger)
+    tail_entry_id: Mapped[str] = mapped_column(ForeignKey("usage_ledger_entries.id"))
+    minimum_start: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    maximum_end: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    canonical_segment: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
