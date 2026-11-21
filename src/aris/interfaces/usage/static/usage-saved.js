@@ -24,7 +24,7 @@ window.createSavedUsage = function ({el, request, lock, message, isBusy, selecti
     el('saved-plan-note').textContent=cards.length ? '计划状态按周历和已保存结果显示；尚未判断后台进程是否运行。日期筛选仅影响下方快照列表。' : '当前节点和视图没有已登记的自动统计计划。';
   }
   function detail(result) {
-    const view=result.view;
+    const view=result.view;const gpuLabel=id=>Object.hasOwn(result.gpu_indices||{},id)?`GPU ${result.gpu_indices[id]}`:id;
     el('saved-detail').hidden=false;
     el('saved-title').textContent=`${view.query.node_id} · ${view.detail_scope==='mine' ? '我的统计':'节点统计'}`;
     el('saved-period').textContent=`${format(view.query.start_at)} 至 ${format(view.query.end_at)} · ${timezone()}`;
@@ -38,7 +38,7 @@ window.createSavedUsage = function ({el, request, lock, message, isBusy, selecti
     el('saved-interval-title').textContent=view.detail_scope==='mine' ? '本人的已验证区间':'GPU 时间区间';
     const rows=view.cells.map(cell=>{
       const tr=document.createElement('tr');const owner=cell.owner_id ? ` · ${result.labels[cell.owner_id] || 'Unknown'}`:'';
-      tr.append(node('td',cell.gpu_uuid),node('td',`${states[cell.state]}${owner}`,'saved-state'),node('td',format(cell.start_at)),node('td',format(cell.end_at)),node('td',duration((new Date(cell.end_at)-new Date(cell.start_at))*1000),'number'));
+      tr.append(node('td',gpuLabel(cell.gpu_uuid)),node('td',`${states[cell.state]}${owner}`,'saved-state'),node('td',format(cell.start_at)),node('td',format(cell.end_at)),node('td',duration((new Date(cell.end_at)-new Date(cell.start_at))*1000),'number'));
       return tr;
     });
     if(!rows.length){const tr=document.createElement('tr'),td=node('td',view.detail_scope==='mine' ? '这份快照中没有本人的已验证区间。':'这份快照中没有可展示的区间。','saved-empty-row');td.colSpan=5;tr.append(td);rows.push(tr);}
@@ -47,9 +47,9 @@ window.createSavedUsage = function ({el, request, lock, message, isBusy, selecti
     const ns='http://www.w3.org/2000/svg',first=new Date(view.query.start_at).getTime(),span=new Date(view.query.end_at)-first;
     el('saved-timeline').replaceChildren(...[...grouped].map(([gpu,cells])=>{
       const row=node('div','','saved-gpu'),track=node('div','','saved-track'),svg=document.createElementNS(ns,'svg');
-      svg.setAttribute('viewBox','0 0 1000 13');svg.setAttribute('preserveAspectRatio','none');svg.setAttribute('role','img');svg.setAttribute('aria-label',`${gpu} ${view.detail_scope==='mine' ? '本人使用':'采样状态'}时间线`);
+      svg.setAttribute('viewBox','0 0 1000 13');svg.setAttribute('preserveAspectRatio','none');svg.setAttribute('role','img');svg.setAttribute('aria-label',`${gpuLabel(gpu)} ${view.detail_scope==='mine' ? '本人使用':'采样状态'}时间线`);
       for(const cell of cells){const rect=document.createElementNS(ns,'rect');rect.setAttribute('x',String((new Date(cell.start_at)-first)/span*1000));rect.setAttribute('width',String((new Date(cell.end_at)-new Date(cell.start_at))/span*1000));rect.setAttribute('height','13');rect.setAttribute('class',`saved-fill-${cell.state}`);const title=document.createElementNS(ns,'title');title.textContent=`${states[cell.state]} · ${format(cell.start_at)}–${format(cell.end_at)}`;rect.append(title);svg.append(rect);}
-      track.append(svg);const gpuName=node('span',gpu.length>18 ? `${gpu.slice(0,6)}…${gpu.slice(-6)}`:gpu);gpuName.title=gpu;row.append(gpuName,track);return row;
+      track.append(svg);const display=gpuLabel(gpu),gpuName=node('span',display.length>18 ? `${display.slice(0,6)}…${display.slice(-6)}`:display);gpuName.title=display;row.append(gpuName,track);return row;
     }));
     el('saved-scope-note').textContent=`${view.projection==='personal_from_node' ? '从节点统计中整理本人的用量和区间；完整性按节点采样证据评估。':view.detail_scope==='mine' ? '本人视图展示自己的已验证区间；完整性按节点采样证据评估。':'状态区间按归档采样和驻留计时方法整理。'} 这是保存时的统计结果，生成后不会自动更新。`;
   }

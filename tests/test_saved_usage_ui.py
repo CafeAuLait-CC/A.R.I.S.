@@ -28,6 +28,7 @@ from aris.modules.lyra.window_schemas import SampledUsageWindow, usage_window_fi
 from aris.modules.lyra.window_snapshot_repo import UsageWindowRepository
 from aris.modules.lyra.window_snapshot_schemas import StoredUsageWindow, window_snapshot_fingerprint
 from aris.modules.nova.coverage_schedule_reader import CoverageScheduleReader
+from aris.modules.vega.target_service import VegaTargetService
 from tests.test_administration import admin_state
 from tests.test_closed_run_recording import closed
 from tests.test_mapping_history import history_state
@@ -294,8 +295,11 @@ def test_saved_export_rechecks_current_permission_after_render(saved_ui, monkeyp
     assert response.status_code == 403 and response.json()["error"]["code"] == "PERMISSION_DENIED"
 
 
-def test_shared_node_snapshot_projects_only_self_and_keeps_unknown_and_frozen_evidence(saved_ui):
+def test_shared_node_snapshot_projects_only_self_and_keeps_unknown_and_frozen_evidence(
+    saved_ui, settings
+):
     state, client, surface, actor, other, ids = saved_ui
+    surface.gpu_labels = VegaTargetService(surface.history.sessions, settings)
     original = incoming_window(state)
     complete = state.service.capture(CONTEXT, original).snapshot
     partial = state.service.capture(
@@ -349,6 +353,8 @@ def test_shared_node_snapshot_projects_only_self_and_keeps_unknown_and_frozen_ev
         )
         assert response.status_code == 200, response.text
         detail = response.json()
+        if detail["view"]["cells"]:
+            assert detail["gpu_indices"] == {"GPU-a": 0}
         view = detail["view"]
         assert view["projection"] == "personal_from_node" and view["detail_scope"] == "mine"
         assert view["query"]["owner_id"] == str(actor.actor_id)
@@ -419,6 +425,7 @@ def test_shared_node_snapshot_projects_only_self_and_keeps_unknown_and_frozen_ev
         and int(rows[0]["recorded_microseconds"]) == 30000000
     )
     assert rows[0]["view_fingerprint"] == results["complete"]["view"]["view_fingerprint"]
+    assert "GPU 0" in html_response.text
     assert str(other) not in csv_response.text + html_response.text
     assert counts(state.service) == before
     # A real confirmed later reversal changes current history, but not this saved parent.

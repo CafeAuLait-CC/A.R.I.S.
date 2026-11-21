@@ -22,6 +22,7 @@ from aris.modules.lyra.window_reader_schemas import (
     WindowPageCursor,
 )
 from aris.modules.nova.coverage_schedule_reader import CoveragePlanPage
+from aris.modules.vega.target_schemas import GpuLabelQuery
 
 
 class SavedUsageQuery(AccessContract):
@@ -49,6 +50,7 @@ class SavedUsageRead(AccessContract):
 class SavedUsageDetail(AccessContract):
     view: SavedWindowView
     labels: dict[str, str]
+    gpu_indices: dict[str, int] = Field(default_factory=dict)
 
 
 class SavedUsagePlanPage(AccessContract):
@@ -110,10 +112,23 @@ def saved_usage(
                             )
                         }
                     )
+                gpu_indices = {}
+                if surface.gpu_labels is not None and output != "csv":
+                    uuids = tuple(sorted({cell.gpu_uuid for cell in view.cells}))
+                    for offset in range(0, len(uuids), 100):
+                        gpu_indices.update(
+                            {
+                                label.gpu_uuid: label.index
+                                for label in surface.gpu_labels.labels_in_transaction(
+                                    session, GpuLabelQuery(gpu_uuids=uuids[offset : offset + 100])
+                                )
+                                if label.node_id == view.query.node_id
+                            }
+                        )
                 result = (
-                    SavedUsageDetail(view=view, labels=labels)
+                    SavedUsageDetail(view=view, labels=labels, gpu_indices=gpu_indices)
                     if output == "json"
-                    else saved_report(view, labels)
+                    else saved_report(view, labels, gpu_indices)
                     if output == "html"
                     else saved_csv(view, labels)
                 )

@@ -98,7 +98,11 @@ def saved_csv(view: SavedWindowView, labels: dict[str, str]) -> bytes:
     return ("\ufeff" + stream.getvalue()).encode("utf-8")
 
 
-def saved_report(view: SavedWindowView, labels: dict[str, str]) -> bytes:
+def saved_report(
+    view: SavedWindowView,
+    labels: dict[str, str],
+    gpu_indices: dict[str, int] | None = None,
+) -> bytes:
     zone = ZoneInfo(view.query.timezone)
 
     def stamp(value: datetime) -> str:
@@ -106,7 +110,11 @@ def saved_report(view: SavedWindowView, labels: dict[str, str]) -> bytes:
 
     rows = "".join(
         "<tr><td>"
-        + escape(cell.gpu_uuid)
+        + (
+            f"GPU {gpu_indices[cell.gpu_uuid]}"
+            if gpu_indices is not None and cell.gpu_uuid in gpu_indices
+            else escape(cell.gpu_uuid)
+        )
         + "</td><td>"
         + escape(STATES[cell.state])
         + (
