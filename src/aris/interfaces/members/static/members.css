@@ -19,6 +19,7 @@ select { font: inherit; border: 1px solid #cad4df; border-radius: 7px; color: #1
 .check input { width: auto; margin: 0; }
 .page-nav, .bulk-controls, #account { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
 .page-nav { margin-bottom: 18px; }
+.page-nav button[aria-current="page"] { color: white; background: #147e88; border-color: #147e88; }
 .bulk-controls { margin: 20px 0 12px; }
 .bulk-controls button { padding: 7px 10px; font-size: 12px; }
 #selection-count { font-size: 12px; color: #697b91; margin-right: auto; }

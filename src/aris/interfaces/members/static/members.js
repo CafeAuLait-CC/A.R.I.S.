@@ -40,7 +40,12 @@
     $('legacy-login').open=false;
     ['new-id','new-name','new-email','new-username','filter'].forEach(id=>$(id).value='');$('actor-name').textContent='';$('actor-role').textContent='';authMode('login');lock(false);
   }
-  function tab(name) {for(const value of ['members','profile','general'])$(value+'-panel').hidden=value!==name;}
+  function tab(name) {
+    for(const value of ['members','profile','general']) {
+      $(value+'-panel').hidden=value!==name;
+      $(value+'-tab').setAttribute('aria-current',value===name?'page':'false');
+    }
+  }
   async function connect() {
     state.session=await request('/internal/members/session',undefined,'GET');state.csrf=state.session.csrf_token;state.revision=state.session.actor.directory_revision;
     $('actor-name').textContent=state.session.actor.display_name;$('actor-role').textContent=state.session.actor.role;
