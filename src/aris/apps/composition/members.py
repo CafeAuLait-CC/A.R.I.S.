@@ -100,6 +100,7 @@ class MemberRuntimeConfig(AccessContract):
     poll_seconds: float = Field(default=1, ge=0.1, le=60)
     activity_preview: ActivityPreviewConfig | None = None
     coverage_plan_ids: tuple[UUID, ...] = Field(default=(), max_length=8)
+    personal_node_snapshots: bool = Field(default=False, strict=True)
 
     @model_validator(mode="after")
     def fixed_namespace_and_origin(self) -> "MemberRuntimeConfig":
@@ -239,12 +240,17 @@ def build_member_components(
     ceiling = GuardedAccessService(sessions, {"usage.read_all": "identity.manage"})
     history = IndexedUsageHistoryService(sessions, clock=clock)
     history.access = ceiling
-    windows = UsageWindowReader(sessions)
+    windows = UsageWindowReader(sessions, personal_node_projection=config.personal_node_snapshots)
     windows.access = ceiling
     plans = WeeklyPlanReader(sessions)
     plans.access = ceiling
     coverage_plans = (
-        CoverageScheduleReader(sessions, config.coverage_plan_ids, clock=clock)
+        CoverageScheduleReader(
+            sessions,
+            config.coverage_plan_ids,
+            clock=clock,
+            include_node_for_personal=config.personal_node_snapshots,
+        )
         if config.coverage_plan_ids
         else None
     )

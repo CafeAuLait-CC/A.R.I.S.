@@ -361,6 +361,9 @@ def test_configured_status_tracks_due_dates_saved_quality_and_personal_scope_wit
             return reader.read_in_transaction(db, actor, node_id="node-a", mode=mode)
 
     assert [item.id for item in read("mine").items] == [personal.id]
+    reader.include_node_for_personal = True
+    assert {item.id for item in read("mine").items} == {definition.id, personal.id}
+    assert other_plan.id not in {item.id for item in read("mine").items}
     assert [item.id for item in read("node").items] == [definition.id]
     assert read("node").items[0].state == "delayed"
     saved = drain(schedules, config)

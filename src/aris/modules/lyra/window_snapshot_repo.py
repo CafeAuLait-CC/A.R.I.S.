@@ -3,7 +3,7 @@
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import BigInteger, LargeBinary, and_, cast, func, or_, select
+from sqlalchemy import BigInteger, LargeBinary, and_, case, cast, func, or_, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
@@ -72,8 +72,12 @@ class UsageWindowRepository:
                 "DEPENDENCY_UNAVAILABLE", "Historical window directory is inconsistent", 503
             ) from None
 
-    def summaries(self, query: WindowListQuery) -> tuple[SavedWindowSummary, ...]:
+    def summaries(
+        self, query: WindowListQuery, *, include_node_for_owner: bool = False
+    ) -> tuple[SavedWindowSummary, ...]:
         row = UsageWindowSnapshotRow
+        if include_node_for_owner and query.owner_id is None:
+            raise ValueError("shared snapshots require one explicit personal owner")
 
         def field(name: str) -> ColumnElement[Any]:
             if self.session.get_bind().dialect.name == "postgresql":
@@ -86,7 +90,9 @@ class UsageWindowRepository:
             row.node_id == query.node_id,
             row.end_at > query.start_at,
             row.start_at < query.end_at,
-            row.owner_id == str(query.owner_id)
+            or_(row.owner_id == str(query.owner_id), row.owner_id.is_(None))
+            if include_node_for_owner
+            else row.owner_id == str(query.owner_id)
             if query.owner_id is not None
             else row.owner_id.is_(None),
         ]
@@ -107,7 +113,11 @@ class UsageWindowRepository:
                 row.created_at,
                 field("coverage").label("coverage"),
                 *(
-                    cast(field(name), BigInteger).label(name)
+                    (
+                        case((row.owner_id.is_(None), None), else_=cast(field(name), BigInteger))
+                        if include_node_for_owner
+                        else cast(field(name), BigInteger)
+                    ).label(name)
                     for name in (
                         "recorded_microseconds",
                         "verified_usage_microseconds",
@@ -124,6 +134,17 @@ class UsageWindowRepository:
                 SavedWindowSummary.model_validate(
                     {
                         **dict(value),
+                        **(
+                            {
+                                "owner_id": query.owner_id,
+                                "recorded_microseconds": None,
+                                "verified_usage_microseconds": None,
+                                "total_usage_microseconds": None,
+                                "summary_totals": "not_loaded",
+                            }
+                            if include_node_for_owner and value["owner_id"] is None
+                            else {}
+                        ),
                         **{key: utc(value[key]) for key in ("start_at", "end_at", "created_at")},
                     }
                 )

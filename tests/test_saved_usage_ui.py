@@ -9,13 +9,18 @@ from pydantic import SecretStr
 from sqlalchemy import delete, select, text
 
 from aris.apps.api.main import create_app
-from aris.core.access.models import ExternalIdentity, RoleBinding, RolePermission
-from aris.core.access.schemas import ExternalSubject
+from aris.core.access.models import ExternalIdentity, Permission, RoleBinding, RolePermission
+from aris.core.access.schemas import AccessScope, ExternalSubject
+from aris.core.commands.schemas import ActorContext, CommandContext, CommandRequest, ConfirmCommand
+from aris.core.commands.service import CommandService
 from aris.interfaces.commands.auth import BoundSubjectTokens, UserTokenBinding
 from aris.interfaces.slack.config import SlackSettings
 from aris.interfaces.usage.saved_report import saved_csv, saved_report
 from aris.interfaces.usage.saved_service import SavedUsageDetail
 from aris.interfaces.usage.service import UsageHistorySurface
+from aris.modules.lyra.ledger_commands import ReverseUsageMeasurementCommand
+from aris.modules.lyra.ledger_repo import UsageLedgerRepository
+from aris.modules.lyra.ledger_schemas import PostedMeasurement
 from aris.modules.lyra.usage_history_service import UsageHistoryService
 from aris.modules.lyra.window_reader import UsageWindowReader
 from aris.modules.lyra.window_reader_schemas import WindowListQuery
@@ -74,7 +79,10 @@ def saved_ui(windows, settings):
         ],
     )
     surface = UsageHistorySurface(
-        history, auth, ("node-a",), saved_windows=UsageWindowReader(history.sessions)
+        history,
+        auth,
+        ("node-a",),
+        saved_windows=UsageWindowReader(history.sessions, clock=history.clock),
     )
     app = create_app(
         settings,
@@ -264,7 +272,8 @@ def test_saved_reports_and_csv_preserve_exact_snapshot_quality_and_safe_labels(s
 def test_saved_export_rechecks_current_permission_after_render(saved_ui, monkeypatch, format):
     import aris.interfaces.usage.saved_service as presentation
 
-    state, client, _, actor, _, _ = saved_ui
+    state, client, surface, actor, _, _ = saved_ui
+    surface.saved_windows.personal_node_projection = True
     snapshot = state.service.capture(CONTEXT, incoming_window(state)).snapshot
     original = presentation.saved_csv if format == "export" else presentation.saved_report
 
@@ -280,9 +289,199 @@ def test_saved_export_rechecks_current_permission_after_render(saved_ui, monkeyp
     response = client.post(
         "/internal/usage/snapshots/read",
         headers={**HEADERS, "Accept": "text/html" if format == "report" else "text/csv"},
-        json={"node_id": "node-a", "mode": "node", "id": str(snapshot.request.id)},
+        json={"node_id": "node-a", "mode": "mine", "id": str(snapshot.request.id)},
     )
     assert response.status_code == 403 and response.json()["error"]["code"] == "PERMISSION_DENIED"
+
+
+def test_shared_node_snapshot_projects_only_self_and_keeps_unknown_and_frozen_evidence(saved_ui):
+    state, client, surface, actor, other, ids = saved_ui
+    original = incoming_window(state)
+    complete = state.service.capture(CONTEXT, original).snapshot
+    partial = state.service.capture(
+        CONTEXT,
+        original.model_copy(
+            update={
+                "id": uuid4(),
+                "query": original.query.model_copy(
+                    update={
+                        "start_at": original.query.start_at - timedelta(seconds=10),
+                        "end_at": original.query.end_at + timedelta(seconds=60),
+                    }
+                ),
+            }
+        ),
+    ).snapshot
+    unknown = state.service.capture(
+        CONTEXT,
+        original.model_copy(
+            update={
+                "id": uuid4(),
+                "manifests": (),
+            }
+        ),
+    ).snapshot
+    foreign = state.service.capture(CONTEXT, incoming_window(state, owner=UUID(other))).snapshot
+    chosen = {"node_id": "node-a", "mode": "mine", "id": str(complete.request.id)}
+    assert (
+        client.post("/internal/usage/snapshots/read", headers=HEADERS, json=chosen).status_code
+        == 403
+    )
+    surface.saved_windows.personal_node_projection = True
+    with surface.history.sessions.begin() as db:
+        db.execute(delete(RolePermission).where(RolePermission.permission_id == ids["all"]))
+        db.add(
+            RoleBinding(
+                id=str(uuid4()),
+                user_id=str(other),
+                role_id=ids["role"],
+                scope_type="node",
+                scope_id="node-a",
+            )
+        )
+    before = counts(state.service)
+    results = {}
+    for snapshot in (complete, partial, unknown):
+        response = client.post(
+            "/internal/usage/snapshots/read",
+            headers=HEADERS,
+            json={**chosen, "id": str(snapshot.request.id)},
+        )
+        assert response.status_code == 200, response.text
+        detail = response.json()
+        view = detail["view"]
+        assert view["projection"] == "personal_from_node" and view["detail_scope"] == "mine"
+        assert view["query"]["owner_id"] == str(actor.actor_id)
+        assert view["recorded_microseconds"] == 30000000
+        assert (view["total_usage_microseconds"] is not None) == (view["coverage"] == "complete")
+        assert view["snapshot_fingerprint"] == snapshot.fingerprint
+        assert view["view_fingerprint"] != snapshot.fingerprint
+        assert str(other) not in response.text
+        assert all(cell["owner_id"] == str(actor.actor_id) for cell in view["cells"])
+        results[snapshot.window.coverage] = detail
+    assert set(results) == {"complete", "partial", "unknown"}
+    listed = client.post(
+        "/internal/usage/snapshots/query", headers=HEADERS, json=selection(mode="mine")
+    ).json()
+    assert {row["id"] for row in listed["items"]} == {
+        str(s.request.id) for s in (complete, partial, unknown)
+    }
+    assert all(
+        row["summary_totals"] == "not_loaded"
+        and row["recorded_microseconds"] is None
+        and row["verified_usage_microseconds"] is None
+        and row["total_usage_microseconds"] is None
+        for row in listed["items"]
+    )
+    assert (
+        client.post(
+            "/internal/usage/snapshots/read",
+            headers=HEADERS,
+            json={**chosen, "id": str(foreign.request.id)},
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            "/internal/usage/snapshots/read", headers=HEADERS, json={**chosen, "mode": "node"}
+        ).status_code
+        == 403
+    )
+    for snapshot in (complete, partial, unknown):
+        with surface.history.sessions() as db:
+            if db.get_bind().dialect.name == "postgresql":
+                db.execute(text("SET TRANSACTION READ ONLY"))
+            empty = surface.saved_windows.read_in_transaction(
+                db,
+                ActorContext(actor_id=UUID(other), request_id="zero-member-view"),
+                snapshot.request.id,
+                node_id="node-a",
+                mode="mine",
+            )
+            assert (
+                empty.cells == ()
+                and empty.recorded_microseconds == empty.verified_usage_microseconds == 0
+            )
+            assert empty.total_usage_microseconds == (
+                0 if snapshot.window.coverage == "complete" else None
+            )
+            assert str(actor.actor_id) not in empty.model_dump_json()
+    csv_response = client.post(
+        "/internal/usage/snapshots/read", headers={**HEADERS, "Accept": "text/csv"}, json=chosen
+    )
+    html_response = client.post(
+        "/internal/usage/snapshots/read", headers={**HEADERS, "Accept": "text/html"}, json=chosen
+    )
+    assert csv_response.status_code == html_response.status_code == 200
+    rows = list(csv.DictReader(io.StringIO(csv_response.content.decode("utf-8-sig"))))
+    assert (
+        rows[0]["projection"] == "personal_from_node"
+        and int(rows[0]["recorded_microseconds"]) == 30000000
+    )
+    assert rows[0]["view_fingerprint"] == results["complete"]["view"]["view_fingerprint"]
+    assert str(other) not in csv_response.text + html_response.text
+    assert counts(state.service) == before
+    # A real confirmed later reversal changes current history, but not this saved parent.
+    ledger = state.state.ledger[0]
+    with surface.history.sessions.begin() as db:
+        target = next(
+            entry
+            for entry in UsageLedgerRepository(db).prefix(complete.window.ledger)
+            if isinstance(entry.details, PostedMeasurement)
+            and entry.details.measurement.owner_id == actor.actor_id
+        )
+        permission = str(uuid4())
+        db.add(Permission(id=permission, name="usage.adjust"))
+        db.flush()
+        db.add(RolePermission(role_id=ids["role"], permission_id=permission))
+    state.state.ledger[2][2][5]["now"] += timedelta(seconds=10)
+    commands = CommandService(
+        surface.history.sessions,
+        [ReverseUsageMeasurementCommand(ledger)],
+        confirmation_key=SecretStr("fixture-shared-view-reversal-key-1234567890"),
+        clock=surface.history.clock,
+    )
+    review = commands.execute(
+        CommandContext(
+            actor_id=actor.actor_id,
+            request_id="saved-view-review",
+            idempotency_key="saved-view-reversal",
+        ),
+        CommandRequest(
+            command="usage.reverse_measurement",
+            scope=AccessScope(type="node", id="node-a"),
+            parameters={
+                "target_id": str(target.id),
+                "expected_target_fingerprint": target.fingerprint,
+                "expected_target_revision": target.revision,
+                "reason": "fixture later correction",
+            },
+        ),
+    )
+    done = commands.confirm(actor, ConfirmCommand(command_id=review.command_id, proof=review.proof))
+    assert done.state == "succeeded" and done.result["effect"] == "reversed"
+    repeated = client.post("/internal/usage/snapshots/read", headers=HEADERS, json=chosen)
+    assert repeated.status_code == 200 and repeated.json() == results["complete"]
+    assert (
+        client.post(
+            "/internal/usage/snapshots/read", headers={**HEADERS, "Accept": "text/csv"}, json=chosen
+        ).content
+        == csv_response.content
+    )
+    assert (
+        client.post(
+            "/internal/usage/snapshots/read",
+            headers={**HEADERS, "Accept": "text/html"},
+            json=chosen,
+        ).content
+        == html_response.content
+    )
+    with surface.history.sessions.begin() as db:
+        db.execute(delete(RoleBinding).where(RoleBinding.user_id == str(actor.actor_id)))
+    assert (
+        client.post("/internal/usage/snapshots/read", headers=HEADERS, json=chosen).status_code
+        == 403
+    )
 
 
 def test_personal_and_node_results_are_distinct_and_cannot_be_selected_by_impersonation(saved_ui):

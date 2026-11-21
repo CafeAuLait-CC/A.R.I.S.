@@ -39,12 +39,15 @@ class LocalUsageConfig(AccessContract):
     user_tokens: tuple[UserTokenBinding, ...] = Field(min_length=1, max_length=128, repr=False)
     node_ids: tuple[str, ...] = Field(min_length=1, max_length=32)
     saved_snapshots: bool = False
+    personal_node_snapshots: bool = Field(default=False, strict=True)
     weekly_reports: bool = False
     coverage_plan_ids: tuple[UUID, ...] = Field(default=(), max_length=8)
     activity_preview: ActivityPreviewConfig | None = None
 
     @model_validator(mode="after")
     def configured_activity_nodes(self) -> "LocalUsageConfig":
+        if self.personal_node_snapshots and not self.saved_snapshots:
+            raise ValueError("personal node projections require saved statistics")
         if len(set(self.coverage_plan_ids)) != len(self.coverage_plan_ids) or (
             self.coverage_plan_ids and not self.saved_snapshots
         ):
@@ -114,14 +117,20 @@ def main(argv: list[str] | None = None) -> int:
             history,
             auth,
             config.node_ids,
-            saved_windows=UsageWindowReader(session_factory(engine))
+            saved_windows=UsageWindowReader(
+                session_factory(engine), personal_node_projection=config.personal_node_snapshots
+            )
             if config.saved_snapshots
             else None,
             weekly_reports=WeeklyReportReader(history) if config.weekly_reports else None,
             weekly_plans=WeeklyPlanReader(session_factory(engine))
             if config.weekly_reports
             else None,
-            coverage_plans=CoverageScheduleReader(sessions, config.coverage_plan_ids)
+            coverage_plans=CoverageScheduleReader(
+                sessions,
+                config.coverage_plan_ids,
+                include_node_for_personal=config.personal_node_snapshots,
+            )
             if config.coverage_plan_ids
             else None,
             activity=ActivityPreviewAccess(

@@ -24,6 +24,9 @@ def saved_csv(view: SavedWindowView, labels: dict[str, str]) -> bytes:
             "record_type",
             "snapshot_id",
             "snapshot_fingerprint",
+            "projection",
+            "view_fingerprint",
+            "recorded_fingerprint",
             "node",
             "detail_scope",
             "query_owner_id",
@@ -53,6 +56,9 @@ def saved_csv(view: SavedWindowView, labels: dict[str, str]) -> bytes:
     context = (
         str(view.id),
         view.snapshot_fingerprint,
+        view.projection,
+        view.view_fingerprint or "",
+        view.recorded_fingerprint or "",
         csv_text(view.query.node_id),
         view.detail_scope,
         str(view.query.owner_id or ""),
@@ -143,5 +149,8 @@ def saved_report(view: SavedWindowView, labels: dict[str, str]) -> bytes:
         rows=rows,
         captured=stamp(view.captured_at),
         created=stamp(view.created_at),
-        fingerprint=view.snapshot_fingerprint,
+        fingerprint=view.view_fingerprint or view.snapshot_fingerprint,
+        scope_note=("个人投影 · 原节点快照依据 " + view.snapshot_fingerprint)
+        if view.projection == "personal_from_node"
+        else "原统计快照",
     ).encode("utf-8")

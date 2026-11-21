@@ -49,12 +49,14 @@ class CoverageScheduleReader:
         plan_ids: tuple[UUID, ...],
         *,
         clock: Callable[[], datetime] | None = None,
+        include_node_for_personal: bool = False,
     ) -> None:
         if not 1 <= len(plan_ids) <= 8 or len(set(plan_ids)) != len(plan_ids):
             raise ValueError("coverage status requires at most eight unique configured IDs")
         self.sessions, self.plan_ids = sessions, plan_ids
         self.clock = clock or (lambda: datetime.now(UTC))
         self.access = AccessService(sessions)
+        self.include_node_for_personal = include_node_for_personal
 
     def read_in_transaction(
         self, session: Session, actor: ActorContext, *, node_id: str, mode: Literal["mine", "node"]
@@ -86,9 +88,13 @@ class CoverageScheduleReader:
                 if status is None:
                     continue
                 plan = status.definition.calendar
-                if plan.scope.id != node_id or plan.report_type != "usage." + mode:
+                own = plan.report_type == "usage.mine" and plan.owner_id == actor.actor_id
+                node = plan.report_type == "usage.node"
+                if plan.scope.id != node_id:
                     continue
-                if mode == "mine" and plan.owner_id != actor.actor_id:
+                if mode == "node" and not node:
+                    continue
+                if mode == "mine" and not (own or (self.include_node_for_personal and node)):
                     continue
                 due = weekly_report_period(plan, status.next_week).scheduled_for
                 prior = repo.result(status.last_result_id) if status.last_result_id else None

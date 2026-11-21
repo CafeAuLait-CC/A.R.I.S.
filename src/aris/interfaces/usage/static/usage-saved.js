@@ -51,7 +51,7 @@ window.createSavedUsage = function ({el, request, lock, message, isBusy, selecti
       for(const cell of cells){const rect=document.createElementNS(ns,'rect');rect.setAttribute('x',String((new Date(cell.start_at)-first)/span*1000));rect.setAttribute('width',String((new Date(cell.end_at)-new Date(cell.start_at))/span*1000));rect.setAttribute('height','13');rect.setAttribute('class',`saved-fill-${cell.state}`);const title=document.createElementNS(ns,'title');title.textContent=`${states[cell.state]} · ${format(cell.start_at)}–${format(cell.end_at)}`;rect.append(title);svg.append(rect);}
       track.append(svg);const gpuName=node('span',gpu.length>18 ? `${gpu.slice(0,6)}…${gpu.slice(-6)}`:gpu);gpuName.title=gpu;row.append(gpuName,track);return row;
     }));
-    el('saved-scope-note').textContent=`${view.detail_scope==='mine' ? '本人视图展示自己的已验证区间；完整性按节点采样证据评估。':'状态区间按归档采样和驻留计时方法整理。'} 这是保存时的统计结果，生成后不会自动更新。`;
+    el('saved-scope-note').textContent=`${view.projection==='personal_from_node' ? '从节点统计中整理本人的用量和区间；完整性按节点采样证据评估。':view.detail_scope==='mine' ? '本人视图展示自己的已验证区间；完整性按节点采样证据评估。':'状态区间按归档采样和驻留计时方法整理。'} 这是保存时的统计结果，生成后不会自动更新。`;
   }
   async function openItem(item, input, ticket) {
     const result=await (await request('snapshots/read',{node_id:input.node_id,mode:input.mode,id:item.id})).json();

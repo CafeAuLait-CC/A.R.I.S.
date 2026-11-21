@@ -1,5 +1,7 @@
 """Read-only saved statistics: current access checks and bounded result paging."""
 
+from collections.abc import Callable
+from datetime import UTC, datetime
 from time import monotonic
 from typing import Literal
 from uuid import UUID
@@ -12,6 +14,7 @@ from aris.core.access.service import AccessService
 from aris.core.commands.budgets import database_failure, transaction_budget
 from aris.core.commands.schemas import ActorContext
 from aris.core.contracts import DomainError
+from aris.modules.lyra.window_personal_projection import personal_window_view
 from aris.modules.lyra.window_reader_schemas import (
     SavedWindowPage,
     SavedWindowView,
@@ -22,11 +25,20 @@ from aris.modules.lyra.window_snapshot_repo import UsageWindowRepository
 
 
 class UsageWindowReader:
-    def __init__(self, sessions: sessionmaker[Session], *, timeout_ms: int = 3000) -> None:
+    def __init__(
+        self,
+        sessions: sessionmaker[Session],
+        *,
+        timeout_ms: int = 3000,
+        personal_node_projection: bool = False,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         if type(timeout_ms) is not int or not 100 <= timeout_ms <= 10000:
             raise ValueError("saved usage reading requires a bounded timeout")
         self.sessions, self.timeout_ms = sessions, timeout_ms
         self.access = AccessService(sessions)
+        self.personal_node_projection = personal_node_projection
+        self.clock = clock or (lambda: datetime.now(UTC))
 
     @staticmethod
     def _request(
@@ -92,7 +104,10 @@ class UsageWindowReader:
             scope = repo.scope(id)
             if scope is None or (node_id is not None and scope[0] != node_id):
                 raise DomainError("NOT_FOUND", "Window snapshot not found", 404)
-            access, selected = self._request(actor, *scope, mode)
+            project = self.personal_node_projection and mode == "mine" and scope[1] is None
+            access, selected = self._request(
+                actor, scope[0], actor.actor_id if project else scope[1], mode
+            )
             self.access.require_in_transaction(session, access)
             value = repo.get(id)
             if (
@@ -101,6 +116,19 @@ class UsageWindowReader:
             ):
                 raise DomainError("CONFLICT", "Window read scope changed", 409)
             window = value.window
+            if project:
+                result = personal_window_view(
+                    self.sessions,
+                    session,
+                    actor,
+                    value,
+                    self.access,
+                    deadline=deadline,
+                    clock=self.clock,
+                )
+                self.access.require_in_transaction(session, access)
+                self._deadline(deadline)
+                return result
             cells = tuple(
                 cell
                 for cell in window.cells
@@ -143,7 +171,9 @@ class UsageWindowReader:
         deadline = monotonic() + self.timeout_ms / 1000
         with session.no_autoflush:
             self.access.require_in_transaction(session, access)
-            values = UsageWindowRepository(session).summaries(query)
+            values = UsageWindowRepository(session).summaries(
+                query, include_node_for_owner=self.personal_node_projection and mode == "mine"
+            )
             has_more = len(values) > query.limit
             result = SavedWindowPage(
                 query=query,
