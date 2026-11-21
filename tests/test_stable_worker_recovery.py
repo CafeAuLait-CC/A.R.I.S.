@@ -145,13 +145,13 @@ def test_composed_worker_records_long_live_prefixes_and_final_tail_with_bounded_
     config = LyraRuntimeConfig.model_validate(
         {
             **stable_config(state).model_dump(),
-            "method": StableResidencyLayoutMethod(max_intervals=64),
+            "method": StableResidencyLayoutMethod(max_intervals=8),
             "source_limit": 128,
         }
     )
     graph = build_lyra_components(state[0].sessions, config, clock=lambda: state[4]["now"])
     reports = []
-    for _ in range(32):
+    for _ in range(160):
         report = graph.run_once()
         assert not report["failures"]
         reports.append(report)
@@ -161,8 +161,8 @@ def test_composed_worker_records_long_live_prefixes_and_final_tail_with_bounded_
             and report["job"] is None
         ):
             break
-    assert len(reports) <= 21
-    assert recorded(state[0]) == (17, 1029 * 15000000)
+    assert len(reports) <= 132
+    assert recorded(state[0]) == (129, 1029 * 15000000)
     assert any(
         report["job"] is not None
         and report["source"]["state"] == "prepared"
@@ -173,6 +173,8 @@ def test_composed_worker_records_long_live_prefixes_and_final_tail_with_bounded_
         not report["quota_usage_available"] and report["time_window_coverage"] == "not_assessed"
         for report in reports
     )
+    # 129 small measurements exceed the per-proof receipt limit unless only local edges
+    # select candidates; the limit itself remains 128.
     # Extend the same real long-run fixture through resumable source coverage; no second replay.
     from aris.modules.lyra.coverage_schemas import ProcessingCoverageConfiguration
     from aris.modules.lyra.coverage_service import ProcessingCoverageService

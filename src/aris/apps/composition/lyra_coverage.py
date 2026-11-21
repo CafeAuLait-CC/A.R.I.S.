@@ -12,6 +12,11 @@ from uuid import UUID
 from pydantic import Field, JsonValue, model_validator
 from sqlalchemy.orm import Session, sessionmaker
 
+from aris.apps.composition.lyra_prefix import (
+    LyraPrefixComponents,
+    LyraPrefixRuntimeConfig,
+    build_lyra_prefix_components,
+)
 from aris.core.access.history_service import NodeUserHistoryService
 from aris.core.contracts import DomainError
 from aris.modules.lyra.coverage_build_schemas import (
@@ -22,7 +27,7 @@ from aris.modules.lyra.coverage_build_schemas import (
 from aris.modules.lyra.coverage_build_service import CoverageBuildService
 from aris.modules.lyra.coverage_schemas import ProcessingCoverageConfiguration
 from aris.modules.lyra.coverage_service import ProcessingCoverageService
-from aris.modules.lyra.source_prefix_schemas import SourcePrefixSelection
+from aris.modules.lyra.source_prefix_schemas import SourcePrefixSelection, SourcePrefixStatus
 from aris.modules.lyra.trace_attestation_service import TraceAttestationService
 from aris.modules.lyra.trace_consumer_schemas import (
     UsageTraceConsumeContext,
@@ -48,11 +53,19 @@ class LyraCoverageRuntimeConfig(IntervalContract):
     enabled: bool = Field(default=False, strict=True)
     configuration: ProcessingCoverageConfiguration | None = None
     target: CoverageBuildTarget | None = None
+    prepare_prefix: bool = Field(default=False, strict=True)
+    prefix_proofs_per_tick: int = Field(default=1, ge=1, le=8, strict=True)
     poll_seconds: float = Field(default=1, ge=0.1, le=60)
     transaction_timeout_ms: int = Field(default=30000, ge=1000, le=300000, strict=True)
 
     @model_validator(mode="after")
     def explicit_target(self) -> "LyraCoverageRuntimeConfig":
+        if (
+            self.prepare_prefix
+            and self.target is not None
+            and self.target.prefix_checkpoint is not None
+        ):
+            raise ValueError("automatic and explicit source prefix selection are exclusive")
         if self.enabled and (self.configuration is None or self.target is None):
             raise ValueError(
                 "enabled coverage worker requires an explicit configuration and target"
@@ -100,6 +113,7 @@ class LyraCoverageComponents:
     service: CoverageBuildService | None
     configuration: LyraCoverageRuntimeConfig
     clock: Callable[[], datetime]
+    prefixes: LyraPrefixComponents | None = None
 
     def _summary(
         self, state: str, progress: CoverageBuildProgress | None = None
@@ -132,9 +146,24 @@ class LyraCoverageComponents:
             if error.code != "NOT_FOUND":
                 raise
             if status_only:
-                return self._summary("not_started")
+                report = self._summary("not_started")
+                if self.prefixes is not None:
+                    report["prefix"] = self.prefixes.run_once(status_only=True)["status"]
+                return report
             if not config.enabled:
                 return self._summary("paused")
+            if self.prefixes is not None:
+                prefix = self.prefixes.run_once()
+                if prefix["state"] == "advanced":
+                    report = self._summary("prefix_prepared")
+                    report["prefix"] = prefix["status"]
+                    return report
+                if prefix["state"] not in ("caught_up", "boundary_reached"):
+                    raise DomainError(
+                        "CONFLICT", "Coverage source prefix is not ready", 409
+                    ) from None
+                status = SourcePrefixStatus.model_validate(prefix["status"])
+                target = target.model_copy(update={"prefix_checkpoint": status.eligible})
             plan = self.service.admit_current(
                 UsageTraceConsumeContext(request_id="coverage-worker-admission"),
                 AdmitCoverageWindow(
@@ -148,7 +177,10 @@ class LyraCoverageComponents:
         if (
             plan.request.query != target.query
             or plan.configuration != config.configuration
-            or plan.request.prefix_checkpoint != target.prefix_checkpoint
+            or (
+                not config.prepare_prefix
+                and plan.request.prefix_checkpoint != target.prefix_checkpoint
+            )
         ):
             raise DomainError("CONFLICT", "Coverage worker target has different fixed input", 409)
         progress = self.service.progress(target.id)
@@ -217,4 +249,20 @@ def build_lyra_coverage_components(
     service = CoverageBuildService(
         coverage, windows, clock=now, timeout_ms=config.transaction_timeout_ms
     )
-    return LyraCoverageComponents(service, config, now)
+    prefixes = (
+        build_lyra_prefix_components(
+            sessions,
+            LyraPrefixRuntimeConfig(
+                enabled=config.enabled,
+                configuration=domain.trace,
+                before=config.target.query.start_at,
+                max_proofs_per_tick=config.prefix_proofs_per_tick,
+                poll_seconds=config.poll_seconds,
+            ),
+            clock=now,
+            status_only=status_only,
+        )
+        if config.prepare_prefix
+        else None
+    )
+    return LyraCoverageComponents(service, config, now, prefixes)

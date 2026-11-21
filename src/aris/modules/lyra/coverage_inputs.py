@@ -100,10 +100,12 @@ def find_coverage_recordings(
     for run in local:
         for entry in active:
             window = entry.details.measurement
-            if (
-                window.gpu_uuid != run.gpu_uuid
-                or window.start_at >= min(end_at, run.last.compute_observed_at)
-                or window.end_at <= max(start_at, run.first.compute_observed_at)
+            if window.gpu_uuid != run.gpu_uuid or not any(
+                edge.run is not None
+                and edge.run.id == run.id
+                and window.start_at < min(end_at, edge.end_at)
+                and window.end_at > max(start_at, edge.start_at)
+                for edge in replay.edges
             ):
                 continue
             attempts += 1
