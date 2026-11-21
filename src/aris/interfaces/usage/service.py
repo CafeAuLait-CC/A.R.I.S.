@@ -4,11 +4,12 @@ import csv
 import io
 from datetime import date
 from decimal import Decimal
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Protocol
 from uuid import UUID
 
 from pydantic import AwareDatetime, Field, field_validator, model_validator
 from sqlalchemy.exc import DBAPIError
+from sqlalchemy.orm import Session
 
 from aris.core.access.schemas import (
     AccessContract,
@@ -38,6 +39,13 @@ from aris.modules.lyra.usage_history_service import UsageHistoryService
 from aris.modules.lyra.weekly_report_service import WeeklyReportReader
 from aris.modules.lyra.window_reader import UsageWindowReader
 from aris.modules.nova.weekly_plan_reader import WeeklyPlanReader
+from aris.modules.vega.target_schemas import GpuInventoryLabel, GpuLabelQuery
+
+
+class UsageGpuLabels(Protocol):
+    def labels_in_transaction(
+        self, session: Session, query: GpuLabelQuery
+    ) -> tuple[GpuInventoryLabel, ...]: ...
 
 
 class CalendarWindow(AccessContract):
@@ -116,6 +124,9 @@ class UsageHistoryPage(AccessContract):
     presentation: Literal["segments", "continuous"] = "segments"
     interval_count: int | None = None
     intervals: tuple[ContinuousUsageInterval, ...] = ()
+    interruption_count: int = 0
+    gap_microseconds: int = 0
+    gpu_indices: dict[str, int] = Field(default_factory=dict)
 
 
 def csv_text(value: str) -> str:
@@ -191,6 +202,8 @@ def continuous_history_csv(view: ContinuousUsageHistory, labels: dict[str, str])
             "recorded_gpu_hours",
             "recorded_microseconds",
             "source_segment_count",
+            "interruption_count",
+            "gap_microseconds",
             "first_ledger_entry_id",
             "last_ledger_entry_id",
             "interval_fingerprint",
@@ -217,6 +230,8 @@ def continuous_history_csv(view: ContinuousUsageHistory, labels: dict[str, str])
                 ),
                 row.recorded_microseconds,
                 row.source_segment_count,
+                row.interruption_count,
+                row.gap_microseconds,
                 str(row.first_entry_id),
                 str(row.last_entry_id),
                 row.fingerprint,
@@ -239,6 +254,7 @@ class UsageHistorySurface:
         weekly_reports: WeeklyReportReader | None = None,
         weekly_plans: WeeklyPlanReader | None = None,
         activity: ActivityPreviewAccess | None = None,
+        gpu_labels: UsageGpuLabels | None = None,
     ) -> None:
         if not 1 <= len(node_ids) <= 32 or len(set(node_ids)) != len(node_ids):
             raise ValueError("usage history requires explicit unique nodes")
@@ -254,6 +270,7 @@ class UsageHistorySurface:
         ):
             raise ValueError("activity preview requires the same database and allowed nodes")
         self.activity = activity
+        self.gpu_labels = gpu_labels
 
     def session(self, authorization: str | None) -> UsageSession:
         subject = self.authenticator.authenticate(authorization)
@@ -371,6 +388,19 @@ class UsageHistorySurface:
                         UserLabelQuery(user_ids=tuple(owner.owner_id for owner in report.owners)),
                     )
                 }
+                gpu_indices = {}
+                if output == "page" and self.gpu_labels is not None:
+                    uuids = tuple(sorted({row.gpu_uuid for row in report.rows}))
+                    for offset in range(0, len(uuids), 100):
+                        gpu_indices.update(
+                            {
+                                label.gpu_uuid: label.index
+                                for label in self.gpu_labels.labels_in_transaction(
+                                    session, GpuLabelQuery(gpu_uuids=uuids[offset : offset + 100])
+                                )
+                                if label.node_id == report.node_id
+                            }
+                        )
                 result = (
                     (
                         (
@@ -381,7 +411,15 @@ class UsageHistorySurface:
                         if output == "csv"
                         else (
                             history_report(
-                                report, labels, continuous_interval_count=len(continuous.intervals)
+                                report,
+                                labels,
+                                continuous_interval_count=len(continuous.intervals),
+                                continuous_gap_microseconds=sum(
+                                    row.gap_microseconds for row in continuous.intervals
+                                ),
+                                continuous_interruption_count=sum(
+                                    row.interruption_count for row in continuous.intervals
+                                ),
                             )
                             if continuous is not None
                             else history_report(report, labels)
@@ -412,6 +450,15 @@ class UsageHistorySurface:
                         intervals=continuous.intervals[query.offset : query.offset + query.limit]
                         if continuous is not None
                         else (),
+                        interruption_count=sum(
+                            row.interruption_count for row in continuous.intervals
+                        )
+                        if continuous is not None
+                        else 0,
+                        gap_microseconds=sum(row.gap_microseconds for row in continuous.intervals)
+                        if continuous is not None
+                        else 0,
+                        gpu_indices=gpu_indices,
                     )
                 )
                 if isinstance(result, bytes) and len(result) > MAX_LEDGER_WINDOW_INDEX_BYTES:

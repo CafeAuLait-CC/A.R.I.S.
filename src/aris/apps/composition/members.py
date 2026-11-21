@@ -44,6 +44,7 @@ from aris.modules.nova.weekly_plan_reader import WeeklyPlanReader
 from aris.modules.vega.gpu_hardware_service import VegaGpuHardwareObservations
 from aris.modules.vega.scope_service import VegaNodeScopes
 from aris.modules.vega.service import VegaService
+from aris.modules.vega.target_service import VegaTargetService
 from aris.modules.vega.usage_archive_service import VegaUsageArchive
 
 PORTAL_ROLES = (
@@ -254,6 +255,7 @@ def build_member_components(
         authentication,
         config.node_ids,
         saved_windows=windows,
+        gpu_labels=VegaTargetService(sessions, settings),
         weekly_reports=WeeklyReportReader(history),
         weekly_plans=plans,
         activity=activity,

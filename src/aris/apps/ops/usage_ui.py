@@ -27,6 +27,7 @@ from aris.modules.lyra.weekly_report_service import WeeklyReportReader
 from aris.modules.lyra.window_reader import UsageWindowReader
 from aris.modules.nova.weekly_plan_reader import WeeklyPlanReader
 from aris.modules.vega.gpu_hardware_service import VegaGpuHardwareObservations
+from aris.modules.vega.target_service import VegaTargetService
 from aris.modules.vega.usage_archive_service import VegaUsageArchive
 
 
@@ -107,6 +108,7 @@ def main(argv: list[str] | None = None) -> int:
             history,
             auth,
             config.node_ids,
+            gpu_labels=VegaTargetService(sessions, settings),
             saved_windows=UsageWindowReader(session_factory(engine))
             if config.saved_snapshots
             else None,

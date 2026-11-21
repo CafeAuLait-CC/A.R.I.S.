@@ -48,7 +48,12 @@ def daily_chart(days: tuple[UsageHistoryDay, ...]) -> str:
 
 
 def history_report(
-    report: UsageHistory, labels: dict[str, str], *, continuous_interval_count: int | None = None
+    report: UsageHistory,
+    labels: dict[str, str],
+    *,
+    continuous_interval_count: int | None = None,
+    continuous_gap_microseconds: int = 0,
+    continuous_interruption_count: int = 0,
 ) -> bytes:
     zone = ZoneInfo(report.timezone)
     start = report.start_at.astimezone(zone).strftime("%Y/%m/%d %H:%M:%S")
@@ -92,7 +97,15 @@ def history_report(
         records_count=continuous_interval_count
         if continuous_interval_count is not None
         else report.segment_count,
-        records_note=f"来自 {report.segment_count} 个原始记账分段"
+        records_note=(
+            f"来自 {report.segment_count} 个原始记账分段"
+            + (
+                f" · {continuous_interruption_count} 次短中断，"
+                f"{hours(continuous_gap_microseconds)} 小时未计入用量"
+                if continuous_interruption_count
+                else ""
+            )
+        )
         if continuous_interval_count is not None
         else "分段数量不是任务数量",
         empty=empty,
