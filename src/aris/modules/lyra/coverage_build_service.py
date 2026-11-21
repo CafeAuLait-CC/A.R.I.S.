@@ -413,7 +413,8 @@ class CoverageBuildService:
     ) -> StoredUsageWindow:
         """Internal evidence lookup; callers still enforce their current access policy."""
         target = AdmitCoverageWindow.model_validate(target.model_dump(mode="json"))
-        plan = CoverageBuildRepository(session).get(target.id)
+        repo = CoverageBuildRepository(session)
+        plan = repo.get(target.id)
         if plan is None:
             raise DomainError("NOT_FOUND", "Coverage build not found", 404)
         if (
@@ -424,6 +425,11 @@ class CoverageBuildService:
         saved = UsageWindowRepository(session).get(plan.window_id)
         if saved is None:
             raise DomainError("COVERAGE_BUILD_PENDING", "Coverage snapshot is not saved", 409)
+        last = repo.latest(target.id)
+        if (last.revision if last else plan.start_revision) != plan.target_revision:
+            raise DomainError("COVERAGE_BUILD_PENDING", "Coverage sources are not built", 409)
+        if last is not None:
+            self._saved_step(session, plan, last)
         if (
             saved.request.query != plan.request.query
             or saved.window.configuration != plan.configuration
@@ -431,6 +437,11 @@ class CoverageBuildService:
             or saved.window.read_at != plan.read_at
             or saved.window.source != plan.source
             or saved.request.prefix_checkpoint != plan.request.prefix_checkpoint
+            or {value.id for value in saved.request.manifests}
+            != {
+                plan.manifest_id(revision)
+                for revision in range(plan.start_revision + 1, plan.target_revision + 1)
+            }
         ):
             raise inconsistent_build()
         return saved
