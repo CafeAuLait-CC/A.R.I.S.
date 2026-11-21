@@ -25,6 +25,12 @@ class CreateCoverageBuild(IntervalContract):
     ledger: UsageLedgerHead
 
 
+class AdmitCoverageWindow(IntervalContract):
+    id: UUID
+    query: UsageWindowQuery
+    expected_configuration_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 class StoredCoverageBuild(IntervalContract):
     request: CreateCoverageBuild
     configuration: ProcessingCoverageConfiguration

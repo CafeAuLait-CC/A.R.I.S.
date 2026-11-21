@@ -16,6 +16,7 @@ from aris.core.db import commit_owned_transaction
 from aris.core.events import DomainEvent, OutboxEntry
 from aris.modules.lyra.coverage_build_repo import CoverageBuildRepository, inconsistent_build
 from aris.modules.lyra.coverage_build_schemas import (
+    AdmitCoverageWindow,
     AdvanceCoverageBuild,
     CoverageBuildProgress,
     CreateCoverageBuild,
@@ -96,6 +97,43 @@ class CoverageBuildService:
                 if plan is None:
                     raise DomainError("NOT_FOUND", "Coverage build not found", 404)
                 return plan
+        except DBAPIError as error:
+            raise self._failure(error) from None
+
+    def admit_current(
+        self,
+        context: UsageTraceConsumeContext,
+        target: AdmitCoverageWindow,
+    ) -> StoredCoverageBuild:
+        """Prepare today's boundaries; create rechecks them atomically before first admission."""
+        config = self._active()
+        target = AdmitCoverageWindow.model_validate(target.model_dump(mode="json"))
+        if target.expected_configuration_fingerprint != config.fingerprint:
+            raise DomainError("CONFLICT", "Coverage target configuration differs", 409)
+        try:
+            with self.sessions() as db:
+                self._begin(db, snapshot=True)
+                prior = CoverageBuildRepository(db).get(target.id)
+                if prior is not None:
+                    if prior.request.query != target.query or prior.configuration != config:
+                        raise DomainError("CONFLICT", "Coverage target has different input", 409)
+                    return prior
+                source = self.windows.archive.head_in_transaction(
+                    db,
+                    UsageArchiveHeadQuery(
+                        agent_id=config.trace.agent_id,
+                        node_id=config.trace.node_id,
+                    ),
+                )
+                head = UsageLedgerRepository(db).head(config.trace.node_id)
+                request = CreateCoverageBuild(
+                    id=target.id,
+                    query=target.query,
+                    expected_configuration_fingerprint=config.fingerprint,
+                    expected_source_fingerprint=source.fingerprint,
+                    ledger=head,
+                )
+            return self.create(context, request)
         except DBAPIError as error:
             raise self._failure(error) from None
 

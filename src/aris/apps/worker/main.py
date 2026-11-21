@@ -8,6 +8,7 @@ from pathlib import Path
 from sqlalchemy import func, select
 
 from aris.apps.composition.lyra import load_lyra_config
+from aris.apps.composition.lyra_coverage import load_lyra_coverage_config
 from aris.apps.composition.m2 import (
     M2RuntimeConfig,
     WorkerMode,
@@ -15,6 +16,7 @@ from aris.apps.composition.m2 import (
     load_m2_config,
 )
 from aris.apps.worker.lyra import run_lyra_worker
+from aris.apps.worker.lyra_coverage import run_lyra_coverage_worker
 from aris.core.config import Settings
 from aris.core.db import build_engine, check_database, session_factory
 from aris.core.events import OutboxEntry
@@ -88,11 +90,35 @@ def main() -> None:
         "--lyra-config", type=Path, help="Private opt-in Lyra recording configuration"
     )
     parser.add_argument("--m2-config", type=Path)
+    parser.add_argument(
+        "--lyra-coverage-config", type=Path, help="Private opt-in single-window Lyra coverage build"
+    )
+    parser.add_argument(
+        "--coverage-status",
+        action="store_true",
+        help="Inspect the selected coverage build without advancing it",
+    )
     parser.add_argument("--m2-mode", choices=["commands", "events", "notifications", "home", "all"])
     parser.add_argument(
         "--slack", action="store_true", help="Run durable Slack Home publishing jobs"
     )
     args = parser.parse_args()
+    if args.coverage_status and args.lyra_coverage_config is None:
+        parser.error("--coverage-status requires --lyra-coverage-config")
+    if args.lyra_coverage_config is not None:
+        if (
+            args.lyra_config is not None
+            or args.slack
+            or args.m2_config is not None
+            or args.m2_mode is not None
+        ):
+            parser.error("--lyra-coverage-config selects a separate worker")
+        try:
+            coverage = load_lyra_coverage_config(args.lyra_coverage_config)
+        except (ValueError, OSError):
+            parser.error("Coverage configuration must be a valid private regular JSON file")
+        run_lyra_coverage_worker(coverage, args.once, status_only=args.coverage_status)
+        return
     if args.lyra_config is not None and (
         args.slack or args.m2_config is not None or args.m2_mode is not None
     ):
