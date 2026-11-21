@@ -1,7 +1,7 @@
 """Previously verified ledger chain segments, distinct from usage and quota coverage."""
 
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Literal, Protocol
 from uuid import UUID
 
 from pydantic import AwareDatetime, Field, field_validator, model_validator
@@ -124,6 +124,14 @@ class LedgerSegmentReference(IntervalContract):
         if self.head.revision == 0 or self.created_at < self.last_recorded_at:
             raise ValueError("ledger segment anchor is empty or predates its entries")
         return self
+
+
+class LedgerRangeBoundary(Protocol):
+    @property
+    def target(self) -> UsageLedgerHead: ...
+
+    @property
+    def previous(self) -> LedgerSegmentReference | None: ...
 
 
 class CaptureLedgerSegment(IntervalContract):

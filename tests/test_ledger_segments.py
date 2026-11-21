@@ -267,10 +267,13 @@ def test_segment_history_is_immutable_and_prevents_downgrade(ledger):
     reason="large ledger integration uses owned PostgreSQL",
 )
 def test_segment_verification_continues_past_the_legacy_4096_history_limit(ledger):
+    from aris.modules.lyra.ledger_window_service import LedgerWindowReader
+    from tests.test_ledger_window_reading import reverse, window
+
     service, first, now = fixture(ledger)
     head = UsageLedgerHead(node_id=first.node_id, revision=1, fingerprint=first.fingerprint)
     for _ in range(4096):
-        _, head = measurement(service, first, head, now)
+        last, head = measurement(service, first, head, now)
     with service.sessions() as db:
         with pytest.raises(DomainError) as error:
             UsageLedgerRepository(db).prefix(head)
@@ -288,6 +291,30 @@ def test_segment_verification_continues_past_the_legacy_4096_history_limit(ledge
     assert segment_count(service) == 17 and final.request.target.revision == 4097
     assert len(final.entries) == 1 and service.reverify(final.request.id) == final
     assert not final.quota_usage_available
+    reads = LedgerWindowReader(service.sessions, service.configuration, clock=lambda: now)
+    old = reads.read(window(first, head=head))
+    assert [value.entry_id for value in old.active] == [first.id]
+    with service.sessions() as db:
+        assert reads.originals_in_transaction(db, old, old.active) == (first,)
+    # The relevant window itself may exceed the former whole-prefix count limit.
+    week = window(first, head=head).model_copy(
+        update={
+            "start_at": first.details.measurement.start_at,
+            "end_at": last.details.measurement.end_at,
+        }
+    )
+    full = reads.read(week)
+    assert len(full.active) == 4097
+    assert (
+        sum((value.end_at - value.start_at) // timedelta(microseconds=1) for value in full.active)
+        == first.details.measurement.observed_microseconds + 4096 * 30000000
+    )
+    _, changed = reverse(service, first, head, now)
+    adjusted = reads.read(window(first, head=changed))
+    assert not adjusted.active and len(adjusted.reversals) == 1
+    assert reads.read(window(first, head=head)).fingerprint == old.fingerprint
+    service.capture(CONTEXT, request(service, changed, final))
+    assert reads.read(window(first, head=changed)).fingerprint == adjusted.fingerprint
 
 
 @pytest.mark.skipif(

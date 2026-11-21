@@ -1,5 +1,7 @@
 """Lyra-owned segment SQL; reads original immutable entries, never mutable claims."""
 
+from collections.abc import Iterator
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -36,6 +38,10 @@ class LedgerSegmentRepository:
         )
         if row is None:
             return None
+        return self._stored(dict(row))
+
+    @staticmethod
+    def _stored(row: dict[str, Any]) -> StoredLedgerSegment:
         try:
             raw = row["canonical_segment"]
             if len(raw.encode()) > MAX_LEDGER_SEGMENT_BYTES:
@@ -198,3 +204,71 @@ class LedgerSegmentRepository:
             .limit(1)
         )
         return self.session.scalar(query) is not None
+
+    def covering(self, node_id: str, revision: int) -> StoredLedgerSegment | None:
+        id = self.session.scalar(
+            select(LedgerSegmentRow.id)
+            .where(
+                LedgerSegmentRow.node_id == node_id,
+                LedgerSegmentRow.first_revision <= revision,
+                LedgerSegmentRow.last_revision >= revision,
+            )
+            .order_by(LedgerSegmentRow.last_revision)
+            .limit(1)
+        )
+        return self.get(UUID(id)) if id is not None else None
+
+    def intersecting(
+        self,
+        node_id: str,
+        through_revision: int,
+        start_at: datetime,
+        end_at: datetime,
+        *,
+        configuration_fingerprint: str,
+        max_segments: int,
+        max_bytes: int,
+    ) -> Iterator[StoredLedgerSegment]:
+        scope = (
+            LedgerSegmentRow.node_id == node_id,
+            LedgerSegmentRow.configuration_fingerprint == configuration_fingerprint,
+            LedgerSegmentRow.first_revision <= through_revision,
+            LedgerSegmentRow.minimum_start < end_at,
+            LedgerSegmentRow.maximum_end > start_at,
+        )
+        column = LedgerSegmentRow.canonical_segment
+        encoded = (
+            func.octet_length(column)
+            if self.session.get_bind().dialect.name == "postgresql"
+            else func.length(cast(column, LargeBinary))
+        )
+        count, size = self.session.execute(
+            select(func.count(), func.coalesce(func.sum(encoded), 0)).where(*scope)
+        ).one()
+        if int(count) > max_segments or int(size) > max_bytes:
+            raise DomainError("USAGE_REPORT_TOO_LARGE", "Split the indexed ledger window", 503)
+        seen, after = 0, 0
+        while True:
+            rows = (
+                self.session.execute(
+                    select(*LedgerSegmentRow.__table__.c)
+                    .where(
+                        *scope,
+                        LedgerSegmentRow.first_revision > after,
+                    )
+                    .order_by(LedgerSegmentRow.first_revision)
+                    .limit(16)
+                )
+                .mappings()
+                .all()
+            )
+            if not rows:
+                break
+            for row in rows:
+                seen += 1
+                if seen > max_segments:
+                    raise segment_inconsistent()
+                yield self._stored(dict(row))
+            after = rows[-1]["first_revision"]
+        if seen != int(count):
+            raise segment_inconsistent()

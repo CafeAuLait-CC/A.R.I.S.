@@ -1,6 +1,7 @@
 """Create bounded original-chain verification segments, without recording usage or deleting it."""
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import monotonic
 from uuid import UUID, uuid4
@@ -20,17 +21,26 @@ from aris.modules.lyra.ledger_schemas import (
     PostedMeasurement,
     ReversedMeasurement,
     UsageLedgerEntry,
+    UsageLedgerHead,
 )
 from aris.modules.lyra.ledger_segment_repo import LedgerSegmentRepository, segment_inconsistent
 from aris.modules.lyra.ledger_segment_schemas import (
     MAX_LEDGER_SEGMENT_SOURCE_BYTES,
     CaptureLedgerSegment,
+    LedgerRangeBoundary,
     LedgerSegmentConfiguration,
+    LedgerSegmentReference,
     StoredLedgerSegment,
     ledger_entry_index,
     ledger_segment_fingerprint,
 )
 from aris.modules.lyra.trace_consumer_schemas import UsageTraceConsumeContext
+
+
+@dataclass(frozen=True)
+class LedgerTailBoundary:
+    target: UsageLedgerHead
+    previous: LedgerSegmentReference | None
 
 
 class LedgerSegmentService:
@@ -92,7 +102,7 @@ class LedgerSegmentService:
     @staticmethod
     def _previous(
         repo: LedgerSegmentRepository,
-        request: CaptureLedgerSegment,
+        request: LedgerRangeBoundary,
         config: LedgerSegmentConfiguration,
     ) -> StoredLedgerSegment | None:
         ref = request.previous
@@ -106,7 +116,7 @@ class LedgerSegmentService:
     def _source(
         self,
         db: Session,
-        request: CaptureLedgerSegment,
+        request: LedgerRangeBoundary,
         config: LedgerSegmentConfiguration,
         *,
         at: datetime,
@@ -172,6 +182,26 @@ class LedgerSegmentService:
             raise segment_inconsistent()
         self._within(deadline)
         return entries
+
+    def verify_tail_in_transaction(
+        self,
+        db: Session,
+        target: UsageLedgerHead,
+        previous: LedgerSegmentReference | None,
+        configuration: LedgerSegmentConfiguration,
+        *,
+        at: datetime,
+        deadline: float,
+    ) -> tuple[UsageLedgerEntry, ...]:
+        """Verify original bounded data in the caller's read transaction; no capture or event."""
+        config = LedgerSegmentConfiguration.model_validate(configuration.model_dump(mode="json"))
+        target = UsageLedgerHead.model_validate(target.model_dump(mode="json"))
+        boundary = LedgerTailBoundary(target, previous)
+        self._previous(LedgerSegmentRepository(db), boundary, config)
+        before = previous.head if previous else UsageLedgerHead(node_id=config.node_id, revision=0)
+        if target == before:
+            return ()
+        return self._source(db, boundary, config, at=at, deadline=deadline)
 
     def capture(
         self, context: UsageTraceConsumeContext, request: CaptureLedgerSegment
