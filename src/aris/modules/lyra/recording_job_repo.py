@@ -5,7 +5,7 @@ import json
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import and_, or_, select, text
+from sqlalchemy import and_, false, or_, select, text
 from sqlalchemy.orm import Session
 
 from aris.core.contracts import DomainError
@@ -92,9 +92,13 @@ class RecordingJobRepository:
         now: datetime,
         *,
         include_partitions: bool = True,
+        include_stable: bool = False,
         selection: RecordingWorkSelection | None = None,
     ) -> UsageRecordingJobRow | None:
         statement = select(UsageRecordingJobRow)
+        stable = UsageRecordingJobRow.canonical_request.contains('"kind":"stable_window"')
+        if not include_stable:
+            statement = statement.where(~stable)
         if not include_partitions:
             # The two closed canonical input shapes are unambiguous. Full-run
             # requests contain only UUIDs, hashes, times and numeric revisions;
@@ -103,6 +107,35 @@ class RecordingJobRepository:
                 ~UsageRecordingJobRow.canonical_request.contains('"partition":')
             )
         if selection is not None:
+            closed_match = (
+                and_(
+                    ~stable,
+                    or_(
+                        ~UsageRecordingJobRow.canonical_request.contains('"partition":'),
+                        UsageRecordingJobRow.canonical_request.contains(
+                            '"expected_method_fingerprint":"'
+                            + selection.partition_method_fingerprint
+                            + '"',
+                            autoescape=True,
+                        ),
+                    ),
+                )
+                if selection.include_closed_runs
+                else false()
+            )
+            stable_match = (
+                and_(
+                    stable,
+                    UsageRecordingJobRow.canonical_request.contains(
+                        '"expected_method_fingerprint":"'
+                        + selection.stable_method_fingerprint
+                        + '"',
+                        autoescape=True,
+                    ),
+                )
+                if selection.stable_method_fingerprint is not None
+                else false()
+            )
             statement = statement.where(
                 UsageRecordingJobRow.canonical_request.contains(
                     '"expected_recording_configuration_fingerprint":"'
@@ -110,15 +143,7 @@ class RecordingJobRepository:
                     + '"',
                     autoescape=True,
                 ),
-                or_(
-                    ~UsageRecordingJobRow.canonical_request.contains('"partition":'),
-                    UsageRecordingJobRow.canonical_request.contains(
-                        '"expected_method_fingerprint":"'
-                        + selection.partition_method_fingerprint
-                        + '"',
-                        autoescape=True,
-                    ),
-                ),
+                or_(closed_match, stable_match),
             )
         return self.session.scalar(
             statement.where(

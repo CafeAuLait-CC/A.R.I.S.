@@ -267,7 +267,7 @@ class UsageRecordingJobRow(Base):
     last_error_code: Mapped[str | None] = mapped_column(String(64))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     recording_id: Mapped[str | None] = mapped_column(
-        ForeignKey("usage_run_recordings.id"), unique=True
+        ForeignKey("usage_ledger_operations.id", name="fk_recording_jobs_operation"), unique=True
     )
     recording_fingerprint: Mapped[str | None] = mapped_column(String(64))
 

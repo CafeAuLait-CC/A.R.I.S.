@@ -38,6 +38,13 @@ from aris.modules.lyra.run_recording_schemas import (
     ClosedRunRecordingRequest,
 )
 from aris.modules.lyra.run_recording_service import ClosedRunRecordingService
+from aris.modules.lyra.stable_window_acceptance_repo import StableWindowAcceptanceRepository
+from aris.modules.lyra.stable_window_recording_repo import StableWindowRecordingRepository
+from aris.modules.lyra.stable_window_recording_schemas import (
+    StableWindowJobRequest,
+    StableWindowRecordingReceipt,
+)
+from aris.modules.lyra.stable_window_recording_service import StableWindowRecordingService
 from aris.modules.lyra.trace_consumer_schemas import canonical_trace
 
 _TRANSIENT = {
@@ -56,10 +63,12 @@ class RecordingJobService:
         *,
         limits: RecordingJobLimits | None = None,
         partition_recorder: PartitionRecordingService | None = None,
+        stable_recorder: StableWindowRecordingService | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.sessions, self.recorder = sessions, recorder
         self.partition_recorder = partition_recorder
+        self.stable_recorder = stable_recorder
         self.limits = (
             RecordingJobLimits.model_validate(limits.model_dump(mode="json"))
             if limits is not None
@@ -93,6 +102,18 @@ class RecordingJobService:
         if value is None:
             raise DomainError("NOT_FOUND", "Recording job not found", 404)
         if value.state == "completed":
+            if isinstance(value.request, StableWindowJobRequest):
+                stable_result = StableWindowRecordingRepository().get(
+                    repo.session, value.request.recording
+                )
+                if (
+                    stable_result is None
+                    or stable_result.fingerprint != value.recording_fingerprint
+                ):
+                    raise DomainError(
+                        "DEPENDENCY_UNAVAILABLE", "Stable job result binding is inconsistent", 503
+                    )
+                return value
             result = ClosedRunRecordingRepository(repo.session).get_any(id)
             if (
                 result is None
@@ -149,6 +170,14 @@ class RecordingJobService:
                         job=self._stored(repo, request.id), duplicate=True
                     )
                 limits = self._active()
+                if isinstance(request, StableWindowJobRequest):
+                    accepted = StableWindowAcceptanceRepository(session).get(request.key)
+                    if accepted is None or request != StableWindowJobRequest.from_acceptance(
+                        accepted
+                    ):
+                        raise DomainError(
+                            "CONFLICT", "Stable job differs from first acceptance", 409
+                        )
                 now = self._now()
                 if recording_source_cutoff(request) > now:
                     raise DomainError(
@@ -221,7 +250,10 @@ class RecordingJobService:
                 repo = RecordingJobRepository(session)
                 now = self._now()
                 row = repo.next(
-                    now, include_partitions=self.partition_recorder is not None, selection=selection
+                    now,
+                    include_partitions=self.partition_recorder is not None,
+                    include_stable=self.stable_recorder is not None,
+                    selection=selection,
                 )
                 if row is None:
                     return None
@@ -283,9 +315,28 @@ class RecordingJobService:
                     return self._result(job)
                 if not self._owned(row, claim, self._now()):
                     return RecordingJobResult(id=claim.id, state="lost_claim")
-                result: ClosedRunRecordingReceipt | PartitionRecordingReceipt
+                result: (
+                    ClosedRunRecordingReceipt
+                    | PartitionRecordingReceipt
+                    | StableWindowRecordingReceipt
+                )
                 if isinstance(job.request, ClosedRunRecordingRequest):
                     result = self.recorder.record_in_transaction(session, context, job.request)
+                elif isinstance(job.request, StableWindowJobRequest):
+                    if self.stable_recorder is None:
+                        raise DomainError(
+                            "USAGE_NOT_CONFIGURED",
+                            "Stable recording handler is not configured",
+                            503,
+                        )
+                    accepted = self.stable_recorder.acceptances.exact_in_transaction(
+                        session, job.request.key
+                    )
+                    if job.request != StableWindowJobRequest.from_acceptance(accepted):
+                        raise DomainError("CONFLICT", "Stable job metadata differs", 409)
+                    result = self.stable_recorder.record_in_transaction(
+                        session, context, job.request.recording
+                    )
                 else:
                     if self.partition_recorder is None:
                         raise DomainError(

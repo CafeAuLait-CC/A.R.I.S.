@@ -1,9 +1,10 @@
 """A stable window uses one deterministic operation in the existing usage ledger."""
 
+from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID, uuid5
 
-from pydantic import Field, model_validator
+from pydantic import AwareDatetime, Field, field_validator, model_validator
 
 from aris.modules.lyra.ledger_schemas import (
     UsageLedgerReceipt,
@@ -11,7 +12,11 @@ from aris.modules.lyra.ledger_schemas import (
     canonical_ledger,
     ledger_fingerprint,
 )
-from aris.modules.lyra.stable_window_acceptance_schemas import AcceptedStableWindowReceipt
+from aris.modules.lyra.stable_window_acceptance_schemas import (
+    AcceptedStableWindowReceipt,
+    StoredAcceptedStableWindow,
+)
+from aris.modules.lyra.trace_consumer_schemas import canonical_trace, trace_fingerprint
 from aris.modules.lyra.usage_intervals import IntervalContract
 
 _NAMESPACE = UUID("a45d60c0-bf4b-54aa-bd25-27f655bc78bc")
@@ -41,6 +46,16 @@ class StableWindowRecordingReceipt(IntervalContract):
     ledger: UsageLedgerReceipt
     duplicate: bool = Field(strict=True)
 
+    @property
+    def id(self) -> UUID:
+        return self.request.operation_id
+
+    @property
+    def fingerprint(self) -> str:
+        return trace_fingerprint(
+            "stable_window_recording", canonical_trace(self.model_copy(update={"duplicate": False}))
+        )
+
     @model_validator(mode="after")
     def bound_to_first_acceptance(self) -> "StableWindowRecordingReceipt":
         expected = UsagePostingRequest(
@@ -68,3 +83,35 @@ class StableWindowRecordingReceipt(IntervalContract):
                 "stable recording differs from its first acceptance and ledger operation"
             )
         return self
+
+
+class StableWindowJobRequest(RecordAcceptedStableWindow):
+    kind: Literal["stable_window"] = "stable_window"
+    expected_recording_configuration_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    expected_method_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    source_cutoff: AwareDatetime
+
+    @property
+    def id(self) -> UUID:
+        return self.operation_id
+
+    @property
+    def recording(self) -> RecordAcceptedStableWindow:
+        return RecordAcceptedStableWindow(
+            key=self.key, expected_acceptance_fingerprint=self.expected_acceptance_fingerprint
+        )
+
+    @field_validator("source_cutoff")
+    @classmethod
+    def utc_time(cls, value: datetime) -> datetime:
+        return value.astimezone(UTC)
+
+    @classmethod
+    def from_acceptance(cls, value: StoredAcceptedStableWindow) -> "StableWindowJobRequest":
+        return cls(
+            key=value.proof.window.key,
+            expected_acceptance_fingerprint=value.fingerprint,
+            expected_recording_configuration_fingerprint=value.configuration.fingerprint,
+            expected_method_fingerprint=value.proof.method.fingerprint,
+            source_cutoff=value.request.window.reference.source_cutoff,
+        )

@@ -8,20 +8,17 @@ from sqlalchemy.orm import Session, sessionmaker
 from aris.core.commands.budgets import database_failure, transaction_budget
 from aris.core.contracts import DomainError
 from aris.core.db import commit_owned_transaction, transaction_savepoint
-from aris.modules.lyra.derivation_schemas import UsageDerivationContext, UsageDerivationRequest
+from aris.modules.lyra.derivation_schemas import UsageDerivationContext
 from aris.modules.lyra.derivation_service import UsageDerivationService
 from aris.modules.lyra.ledger_repo import UsageLedgerRepository
-from aris.modules.lyra.ledger_schemas import (
-    StoredUsageOperation,
-    UsagePostingContext,
-    UsagePostingRequest,
-)
+from aris.modules.lyra.ledger_schemas import UsagePostingContext
 from aris.modules.lyra.ledger_service import UsageLedgerService
 from aris.modules.lyra.stable_window_acceptance_schemas import (
     AcceptStableWindow,
     StoredAcceptedStableWindow,
 )
 from aris.modules.lyra.stable_window_acceptance_service import StableWindowAcceptanceService
+from aris.modules.lyra.stable_window_recording_repo import StableWindowRecordingRepository
 from aris.modules.lyra.stable_window_recording_schemas import (
     RecordAcceptedStableWindow,
     StableWindowRecordingReceipt,
@@ -57,71 +54,6 @@ class StableWindowRecordingService:
             raise DomainError("USAGE_NOT_CONFIGURED", "Stable recording is not configured", 503)
         if self.ledger.configuration != accepted.configuration:
             raise DomainError("CONFLICT", "Stable recording configuration differs", 409)
-
-    @staticmethod
-    def _derivation(
-        accepted: StoredAcceptedStableWindow, request: RecordAcceptedStableWindow
-    ) -> UsageDerivationRequest:
-        original = accepted.proof.original
-        return UsageDerivationRequest(
-            id=request.derivation_id,
-            sources=original.sources,
-            as_of=accepted.request.window.reference.source_cutoff,
-            identity_revision=accepted.request.identity_revision,
-            continuity=original.continuity,
-            formation=original.formation,
-        )
-
-    def _posting(
-        self,
-        session: Session,
-        accepted: StoredAcceptedStableWindow,
-        request: RecordAcceptedStableWindow,
-    ) -> UsagePostingRequest:
-        stored = self.derivations.exact_in_transaction(session, request.derivation_id)
-        artifact = stored.artifact
-        attributed = artifact.analysis.request.attribution
-        matches = [
-            index
-            for index, candidate in enumerate(attributed.residency.sessions)
-            if candidate == accepted.proof.original.candidate
-        ]
-        if artifact.request != self._derivation(accepted, request) or len(matches) != 1:
-            raise DomainError("CONFLICT", "Stable derivation differs from first evidence", 409)
-        index = matches[0]
-        identity = attributed.attributions[index].identity
-        if identity.status != "resolved" or identity.user_id != accepted.parent_identity.user_id:
-            raise DomainError("USAGE_NEEDS_REVIEW", "Stable owner differs from entire parent", 409)
-        return UsagePostingRequest(
-            id=request.operation_id,
-            derivation_id=request.derivation_id,
-            session_index=index,
-            expected_result_fingerprint=stored.receipt.result_fingerprint,
-            expected_configuration_fingerprint=accepted.configuration.fingerprint,
-        )
-
-    def _receipt(
-        self,
-        session: Session,
-        accepted: StoredAcceptedStableWindow,
-        request: RecordAcceptedStableWindow,
-        operation: StoredUsageOperation,
-        *,
-        duplicate: bool,
-    ) -> StableWindowRecordingReceipt:
-        expected = self._posting(session, accepted, request)
-        if operation.request != expected or operation.receipt.head.node_id != (
-            accepted.proof.original.parent_run.first.node_id
-        ):
-            raise DomainError("CONFLICT", "Stable ledger operation has different evidence", 409)
-        return StableWindowRecordingReceipt(
-            request=request,
-            acceptance=accepted.receipt(duplicate=False),
-            derivation_result_fingerprint=expected.expected_result_fingerprint,
-            session_index=expected.session_index,
-            ledger=operation.receipt.model_copy(update={"duplicate": False}),
-            duplicate=duplicate,
-        )
 
     def accept_and_record(
         self, context: UsagePostingContext, request: AcceptStableWindow
@@ -186,15 +118,17 @@ class StableWindowRecordingService:
                 if prior is not None:
                     # Historical success remains historical after pause, source retention
                     # or a reversal. This path never creates or resurrects a measurement.
-                    return self._receipt(session, accepted, request, prior, duplicate=True)
+                    return StableWindowRecordingRepository().receipt(
+                        session, accepted, request, prior, duplicate=True
+                    )
                 self._configuration(accepted)
                 self.acceptances.verified_in_transaction(session, request.key)
                 self.derivations.record_in_transaction(
                     session,
                     UsageDerivationContext(request_id=context.request_id),
-                    self._derivation(accepted, request),
+                    StableWindowRecordingRepository.derivation_request(accepted, request),
                 )
-                posting = self._posting(session, accepted, request)
+                posting = StableWindowRecordingRepository().posting(session, accepted, request)
                 self.ledger.post_in_transaction(session, context, posting)
                 if self.acceptances.verified_in_transaction(session, request.key) != accepted:
                     raise DomainError(
@@ -208,7 +142,9 @@ class StableWindowRecordingService:
                 result = repo.operation(request.operation_id)
                 if result is None:
                     raise DomainError("DEPENDENCY_UNAVAILABLE", "Stable recording unavailable", 503)
-                return self._receipt(session, accepted, request, result, duplicate=False)
+                return StableWindowRecordingRepository().receipt(
+                    session, accepted, request, result, duplicate=False
+                )
         except DBAPIError as error:
             raise self._failure(error) from None
         except (ValueError, TypeError, KeyError, RecursionError):

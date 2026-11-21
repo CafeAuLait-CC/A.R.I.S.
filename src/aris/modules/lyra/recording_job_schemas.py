@@ -8,18 +8,21 @@ from pydantic import AwareDatetime, Field, TypeAdapter, field_validator, model_v
 
 from aris.modules.lyra.partition_recording_schemas import PartitionRecordingRequest
 from aris.modules.lyra.run_recording_schemas import ClosedRunRecordingRequest
+from aris.modules.lyra.stable_window_recording_schemas import StableWindowJobRequest
 from aris.modules.lyra.trace_consumer_schemas import canonical_trace, trace_fingerprint
 from aris.modules.lyra.usage_intervals import IntervalContract
 
 MAX_RECORDING_JOB_INPUT_BYTES = 16384
 JobState = Literal["queued", "running", "completed", "blocked", "failed"]
-RecordingRequest = ClosedRunRecordingRequest | PartitionRecordingRequest
+RecordingRequest = ClosedRunRecordingRequest | PartitionRecordingRequest | StableWindowJobRequest
 recording_request_adapter: TypeAdapter[RecordingRequest] = TypeAdapter(RecordingRequest)
 
 
 class RecordingWorkSelection(IntervalContract):
     recording_configuration_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
     partition_method_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    stable_method_fingerprint: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    include_closed_runs: bool = Field(default=True, strict=True)
 
 
 class RecordingJobLimits(IntervalContract):
@@ -120,6 +123,8 @@ def recording_job_fingerprint(request: RecordingRequest) -> str:
 
 
 def recording_source_cutoff(request: RecordingRequest) -> datetime:
+    if isinstance(request, StableWindowJobRequest):
+        return request.source_cutoff
     return (
         request.reference.source_cutoff
         if isinstance(request, ClosedRunRecordingRequest)
