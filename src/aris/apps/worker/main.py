@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 
 from aris.apps.composition.lyra import load_lyra_config
 from aris.apps.composition.lyra_coverage import load_lyra_coverage_config
+from aris.apps.composition.lyra_prefix import load_lyra_prefix_config
 from aris.apps.composition.m2 import (
     M2RuntimeConfig,
     WorkerMode,
@@ -17,6 +18,7 @@ from aris.apps.composition.m2 import (
 )
 from aris.apps.worker.lyra import run_lyra_worker
 from aris.apps.worker.lyra_coverage import run_lyra_coverage_worker
+from aris.apps.worker.lyra_prefix import run_lyra_prefix_worker
 from aris.core.config import Settings
 from aris.core.db import build_engine, check_database, session_factory
 from aris.core.events import OutboxEntry
@@ -91,6 +93,14 @@ def main() -> None:
     )
     parser.add_argument("--m2-config", type=Path)
     parser.add_argument(
+        "--lyra-prefix-config", type=Path, help="Private opt-in finite source-prefix maintenance"
+    )
+    parser.add_argument(
+        "--prefix-status",
+        action="store_true",
+        help="Read the source-prefix boundary without advancing",
+    )
+    parser.add_argument(
         "--lyra-coverage-config", type=Path, help="Private opt-in single-window Lyra coverage build"
     )
     parser.add_argument(
@@ -103,6 +113,24 @@ def main() -> None:
         "--slack", action="store_true", help="Run durable Slack Home publishing jobs"
     )
     args = parser.parse_args()
+    if args.prefix_status and args.lyra_prefix_config is None:
+        parser.error("--prefix-status requires --lyra-prefix-config")
+    if args.lyra_prefix_config is not None:
+        if (
+            args.lyra_config is not None
+            or args.lyra_coverage_config is not None
+            or args.coverage_status
+            or args.slack
+            or args.m2_config is not None
+            or args.m2_mode is not None
+        ):
+            parser.error("--lyra-prefix-config selects a separate worker")
+        try:
+            prefix = load_lyra_prefix_config(args.lyra_prefix_config)
+        except (ValueError, OSError):
+            parser.error("Prefix configuration must be a valid private regular JSON file")
+        run_lyra_prefix_worker(prefix, args.once, status_only=args.prefix_status)
+        return
     if args.coverage_status and args.lyra_coverage_config is None:
         parser.error("--coverage-status requires --lyra-coverage-config")
     if args.lyra_coverage_config is not None:

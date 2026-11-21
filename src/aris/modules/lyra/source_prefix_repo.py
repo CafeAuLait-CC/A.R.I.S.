@@ -79,6 +79,23 @@ class SourcePrefixRepository:
             raise DomainError("CONFLICT", "Source prefix may affect the selected window", 409)
         return value
 
+    def latest(
+        self, config: UsageTraceConfiguration, through_revision: int
+    ) -> StoredSourcePrefix | None:
+        id = self.session.scalar(
+            select(SourcePrefixCheckpointRow.id)
+            .where(
+                SourcePrefixCheckpointRow.consumer_id == config.consumer_id,
+                SourcePrefixCheckpointRow.configuration_fingerprint == config.fingerprint,
+                SourcePrefixCheckpointRow.through_revision <= through_revision,
+            )
+            .order_by(
+                SourcePrefixCheckpointRow.through_revision.desc(), SourcePrefixCheckpointRow.id
+            )
+            .limit(1)
+        )
+        return self.get(UUID(id)) if id is not None else None
+
     def eligible(
         self, config: UsageTraceConfiguration, start_at: datetime, through_revision: int
     ) -> StoredSourcePrefix | None:

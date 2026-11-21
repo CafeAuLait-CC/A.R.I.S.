@@ -17,6 +17,7 @@ from aris.core.events import DomainEvent, OutboxEntry
 from aris.modules.lyra.source_prefix_repo import SourcePrefixRepository
 from aris.modules.lyra.source_prefix_schemas import (
     AdvanceSourcePrefix,
+    SourcePrefixStatus,
     StoredSourcePrefix,
     source_prefix_fingerprint,
 )
@@ -68,6 +69,34 @@ class SourcePrefixService:
                 if value is None:
                     raise DomainError("NOT_FOUND", "Source prefix checkpoint not found", 404)
                 return value
+        except DBAPIError as error:
+            raise self._failure(error) from None
+
+    def status(
+        self, configuration: UsageTraceConfiguration, before: datetime
+    ) -> SourcePrefixStatus:
+        config = UsageTraceConfiguration.model_validate(configuration.model_dump(mode="json"))
+        if before.tzinfo is None or before.utcoffset() is None:
+            raise ValueError("source prefix status requires an aware boundary")
+        try:
+            with self.sessions() as db:
+                if db.get_bind().dialect.name == "postgresql":
+                    db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+                elif db.get_bind().dialect.name == "sqlite":
+                    db.execute(text("BEGIN"))
+                transaction_budget(db, 100, 1000, min(self.timeout_ms, 3000))
+                revision = UsageTraceRepository(db).position(config).revision
+                repo = SourcePrefixRepository(db)
+                latest = repo.latest(config, revision)
+                eligible = repo.eligible(config, before, revision)
+                return SourcePrefixStatus(
+                    configuration_fingerprint=config.fingerprint,
+                    before=before,
+                    source_revision=revision,
+                    latest=latest.reference() if latest else None,
+                    eligible=eligible.reference() if eligible else None,
+                    generated_at=self._now(),
+                )
         except DBAPIError as error:
             raise self._failure(error) from None
 

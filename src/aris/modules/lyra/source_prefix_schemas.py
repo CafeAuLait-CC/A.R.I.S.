@@ -150,3 +150,28 @@ def prefix_excludes_window(
         and prefix.created_at <= read_at
         and (prefix.max_observed_at is None or prefix.max_observed_at < start_at)
     )
+
+
+class SourcePrefixStatus(IntervalContract):
+    configuration_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    before: AwareDatetime
+    source_revision: int = Field(ge=0, le=9223372036854775807, strict=True)
+    latest: SourcePrefixReference | None = None
+    eligible: SourcePrefixReference | None = None
+    generated_at: AwareDatetime
+
+    @model_validator(mode="after")
+    def one_scope(self) -> "SourcePrefixStatus":
+        for ref in (self.latest, self.eligible):
+            if ref is not None and (
+                ref.configuration_fingerprint != self.configuration_fingerprint
+                or ref.through_revision > self.source_revision
+                or ref.created_at > self.generated_at
+            ):
+                raise ValueError("source prefix status binding differs")
+        if self.eligible is not None and (
+            self.eligible.max_observed_at is not None
+            and self.eligible.max_observed_at >= self.before
+        ):
+            raise ValueError("source prefix status cannot offer a relevant prefix")
+        return self
