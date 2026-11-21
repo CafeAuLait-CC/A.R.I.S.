@@ -23,6 +23,11 @@ MAX_COVERAGE_CELLS = 32768
 MICROSECOND = timedelta(microseconds=1)
 
 
+def coverage_identity_key(run: ResidencyRun) -> tuple[str, str, int, str]:
+    """A growing run can have multiple immutable, separately assessed parent prefixes."""
+    return run.id, run.rule_fingerprint, run.intervals, run.evidence_fingerprint
+
+
 class ProcessingCoverageConfiguration(IntervalContract):
     method: Literal["strict_sampled_residency_edges"] = "strict_sampled_residency_edges"
     trace: UsageTraceConfiguration
@@ -136,7 +141,10 @@ class ProcessingCoverageCell(IntervalContract):
             or recorded != (self.recording_index is not None)
             or (recorded and (self.identity_index is None or self.run_id is None))
             or (self.state in {"recorded", "observed_idle"} and self.previous is None)
-            or (self.state == "recorded" and self.reason != "COMMITTED_CLOSED_RECORDING")
+            or (
+                self.state == "recorded"
+                and self.reason not in {"COMMITTED_CLOSED_RECORDING", "COMMITTED_STABLE_RECORDING"}
+            )
             or (self.state == "observed_idle" and self.reason != "NO_COMPUTE_APPS_AT_ENDPOINTS")
         ):
             raise ValueError("coverage cell cannot claim stronger recording authority")
@@ -181,7 +189,8 @@ class ProcessingCoverageAnalysis(IntervalContract):
                 (value.agent_id, value.node_id) != (config.trace.agent_id, config.trace.node_id)
                 for value in self.observations
             )
-            or len({value.run.id for value in self.identities}) != len(self.identities)
+            or len({coverage_identity_key(value.run) for value in self.identities})
+            != len(self.identities)
         ):
             raise ValueError("coverage configuration or original source binding differs")
         position = {gpu: request.start_at for gpu in config.gpu_uuids}
@@ -224,6 +233,10 @@ class ProcessingCoverageAnalysis(IntervalContract):
                     cell.recording_index >= len(self.recordings)
                     or self.recordings[cell.recording_index].run_id != cell.run_id
                     or self.identities[cell.identity_index].identity.user_id != cell.owner_id
+                    or not self.identities[cell.identity_index].run.first.compute_observed_at
+                    <= cell.start_at
+                    < cell.end_at
+                    <= self.identities[cell.identity_index].run.last.compute_observed_at
                 ):
                     raise ValueError("recorded coverage lacks its committed identity or recording")
         if (

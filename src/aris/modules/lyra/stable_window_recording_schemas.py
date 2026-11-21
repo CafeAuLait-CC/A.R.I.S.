@@ -115,3 +115,33 @@ class StableWindowJobRequest(RecordAcceptedStableWindow):
             expected_method_fingerprint=value.proof.method.fingerprint,
             source_cutoff=value.request.window.reference.source_cutoff,
         )
+
+
+class StableWindowRecordingEvidence(IntervalContract):
+    """An explicit view of immutable components, not a second persisted receipt."""
+
+    acceptance: StoredAcceptedStableWindow = Field(repr=False)
+    recording: StableWindowRecordingReceipt
+
+    @model_validator(mode="after")
+    def same_first_acceptance(self) -> "StableWindowRecordingEvidence":
+        if (
+            self.recording.acceptance != self.acceptance.receipt(duplicate=False)
+            or self.recording.duplicate
+        ):
+            raise ValueError(
+                "stable recording evidence differs from its immutable first acceptance"
+            )
+        return self
+
+    @property
+    def ledger(self) -> UsageLedgerReceipt:
+        return self.recording.ledger
+
+    @property
+    def fingerprint(self) -> str:
+        return self.recording.fingerprint
+
+    @property
+    def created_at(self) -> datetime:
+        return self.recording.ledger.created_at

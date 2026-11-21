@@ -1,5 +1,9 @@
 """Reconstruct immutable stable receipts independently of active recording handlers."""
 
+from datetime import datetime
+from uuid import UUID
+
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from aris.core.contracts import DomainError
@@ -7,15 +11,102 @@ from aris.modules.lyra.derivation_repo import UsageDerivationRepository
 from aris.modules.lyra.derivation_schemas import UsageDerivationRequest
 from aris.modules.lyra.ledger_repo import UsageLedgerRepository
 from aris.modules.lyra.ledger_schemas import StoredUsageOperation, UsagePostingRequest
+from aris.modules.lyra.models import (
+    StableRecordingLinkRow,
+    StableWindowAcceptanceRow,
+    UsageLedgerOperationRow,
+)
 from aris.modules.lyra.stable_window_acceptance_repo import StableWindowAcceptanceRepository
 from aris.modules.lyra.stable_window_acceptance_schemas import StoredAcceptedStableWindow
 from aris.modules.lyra.stable_window_recording_schemas import (
     RecordAcceptedStableWindow,
+    StableWindowRecordingEvidence,
     StableWindowRecordingReceipt,
 )
 
 
 class StableWindowRecordingRepository:
+    @staticmethod
+    def link(session: Session, receipt: StableWindowRecordingReceipt) -> None:
+        session.add(
+            StableRecordingLinkRow(
+                operation_id=str(receipt.id),
+                window_key=receipt.request.key,
+                entry_id=str(receipt.ledger.entries[0]),
+            )
+        )
+        session.flush()
+
+    def evidence_for_operation(
+        self, session: Session, operation_id: UUID
+    ) -> StableWindowRecordingEvidence | None:
+        row = (
+            session.execute(
+                select(*StableRecordingLinkRow.__table__.c).where(
+                    StableRecordingLinkRow.operation_id == str(operation_id)
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if row is None:
+            return None
+        accepted = StableWindowAcceptanceRepository(session).get(row["window_key"])
+        if accepted is None:
+            raise DomainError(
+                "DEPENDENCY_UNAVAILABLE", "Stable link first acceptance is unavailable", 503
+            )
+        request = RecordAcceptedStableWindow(
+            key=accepted.proof.window.key, expected_acceptance_fingerprint=accepted.fingerprint
+        )
+        receipt = self.get(session, request)
+        if (
+            receipt is None
+            or request.operation_id != operation_id
+            or str(receipt.ledger.entries[0]) != row["entry_id"]
+        ):
+            raise DomainError("DEPENDENCY_UNAVAILABLE", "Stable recording link differs", 503)
+        return StableWindowRecordingEvidence(
+            acceptance=accepted, recording=receipt.model_copy(update={"duplicate": False})
+        )
+
+    def for_entry(
+        self,
+        session: Session,
+        *,
+        node_id: str,
+        run_id: str,
+        entry_id: UUID,
+        trace_fingerprint: str,
+        recording_fingerprint: str,
+        read_at: datetime,
+    ) -> StableWindowRecordingEvidence | None:
+        operation_id = session.scalar(
+            select(StableRecordingLinkRow.operation_id)
+            .join(
+                StableWindowAcceptanceRow,
+                StableWindowAcceptanceRow.key == StableRecordingLinkRow.window_key,
+            )
+            .join(
+                UsageLedgerOperationRow,
+                UsageLedgerOperationRow.id == StableRecordingLinkRow.operation_id,
+            )
+            .where(
+                StableRecordingLinkRow.entry_id == str(entry_id),
+                StableWindowAcceptanceRow.node_id == node_id,
+                StableWindowAcceptanceRow.run_id == run_id,
+                StableWindowAcceptanceRow.configuration_fingerprint == recording_fingerprint,
+                StableWindowAcceptanceRow.canonical_record.contains(
+                    '"expected_trace_configuration_fingerprint":"' + trace_fingerprint + '"',
+                    autoescape=True,
+                ),
+                UsageLedgerOperationRow.created_at <= read_at,
+            )
+            .order_by(UsageLedgerOperationRow.created_at, StableRecordingLinkRow.operation_id)
+            .limit(1)
+        )
+        return self.evidence_for_operation(session, UUID(operation_id)) if operation_id else None
+
     @staticmethod
     def derivation_request(
         accepted: StoredAcceptedStableWindow, request: RecordAcceptedStableWindow

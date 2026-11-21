@@ -17,6 +17,7 @@ from aris.core.events import DomainEvent, OutboxEntry
 from aris.modules.lyra.coverage_inputs import (
     coverage_parents,
     find_coverage_recordings,
+    get_coverage_recording,
     resolve_coverage_identities,
 )
 from aris.modules.lyra.coverage_replay import CoverageReplay, replay_coverage
@@ -31,7 +32,6 @@ from aris.modules.lyra.coverage_schemas import (
 )
 from aris.modules.lyra.ledger_repo import UsageLedgerRepository
 from aris.modules.lyra.processing_coverage import CoverageRecording, processing_coverage
-from aris.modules.lyra.run_recording_repo import ClosedRunRecordingRepository
 from aris.modules.lyra.trace_attestation_schemas import StoredTraceAttestation
 from aris.modules.lyra.trace_attestation_service import TraceAttestationService
 from aris.modules.lyra.trace_consumer_repo import UsageTraceRepository
@@ -138,10 +138,9 @@ class ProcessingCoverageService:
                 read_at,
             )
         else:
-            found = []
-            repo = ClosedRunRecordingRepository(session)
+            found: list[CoverageRecording] = []
             for reference in previous.recordings:
-                value = repo.get_any(reference.id)
+                value = get_coverage_recording(session, reference.id)
                 if (
                     value is None
                     or value.fingerprint != reference.fingerprint

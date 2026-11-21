@@ -1,6 +1,7 @@
 """Resolve bounded closed-receipt and historical identity inputs for source coverage."""
 
 from datetime import datetime
+from uuid import UUID
 
 from sqlalchemy.orm import Session
 
@@ -8,16 +9,28 @@ from aris.core.access.history_schemas import HistoricalNodeUserBatch, Historical
 from aris.core.access.history_service import NodeUserHistoryService
 from aris.core.contracts import DomainError
 from aris.modules.lyra.coverage_replay import CoverageReplay
-from aris.modules.lyra.coverage_schemas import CoverageIdentity, ProcessingCoverageConfiguration
+from aris.modules.lyra.coverage_schemas import (
+    CoverageIdentity,
+    ProcessingCoverageConfiguration,
+    coverage_identity_key,
+)
 from aris.modules.lyra.ledger_schemas import UsageLedgerEntry, UsageLedgerHead
 from aris.modules.lyra.processing_coverage import (
     CoverageRecording,
+    recording_id,
     recording_parent,
     recording_reference,
 )
 from aris.modules.lyra.recorded_usage import _active_prefix
 from aris.modules.lyra.residency_state import ResidencyRun
 from aris.modules.lyra.run_recording_repo import ClosedRunRecordingRepository
+from aris.modules.lyra.stable_window_recording_repo import StableWindowRecordingRepository
+from aris.modules.lyra.stable_window_recording_schemas import StableWindowRecordingEvidence
+
+
+def get_coverage_recording(session: Session, id: UUID) -> CoverageRecording | None:
+    stable = StableWindowRecordingRepository().evidence_for_operation(session, id)
+    return stable if stable is not None else ClosedRunRecordingRepository(session).get_any(id)
 
 
 def coverage_parents(
@@ -34,6 +47,7 @@ def coverage_parents(
             previous = runs.get(edge.run.id)
             if previous is None or edge.run.intervals > previous.intervals:
                 runs[edge.run.id] = edge.run
+    stable_parents: dict[tuple[str, str, int, str], ResidencyRun] = {}
     for recording in recordings:
         parent = recording_parent(recording)
         local = runs.get(parent.id)
@@ -47,15 +61,23 @@ def coverage_parents(
             raise DomainError("CONFLICT", "Coverage receipt does not bind the captured ledger", 409)
         if (
             parent.first != local.first
-            or parent.last.seq < local.last.seq
-            or parent.intervals < local.intervals
+            or parent.rule_fingerprint != local.rule_fingerprint
+            or (
+                not isinstance(recording, StableWindowRecordingEvidence)
+                and (parent.last.seq < local.last.seq or parent.intervals < local.intervals)
+            )
             or (parent.intervals == local.intervals and parent != local)
         ):
             raise DomainError("CONFLICT", "Coverage closed parent differs from its source run", 409)
-        runs[parent.id] = parent
-    if len(runs) > 128:
+        if isinstance(recording, StableWindowRecordingEvidence):
+            stable_parents[coverage_identity_key(parent)] = parent
+        else:
+            runs[parent.id] = parent
+    parents = {coverage_identity_key(run): run for run in runs.values()}
+    parents.update(stable_parents)
+    if len(parents) > 128:
         raise DomainError("USAGE_REPORT_TOO_LARGE", "Split the coverage time window", 503)
-    return tuple(runs[key] for key in sorted(runs))
+    return tuple(parents[key] for key in sorted(parents))
 
 
 def find_coverage_recordings(
@@ -85,7 +107,8 @@ def find_coverage_recordings(
             attempts += 1
             if attempts > 128:
                 raise DomainError("USAGE_REPORT_TOO_LARGE", "Split the coverage time window", 503)
-            value = repo.for_entry(
+            value: CoverageRecording | None = StableWindowRecordingRepository().for_entry(
+                session,
                 node_id=head.node_id,
                 run_id=run.id,
                 entry_id=entry.id,
@@ -93,10 +116,19 @@ def find_coverage_recordings(
                 recording_fingerprint=configuration.recording.fingerprint,
                 read_at=read_at,
             )
+            if value is None:
+                value = repo.for_entry(
+                    node_id=head.node_id,
+                    run_id=run.id,
+                    entry_id=entry.id,
+                    trace_fingerprint=configuration.trace.fingerprint,
+                    recording_fingerprint=configuration.recording.fingerprint,
+                    read_at=read_at,
+                )
             if value is not None:
                 if recording_reference(value, entry, configuration, entries) is None:
                     raise DomainError("CONFLICT", "Stored closing receipt binding differs", 409)
-                result[str(value.request.id)] = value
+                result[str(recording_id(value))] = value
     return tuple(result[key] for key in sorted(result))
 
 

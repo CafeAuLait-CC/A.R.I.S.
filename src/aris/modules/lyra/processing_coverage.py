@@ -11,6 +11,7 @@ from aris.modules.lyra.coverage_schemas import (
     ProcessingCoverageCell,
     ProcessingCoverageConfiguration,
     ProcessingCoverageRequest,
+    coverage_identity_key,
     processing_coverage_fingerprint,
 )
 from aris.modules.lyra.ledger_schemas import (
@@ -22,14 +23,25 @@ from aris.modules.lyra.partition_recording_schemas import StoredPartitionRecordi
 from aris.modules.lyra.recorded_usage import _active_prefix
 from aris.modules.lyra.residency_state import ResidencyRun
 from aris.modules.lyra.run_recording_schemas import StoredClosedRunRecording
+from aris.modules.lyra.stable_window_recording_schemas import StableWindowRecordingEvidence
 from aris.modules.lyra.trace_attestation_schemas import StoredTraceAttestation
 
-type CoverageRecording = StoredClosedRunRecording | StoredPartitionRecording
+type CoverageRecording = (
+    StoredClosedRunRecording | StoredPartitionRecording | StableWindowRecordingEvidence
+)
 
 
 def recording_parent(value: CoverageRecording) -> ResidencyRun:
+    if isinstance(value, StableWindowRecordingEvidence):
+        return value.acceptance.proof.original.parent_run
     return (
         value.proof.run if isinstance(value, StoredClosedRunRecording) else value.proof.parent_run
+    )
+
+
+def recording_id(value: CoverageRecording) -> UUID:
+    return (
+        value.recording.id if isinstance(value, StableWindowRecordingEvidence) else value.request.id
     )
 
 
@@ -40,16 +52,32 @@ def recording_reference(
     head_entries: tuple[UsageLedgerEntry, ...],
 ) -> CoverageRecordingReference | None:
     parent = recording_parent(value)
-    trace_fp = (
-        value.proof.configuration_fingerprint
-        if isinstance(value, StoredClosedRunRecording)
-        else value.request.partition.expected_trace_configuration_fingerprint
-    )
+    if isinstance(value, StableWindowRecordingEvidence):
+        trace_fp = value.acceptance.request.window.expected_trace_configuration_fingerprint
+        recording_fp = value.acceptance.configuration.fingerprint
+        candidate = value.acceptance.proof.original.candidate
+        first, last = candidate.evidence[0].previous, candidate.evidence[-1].current
+        proof_fp = value.acceptance.proof.fingerprint
+    else:
+        recording_fp = value.request.expected_recording_configuration_fingerprint
+        proof_fp = value.proof.fingerprint
+        first, last = (
+            (parent.first, parent.last)
+            if isinstance(value, StoredClosedRunRecording)
+            else (
+                value.proof.candidate.evidence[0].previous,
+                value.proof.candidate.evidence[-1].current,
+            )
+        )
+        trace_fp = (
+            value.proof.configuration_fingerprint
+            if isinstance(value, StoredClosedRunRecording)
+            else value.request.partition.expected_trace_configuration_fingerprint
+        )
     receipt = value.ledger
     if (
         trace_fp != config.trace.fingerprint
-        or value.request.expected_recording_configuration_fingerprint
-        != config.recording.fingerprint
+        or recording_fp != config.recording.fingerprint
         or (parent.first.agent_id, parent.first.node_id)
         != (config.trace.agent_id, config.trace.node_id)
         or parent.rule_fingerprint != config.recording.timing_fingerprint
@@ -61,14 +89,6 @@ def recording_reference(
     ):
         return None
     measured = entry.details.measurement
-    first, last = (
-        (parent.first, parent.last)
-        if isinstance(value, StoredClosedRunRecording)
-        else (
-            value.proof.candidate.evidence[0].previous,
-            value.proof.candidate.evidence[-1].current,
-        )
-    )
     if (
         measured.gpu_uuid,
         measured.start_at,
@@ -84,10 +104,10 @@ def recording_reference(
     ):
         return None
     return CoverageRecordingReference(
-        id=value.request.id,
+        id=recording_id(value),
         fingerprint=value.fingerprint,
         run_id=parent.id,
-        proof_fingerprint=value.proof.fingerprint,
+        proof_fingerprint=proof_fp,
         entry_id=entry.id,
         entry_fingerprint=entry.fingerprint,
     )
@@ -105,9 +125,18 @@ def processing_coverage(
     read_at: datetime,
 ) -> ProcessingCoverageAnalysis:
     active = _active_prefix(request.ledger, entries, read_at)
-    by_identity = {value.run.id: index for index, value in enumerate(identities)}
+    by_identity = {
+        coverage_identity_key(value.run): index for index, value in enumerate(identities)
+    }
+    latest_identity: dict[str, int] = {}
+    for index, value in enumerate(identities):
+        previous = latest_identity.get(value.run.id)
+        if previous is None or identities[previous].run.intervals < value.run.intervals:
+            latest_identity[value.run.id] = index
     refs: list[CoverageRecordingReference] = []
     by_recording: dict[tuple[str, UUID], int] = {}
+    recording_identities: dict[int, int] = {}
+    stable_references: set[int] = set()
     for recording in recordings:
         for entry in active:
             if entry.id not in recording.ledger.entries:
@@ -115,6 +144,11 @@ def processing_coverage(
             ref = recording_reference(recording, entry, configuration, entries)
             if ref is not None and (ref.run_id, entry.id) not in by_recording:
                 by_recording[(ref.run_id, entry.id)] = len(refs)
+                parent_index = by_identity.get(coverage_identity_key(recording_parent(recording)))
+                if parent_index is not None:
+                    recording_identities[len(refs)] = parent_index
+                if isinstance(recording, StableWindowRecordingEvidence):
+                    stable_references.add(len(refs))
                 refs.append(ref)
     cells = []
     for gpu_uuid in configuration.gpu_uuids:
@@ -175,7 +209,7 @@ def processing_coverage(
             edge: CoverageEdge | None = candidates[0] if len(candidates) == 1 else None
             owner = None
             recording_index = None
-            identity_index = by_identity.get(edge.run.id) if edge and edge.run else None
+            identity_index = latest_identity.get(edge.run.id) if edge and edge.run else None
             if start < configuration.recording.recording_start_at:
                 reason = "BEFORE_RECORDING_START"
             elif any(value.start_at < end and value.end_at > start for value in replay.hazards):
@@ -194,6 +228,13 @@ def processing_coverage(
                     else:
                         state, reason = "observed_idle", "NO_COMPUTE_APPS_AT_ENDPOINTS"
                 elif edge.gpu.state == "stable_owner":
+                    reference_index = (
+                        by_recording.get((edge.run.id, overlaps[0].id))
+                        if edge.run and len(overlaps) == 1
+                        else None
+                    )
+                    if reference_index is not None:
+                        identity_index = recording_identities.get(reference_index)
                     identity = (
                         identities[identity_index].identity if identity_index is not None else None
                     )
@@ -211,9 +252,6 @@ def processing_coverage(
                         entry = overlaps[0]
                         measurement = entry.details.measurement
                         assert isinstance(entry.details, PostedMeasurement)
-                        reference_index = (
-                            by_recording.get((edge.run.id, entry.id)) if edge.run else None
-                        )
                         if (
                             measurement.owner_id != identity.user_id
                             or measurement.model != edge.gpu.model
@@ -224,7 +262,14 @@ def processing_coverage(
                         elif reference_index is None:
                             reason = "CLOSED_RECORDING_NOT_VERIFIED"
                         else:
-                            state, reason = "recorded", "COMMITTED_CLOSED_RECORDING"
+                            state, reason = (
+                                "recorded",
+                                (
+                                    "COMMITTED_STABLE_RECORDING"
+                                    if reference_index in stable_references
+                                    else "COMMITTED_CLOSED_RECORDING"
+                                ),
+                            )
                             owner, recording_index = identity.user_id, reference_index
             cells.append(
                 ProcessingCoverageCell(

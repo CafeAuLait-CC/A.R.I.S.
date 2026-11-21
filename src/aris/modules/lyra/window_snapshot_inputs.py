@@ -8,7 +8,11 @@ from sqlalchemy.orm import Session
 from aris.core.access.history_schemas import HistoricalNodeUserBatch, HistoricalNodeUserQuery
 from aris.core.access.history_service import NodeUserHistoryService
 from aris.core.contracts import DomainError
-from aris.modules.lyra.coverage_schemas import CoverageIdentity, StoredProcessingCoverage
+from aris.modules.lyra.coverage_schemas import (
+    CoverageIdentity,
+    StoredProcessingCoverage,
+    coverage_identity_key,
+)
 from aris.modules.lyra.coverage_service import ProcessingCoverageService
 from aris.modules.lyra.residency_state import ResidencyRun
 from aris.modules.lyra.window_snapshot_schemas import WindowManifestSelection
@@ -43,16 +47,17 @@ def window_identities(
 ) -> tuple[CoverageIdentity, ...]:
     if revision is None:
         return ()
-    parents: dict[str, ResidencyRun] = {}
+    parents: dict[tuple[str, str, int, str], ResidencyRun] = {}
     for manifest in manifests:
         for cell in manifest.analysis.cells:
             if cell.state != "recorded":
                 continue
             assert cell.identity_index is not None
             parent = manifest.analysis.identities[cell.identity_index].run
-            if parent.id in parents and parents[parent.id] != parent:
-                raise DomainError("CONFLICT", "Window sources have different closed parents", 409)
-            parents[parent.id] = parent
+            key = coverage_identity_key(parent)
+            if key in parents and parents[key] != parent:
+                raise DomainError("CONFLICT", "Window parent evidence differs", 409)
+            parents[key] = parent
     ordered = [parents[key] for key in sorted(parents)]
     result: list[CoverageIdentity] = []
     for offset in range(0, len(ordered), 128):

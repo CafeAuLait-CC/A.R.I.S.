@@ -142,9 +142,11 @@ class StableWindowRecordingService:
                 result = repo.operation(request.operation_id)
                 if result is None:
                     raise DomainError("DEPENDENCY_UNAVAILABLE", "Stable recording unavailable", 503)
-                return StableWindowRecordingRepository().receipt(
+                receipt = StableWindowRecordingRepository().receipt(
                     session, accepted, request, result, duplicate=False
                 )
+                StableWindowRecordingRepository.link(session, receipt)
+                return receipt
         except DBAPIError as error:
             raise self._failure(error) from None
         except (ValueError, TypeError, KeyError, RecursionError):

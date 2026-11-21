@@ -11,6 +11,7 @@ from aris.modules.lyra.coverage_schemas import (
     CoverageIdentity,
     ProcessingCoverageConfiguration,
     StoredProcessingCoverage,
+    coverage_identity_key,
 )
 from aris.modules.lyra.ledger_schemas import ReversedMeasurement, UsageLedgerEntry, UsageLedgerHead
 from aris.modules.lyra.recorded_usage import _active_prefix
@@ -126,7 +127,7 @@ def _candidates(
             }
         )
     )
-    by_identity = {value.run.id: value for value in identities}
+    by_identity = {coverage_identity_key(value.run): value for value in identities}
     for value in identities:
         CoverageIdentity.model_validate(value.model_dump(mode="json"))
     if len(by_identity) != len(identities) or any(
@@ -156,7 +157,7 @@ def _candidates(
                 entry_id = reference.entry_id
                 entry = by_entry.get(entry_id)
                 parent = analysis.identities[cell.identity_index].run
-                identity = by_identity.get(parent.id)
+                identity = by_identity.get(coverage_identity_key(parent))
                 if entry is None:
                     state, reason = "unknown", "REVERSED_AWAITING_REVIEW"
                 elif (

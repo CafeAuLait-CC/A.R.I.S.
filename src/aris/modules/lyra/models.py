@@ -20,6 +20,18 @@ from sqlalchemy.orm import Mapped, mapped_column
 from aris.core.db import Base
 
 
+class StableRecordingLinkRow(Base):
+    __tablename__ = "usage_stable_recording_links"
+    __table_args__ = (Index("ix_stable_recording_link_entry", "entry_id", "operation_id"),)
+    operation_id: Mapped[str] = mapped_column(
+        ForeignKey("usage_ledger_operations.id"), primary_key=True
+    )
+    window_key: Mapped[str] = mapped_column(
+        ForeignKey("usage_stable_window_acceptances.key"), unique=True
+    )
+    entry_id: Mapped[str] = mapped_column(ForeignKey("usage_ledger_entries.id"))
+
+
 class StableWindowPlanRow(Base):
     __tablename__ = "usage_stable_window_plans"
     __table_args__ = (
