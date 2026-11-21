@@ -129,20 +129,49 @@ def build_router(service: UsageHistorySurface, paths: BrowserPaths = INTERNAL_PA
 
     @router.post(paths.usage + "/snapshots/query")
     @router.post(paths.usage + "/snapshots/read")
-    async def snapshots(request: Request) -> JSONResponse:
+    async def snapshots(request: Request) -> Response:
         if request.query_params:
             raise DomainError(
                 "VALIDATION_ERROR", "Unexpected saved-statistics query parameters", 422
             )
+        route = request.url.path.rsplit("/", 1)[-1]
         selection = (
             await bounded_input(request, SavedUsageRead)
-            if request.url.path.endswith("/read")
+            if route != "query"
             else await bounded_input(request, SavedUsageQuery)
         )
-        result = await run_in_threadpool(
-            saved_usage, service, authorization(request), request.state.request_id, selection
+        accept = request.headers.get("accept", "application/json").split(";", 1)[0].strip()
+        output: Literal["json", "html", "csv"] = (
+            "html"
+            if route == "read" and accept == "text/html"
+            else "csv"
+            if route == "read" and accept == "text/csv"
+            else "json"
         )
-        return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
+        result = await run_in_threadpool(
+            saved_usage,
+            service,
+            authorization(request),
+            request.state.request_id,
+            selection,
+            output=output,
+        )
+        if isinstance(result, bytes):
+            extension = "html" if output == "html" else "csv"
+            return Response(
+                result,
+                media_type="text/html; charset=utf-8"
+                if output == "html"
+                else "text/csv; charset=utf-8",
+                headers={
+                    **PAGE_HEADERS,
+                    "Content-Disposition": f'attachment; filename="aris-saved-usage.{extension}"',
+                    "Vary": "Accept",
+                },
+            )
+        return JSONResponse(
+            result.model_dump(mode="json"), headers={**PAGE_HEADERS, "Vary": "Accept"}
+        )
 
     @router.post(paths.usage + "/session")
     async def session(request: Request) -> JSONResponse:

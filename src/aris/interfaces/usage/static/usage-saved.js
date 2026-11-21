@@ -1,6 +1,6 @@
 "use strict";
 window.createSavedUsage = function ({el, request, lock, message, isBusy, selection, timezone}) {
-  let active = false, cursor = null, chosen = null, selectedQuery = null;
+  let active = false, cursor = null, chosen = null, selectedQuery = null, chosenRead = null, version = 0;
   const names = {complete:'完整', partial:'部分覆盖', unknown:'未知'};
   const states = {recorded:'已记录', observed_idle:'空闲', unknown:'未知', uncovered:'未覆盖'};
   const hours = value => (value / 3600000000).toLocaleString('zh-CN',{maximumFractionDigits:3});
@@ -8,7 +8,7 @@ window.createSavedUsage = function ({el, request, lock, message, isBusy, selecti
   const node = (tag, value, className) => {const item=document.createElement(tag);item.textContent=value;if(className)item.className=className;return item;};
   function format(value) {return new Intl.DateTimeFormat('zh-CN',{timeZone:timezone(),month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(new Date(value));}
   function badge(status) {return node('span',names[status],`coverage-badge ${status}`);}
-  function reset() {cursor=null;chosen=null;selectedQuery=null;el('saved-list').replaceChildren();el('saved-cells').replaceChildren();el('saved-timeline').replaceChildren();el('saved-detail').hidden=true;el('saved-more').hidden=true;el('saved-empty').hidden=true;}
+  function reset() {version++;cursor=null;chosen=null;chosenRead=null;selectedQuery=null;el('saved-list').replaceChildren();el('saved-cells').replaceChildren();el('saved-timeline').replaceChildren();el('saved-detail').hidden=true;el('saved-more').hidden=true;el('saved-empty').hidden=true;}
   function detail(result) {
     const view=result.view;
     el('saved-detail').hidden=false;
@@ -39,24 +39,30 @@ window.createSavedUsage = function ({el, request, lock, message, isBusy, selecti
     }));
     el('saved-scope-note').textContent=`${view.detail_scope==='mine' ? '本人视图展示自己的已验证区间；完整性按节点采样证据评估。':'状态区间按归档采样和驻留计时方法整理。'} 这是保存时的统计结果，生成后不会自动更新。`;
   }
-  async function openItem(item, input) {
+  async function openItem(item, input, ticket) {
     const result=await (await request('snapshots/read',{node_id:input.node_id,mode:input.mode,id:item.id})).json();
-    chosen=item.id;detail(result);
+    if(ticket!==version)return;
+    chosen=item.id;chosenRead={node_id:input.node_id,mode:input.mode,id:item.id};detail(result);
     for(const button of el('saved-list').querySelectorAll('button'))button.setAttribute('aria-current',String(button.dataset.snapshot===chosen));
   }
-  async function open(item, input) {if(isBusy())return;lock(true);message('正在读取统计快照…');try{await openItem(item,input);message('');}catch(error){el('saved-detail').hidden=true;message(error.message,true);}finally{lock(false);}}
+  async function open(item, input) {if(isBusy())return;const ticket=version;lock(true);message('正在读取统计快照…');try{await openItem(item,input,ticket);if(ticket===version)message('');}catch(error){if(ticket===version){el('saved-detail').hidden=true;chosenRead=null;message(error.message,true);}}finally{if(ticket===version)lock(false);}}
   async function load(more=false) {
     if(isBusy())return;lock(true);message('正在读取统计快照…');
     const input=more && selectedQuery ? {...selectedQuery,before:cursor}:{...selection(),limit:16};
-    if(!more)reset();
+    if(!more)reset();const ticket=version;
     try{
-      const result=await (await request('snapshots/query',input)).json();selectedQuery=input;cursor=result.next_cursor;
+      const result=await (await request('snapshots/query',input)).json();if(ticket!==version)return;selectedQuery=input;cursor=result.next_cursor;
       const cards=result.items.map(item=>{const li=document.createElement('li'),button=node('button','');button.type='button';button.dataset.snapshot=item.id;button.setAttribute('aria-current',String(chosen===item.id));button.append(node('strong',`${format(item.start_at)} – ${format(item.end_at)}`),badge(item.coverage),node('small',`保存于 ${format(item.created_at)}`));button.addEventListener('click',()=>open(item,input));li.append(button);return li;});
       el('saved-list').append(...cards);el('saved-more').hidden=!cursor;el('saved-empty').hidden=el('saved-list').children.length!==0;
-      if(!more && result.items.length)await openItem(result.items[0],input);
-      message('');
-    }catch(error){message(error.message,true);}finally{lock(false);}
+      if(!more && result.items.length)await openItem(result.items[0],input,ticket);
+      if(ticket===version)message('');
+    }catch(error){if(ticket===version)message(error.message,true);}finally{if(ticket===version)lock(false);}
+  }
+  async function download(kind){
+    if(isBusy() || !chosenRead)return;const ticket=version,input={...chosenRead};lock(true);message('正在准备下载…');
+    try{const blob=await (await request('snapshots/read',input,kind==='report'?'text/html':'text/csv')).blob();if(ticket!==version)return;const url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download=`aris-saved-usage.${kind==='report' ? 'html':'csv'}`;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);message('已导出这份统计快照。');}catch(error){if(ticket===version)message(error.message,true);}finally{if(ticket===version)lock(false);}
   }
   el('saved-more').addEventListener('click',()=>load(true));
+  el('saved-report').addEventListener('click',()=>download('report'));el('saved-csv').addEventListener('click',()=>download('export'));
   return {get active(){return active;},set active(value){active=value;el('saved-results').hidden=!value;},load,reset};
 };

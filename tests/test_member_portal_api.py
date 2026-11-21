@@ -1,4 +1,5 @@
 from datetime import timedelta
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -100,7 +101,7 @@ def login(client, token=ADMIN_TOKEN, remember=True):
     return response, view.json()
 
 
-def post(client, path, body, key=None):
+def post(client, path, body, key=None, *, accept="application/json"):
     csrf = client.get("/internal/members/session").json()["csrf_token"]
     return client.post(
         path,
@@ -108,6 +109,7 @@ def post(client, path, body, key=None):
         headers={
             "Origin": ORIGIN,
             "X-CSRF-Token": csrf,
+            "Accept": accept,
             **({"Idempotency-Key": key} if key else {}),
         },
     )
@@ -398,6 +400,14 @@ def test_member_cannot_use_legacy_read_all_binding_for_any_detail_endpoint(porta
         for path, payload in selections:
             denied = post(client, "/internal/usage" + path, payload)
             assert denied.status_code == 403, (path, denied.text)
+        for accept in ("text/csv", "text/html"):
+            denied = post(
+                client,
+                "/internal/usage/snapshots/read",
+                {"node_id": "node-a", "mode": "node", "id": str(uuid4())},
+                accept=accept,
+            )
+            assert denied.status_code == 403
 
 
 def test_role_downgrade_retains_unrelated_business_role_and_removes_full_statistics(portal):

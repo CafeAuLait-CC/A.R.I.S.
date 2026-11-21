@@ -1,3 +1,5 @@
+import csv
+import io
 from uuid import UUID, uuid4
 
 import pytest
@@ -10,6 +12,8 @@ from aris.core.access.models import ExternalIdentity, RoleBinding, RolePermissio
 from aris.core.access.schemas import ExternalSubject
 from aris.interfaces.commands.auth import BoundSubjectTokens, UserTokenBinding
 from aris.interfaces.slack.config import SlackSettings
+from aris.interfaces.usage.saved_report import saved_csv, saved_report
+from aris.interfaces.usage.saved_service import SavedUsageDetail
 from aris.interfaces.usage.service import UsageHistorySurface
 from aris.modules.lyra.usage_history_service import UsageHistoryService
 from aris.modules.lyra.window_reader import UsageWindowReader
@@ -26,6 +30,7 @@ from tests.test_trace_consumer import CONTEXT
 from tests.test_usage_derivations import derivations
 from tests.test_usage_history import TOKEN
 from tests.test_usage_ledger import ledger
+from tests.test_usage_report import ReadReport
 from tests.test_window_snapshots import counts, incoming_window, windows
 
 __all__ = ["admin_state", "history_state", "derivations", "ledger", "closed", "coverage", "windows"]
@@ -131,6 +136,104 @@ def test_saved_list_keyset_paging_and_detail_share_authorization_without_writing
     )
 
 
+def test_saved_reports_and_csv_preserve_exact_snapshot_quality_and_safe_labels(saved_ui):
+    state, client, _, _, _, _ = saved_ui
+    for original in (incoming_window(state), incoming_window(state, start=0, end=120)):
+        snapshot = state.service.capture(CONTEXT, original).snapshot
+        selected = {"node_id": "node-a", "mode": "node", "id": str(snapshot.request.id)}
+        details = SavedUsageDetail.model_validate(
+            client.post("/internal/usage/snapshots/read", headers=HEADERS, json=selected).json()
+        )
+        before = counts(state.service)
+        exported = client.post(
+            "/internal/usage/snapshots/read",
+            headers={**HEADERS, "Accept": "text/csv"},
+            json=selected,
+        )
+        html = client.post(
+            "/internal/usage/snapshots/read",
+            headers={**HEADERS, "Accept": "text/html"},
+            json=selected,
+        )
+        assert exported.status_code == html.status_code == 200
+        assert (
+            "no-store" in exported.headers["cache-control"]
+            and "attachment" in html.headers["content-disposition"]
+        )
+        rows = list(csv.DictReader(io.StringIO(exported.content.decode("utf-8-sig"))))
+        assert len(rows) == len(details.view.cells) + 1 and rows[0]["record_type"] == "summary"
+        assert {row["snapshot_fingerprint"] for row in rows} == {snapshot.fingerprint}
+        assert rows[0]["recorded_microseconds"] == str(details.view.recorded_microseconds)
+        assert all(row["recorded_microseconds"] == "" for row in rows[1:])
+        expected = (
+            ""
+            if details.view.total_usage_microseconds is None
+            else str(details.view.total_usage_microseconds)
+        )
+        assert rows[0]["total_usage_microseconds"] == expected
+        assert ("<strong>未知</strong>" in html.text) == (
+            details.view.total_usage_microseconds is None
+        )
+        parser = ReadReport()
+        parser.feed(html.text)
+        assert (
+            parser.scripts == parser.external_attributes == 0 and snapshot.fingerprint in html.text
+        )
+        assert counts(state.service) == before
+        # Rendering accepts labels as untrusted text; it cannot turn them into HTML or formulas.
+        owners = {
+            str(cell.owner_id): '<script>alert("fixture")</script>'
+            for cell in details.view.cells
+            if cell.owner_id
+        }
+        hostile = saved_report(details.view, owners).decode()
+        parser = ReadReport()
+        parser.feed(hostile)
+        assert parser.scripts == parser.external_attributes == 0
+        if owners:
+            assert "&lt;script&gt;" in hostile
+            formulas = saved_csv(details.view, {owner: "=2+3" for owner in owners})
+            assert all(
+                row["display_name"] == "'=2+3"
+                for row in csv.DictReader(io.StringIO(formulas.decode("utf-8-sig")))
+                if row["owner_id"]
+            )
+        state.service.capture(CONTEXT, incoming_window(state))
+        assert (
+            client.post(
+                "/internal/usage/snapshots/read",
+                headers={**HEADERS, "Accept": "text/csv"},
+                json=selected,
+            ).content
+            == exported.content
+        )
+
+
+@pytest.mark.parametrize("format", ["export", "report"])
+def test_saved_export_rechecks_current_permission_after_render(saved_ui, monkeypatch, format):
+    import aris.interfaces.usage.saved_service as presentation
+
+    state, client, _, actor, _, _ = saved_ui
+    snapshot = state.service.capture(CONTEXT, incoming_window(state)).snapshot
+    original = presentation.saved_csv if format == "export" else presentation.saved_report
+
+    def revoke_after_render(*args):
+        body = original(*args)
+        with state.service.sessions.begin() as db:
+            db.execute(delete(RoleBinding).where(RoleBinding.user_id == str(actor.actor_id)))
+        return body
+
+    monkeypatch.setattr(
+        presentation, "saved_csv" if format == "export" else "saved_report", revoke_after_render
+    )
+    response = client.post(
+        "/internal/usage/snapshots/read",
+        headers={**HEADERS, "Accept": "text/html" if format == "report" else "text/csv"},
+        json={"node_id": "node-a", "mode": "node", "id": str(snapshot.request.id)},
+    )
+    assert response.status_code == 403 and response.json()["error"]["code"] == "PERMISSION_DENIED"
+
+
 def test_personal_and_node_results_are_distinct_and_cannot_be_selected_by_impersonation(saved_ui):
     state, client, _, actor, other, ids = saved_ui
     personal = state.service.capture(CONTEXT, incoming_window(state, owner=actor.actor_id)).snapshot
@@ -207,6 +310,20 @@ def test_personal_projection_never_returns_other_owners_intervals(saved_ui, monk
     assert result.json()["view"]["cells"] == [] and result.json()["labels"] == {}
     assert str(other) not in result.text
     assert result.json()["view"]["total_usage_microseconds"] == 0
+    for format in ("report", "export"):
+        exported = client.post(
+            "/internal/usage/snapshots/read",
+            headers={**HEADERS, "Accept": "text/html" if format == "report" else "text/csv"},
+            json={"node_id": "node-a", "mode": "mine", "id": str(saved.request.id)},
+        )
+        assert exported.status_code == 200 and str(other) not in exported.text
+        if format == "export":
+            rows = list(csv.DictReader(io.StringIO(exported.content.decode("utf-8-sig"))))
+            assert (
+                len(rows) == 1
+                and rows[0]["record_type"] == "summary"
+                and rows[0]["total_usage_microseconds"] == "0"
+            )
 
 
 def test_disabled_reader_is_explicit_and_reserved_credentials_cannot_query(saved_ui, settings):

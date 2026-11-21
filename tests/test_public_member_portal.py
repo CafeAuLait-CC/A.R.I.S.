@@ -40,7 +40,7 @@ def login(client):
     return response
 
 
-def post(client, path, body, key=None):
+def post(client, path, body, key=None, *, accept="application/json"):
     csrf = client.get("/account/session").json()["csrf_token"]
     return client.post(
         path,
@@ -48,6 +48,7 @@ def post(client, path, body, key=None):
         headers={
             "Origin": ORIGIN,
             "X-CSRF-Token": csrf,
+            "Accept": accept,
             **({"Idempotency-Key": key} if key else {}),
         },
     )
@@ -109,6 +110,17 @@ def test_public_cookie_csrf_confirmed_save_cancel_and_usage_share_one_session(pu
             client, "/usage/query", {"node_id": "node-a", "mode": "mine", "window": window()}
         )
         assert usage.status_code == 200, usage.text
+        for accept in ("text/csv", "text/html"):
+            selected = {"node_id": "node-a", "mode": "mine", "id": str(uuid4())}
+            denied = client.post(
+                "/usage/snapshots/read", json=selected, headers={"Origin": ORIGIN, "Accept": accept}
+            )
+            assert denied.status_code == 403
+            missing = post(client, "/usage/snapshots/read", selected, accept=accept)
+            assert (
+                missing.status_code == 404
+                and missing.json()["error"]["message"] == "Window snapshot not found"
+            )
         assert post(client, "/account/logout", {}).status_code == 200
         assert client.get("/account/session").status_code == 401
 
