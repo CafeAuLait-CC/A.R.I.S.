@@ -66,7 +66,12 @@ def run_tick(
     clock: Callable[[], datetime] | None = None,
 ) -> dict[str, JsonValue]:
     if not config.enabled and not status_only:
-        return {"state": "paused", "current_quota_authorization": False, "plans": []}
+        return {
+            "state": "paused",
+            "current_quota_authorization": False,
+            "plans": [],
+            "made_progress": False,
+        }
     now = (clock or (lambda: datetime.now(UTC)))()
     context = SchedulerContext(request_id="weekly-coverage-" + str(uuid4()))
     items: list[JsonValue] = []
@@ -134,6 +139,12 @@ def run_tick(
         "state": "read_only" if status_only else "tick_processed",
         "plans": items,
         "needs_attention": attention,
+        "made_progress": any(
+            isinstance(item, dict)
+            and item.get("state")
+            in {"prefix_prepared", "admitted", "source_built", "snapshot_saved"}
+            for item in items
+        ),
         "current_quota_authorization": False,
         "notification_delivery": False,
         "autostart_added": False,
@@ -176,7 +187,14 @@ def main(argv: list[str] | None = None) -> int:
         while True:
             result = run_tick(config, schedules, status_only=args.status)
             print(json.dumps(result), flush=True)
-            if args.once or args.status or stopped.wait(config.poll_seconds):
+            if args.once or args.status:
+                return 1 if result.get("needs_attention") else 0
+            delay = (
+                config.poll_seconds
+                if result.get("needs_attention") or not result.get("made_progress")
+                else 0
+            )
+            if stopped.wait(delay):
                 return 1 if result.get("needs_attention") else 0
     except (ValueError, OSError, DomainError, SQLAlchemyError) as error:
         print(
