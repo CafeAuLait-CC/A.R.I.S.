@@ -1,5 +1,11 @@
 """Recorded statistics from service-verified original ledger indexes, never source completeness."""
 
+from typing import Literal
+from uuid import UUID
+
+from pydantic import AwareDatetime, Field
+
+from aris.modules.lyra.ledger_schemas import UsageLedgerHead
 from aris.modules.lyra.ledger_window_read import LedgerWindowRead
 from aris.modules.lyra.recorded_usage import MICROSECOND
 from aris.modules.lyra.usage_history import (
@@ -8,10 +14,26 @@ from aris.modules.lyra.usage_history import (
     UsageHistoryRow,
     _history_from_rows,
 )
+from aris.modules.lyra.usage_intervals import IntervalContract
 
 
-def indexed_usage_history(query: UsageHistoryQuery, window: LedgerWindowRead) -> UsageHistory:
-    query = UsageHistoryQuery.model_validate(query.model_dump(mode="json"))
+class IndexedUsageSummary(IntervalContract):
+    assessment_scope: Literal["recorded_usage_only"] = "recorded_usage_only"
+    source_coverage: Literal["unknown"] = "unknown"
+    total_usage_microseconds: None = None
+    quota_usage_available: Literal[False] = False
+    node_id: str
+    owner_id: UUID | None
+    start_at: AwareDatetime
+    end_at: AwareDatetime
+    snapshot: UsageLedgerHead
+    read_at: AwareDatetime
+    recorded_microseconds: int = Field(ge=0)
+    gpu_count: int = Field(ge=0)
+    segment_count: int = Field(ge=0)
+
+
+def _verified(query: UsageHistoryQuery, window: LedgerWindowRead) -> None:
     if (
         (query.node_id, query.start_at, query.end_at)
         != (window.query.node_id, window.query.start_at, window.query.end_at)
@@ -19,6 +41,32 @@ def indexed_usage_history(query: UsageHistoryQuery, window: LedgerWindowRead) ->
         or window.verification_scope != "verified_ledger_index_and_original_tail"
     ):
         raise ValueError("indexed statistics differ from their service-verified window")
+
+
+def indexed_usage_summary(
+    query: UsageHistoryQuery, window: LedgerWindowRead
+) -> IndexedUsageSummary:
+    query = UsageHistoryQuery.model_validate(query.model_dump(mode="json"))
+    _verified(query, window)
+    return IndexedUsageSummary(
+        node_id=query.node_id,
+        owner_id=window.query.owner_id,
+        start_at=query.start_at,
+        end_at=query.end_at,
+        snapshot=window.head,
+        read_at=window.read_at,
+        recorded_microseconds=sum(
+            (min(entry.end_at, query.end_at) - max(entry.start_at, query.start_at)) // MICROSECOND
+            for entry in window.active
+        ),
+        gpu_count=len({entry.gpu_uuid for entry in window.active}),
+        segment_count=len(window.active),
+    )
+
+
+def indexed_usage_history(query: UsageHistoryQuery, window: LedgerWindowRead) -> UsageHistory:
+    query = UsageHistoryQuery.model_validate(query.model_dump(mode="json"))
+    _verified(query, window)
     rows = []
     for entry in window.active:
         if entry.source_derivation_id is None or (

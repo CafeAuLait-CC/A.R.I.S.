@@ -374,6 +374,18 @@ def test_segment_verification_continues_past_the_legacy_4096_history_limit(ledge
             stats.segment_count == 4097
             and sum(day.recorded_microseconds for day in stats.days) == stats.recorded_microseconds
         )
+        with (
+            service.sessions() as db,
+            patch(
+                "aris.modules.lyra.indexed_usage_history._history_from_rows",
+                side_effect=AssertionError("summary built full detail rows"),
+            ),
+        ):
+            summary = surface.history.summary_in_transaction(
+                db, actor, UsageHistoryQuery(**week.model_dump(exclude={"owner_id"})), mode="node"
+            )
+        assert summary.recorded_microseconds == stats.recorded_microseconds
+        assert summary.segment_count == stats.segment_count and summary.gpu_count == stats.gpu_count
     _, changed = reverse(service, first, head, now)
     adjusted = reads.read(window(first, head=changed))
     assert not adjusted.active and len(adjusted.reversals) == 1

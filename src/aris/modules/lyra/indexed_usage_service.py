@@ -3,7 +3,7 @@
 from collections.abc import Callable
 from datetime import datetime
 from time import monotonic
-from typing import Literal
+from typing import Literal, TypeVar
 from uuid import UUID
 
 from sqlalchemy.exc import DBAPIError
@@ -12,16 +12,22 @@ from sqlalchemy.orm import Session, sessionmaker
 from aris.core.commands.budgets import database_failure, transaction_budget
 from aris.core.commands.schemas import ActorContext
 from aris.core.contracts import DomainError
-from aris.modules.lyra.indexed_usage_history import indexed_usage_history
+from aris.modules.lyra.indexed_usage_history import (
+    IndexedUsageSummary,
+    indexed_usage_history,
+    indexed_usage_summary,
+)
 from aris.modules.lyra.ledger_repo import inconsistent
 from aris.modules.lyra.ledger_segment_schemas import (
     LedgerSegmentConfiguration,
     ledger_read_configuration,
 )
-from aris.modules.lyra.ledger_window_read import LedgerWindowQuery
+from aris.modules.lyra.ledger_window_read import LedgerWindowQuery, LedgerWindowRead
 from aris.modules.lyra.ledger_window_service import LedgerWindowReader
 from aris.modules.lyra.usage_history import UsageHistory, UsageHistoryQuery
 from aris.modules.lyra.usage_history_service import UsageHistoryService
+
+_Result = TypeVar("_Result")
 
 
 class IndexedUsageHistoryService(UsageHistoryService):
@@ -38,26 +44,25 @@ class IndexedUsageHistoryService(UsageHistoryService):
         super().__init__(sessions, clock=clock, timeout_ms=timeout_ms)
         self.index_configuration = index_configuration
 
-    def _indexed_in_transaction(
+    def _window_in_transaction(
         self,
         session: Session,
         query: UsageHistoryQuery,
         *,
         owner_id: UUID | None,
         deadline: float,
-    ) -> UsageHistory:
+    ) -> LedgerWindowRead:
         reader = LedgerWindowReader(
             self.sessions,
             self.index_configuration(query.node_id),
             clock=self.clock,
             timeout_ms=self.timeout_ms,
         )
-        window = reader.read_in_transaction(
+        return reader.read_in_transaction(
             session,
             LedgerWindowQuery(**query.model_dump(exclude={"timezone"}), owner_id=owner_id),
             deadline=deadline,
         )
-        return indexed_usage_history(query, window)
 
     def read_in_transaction(
         self,
@@ -68,6 +73,43 @@ class IndexedUsageHistoryService(UsageHistoryService):
         mode: Literal["mine", "node"] = "mine",
         owner_id: UUID | None = None,
     ) -> UsageHistory:
+        return self._authorized_read(
+            session,
+            actor,
+            query,
+            mode=mode,
+            owner_id=owner_id,
+            reduce=lambda window: indexed_usage_history(query, window),
+        )
+
+    def summary_in_transaction(
+        self,
+        session: Session,
+        actor: ActorContext,
+        query: UsageHistoryQuery,
+        *,
+        mode: Literal["mine", "node"] = "mine",
+        owner_id: UUID | None = None,
+    ) -> IndexedUsageSummary:
+        return self._authorized_read(
+            session,
+            actor,
+            query,
+            mode=mode,
+            owner_id=owner_id,
+            reduce=lambda window: indexed_usage_summary(query, window),
+        )
+
+    def _authorized_read(
+        self,
+        session: Session,
+        actor: ActorContext,
+        query: UsageHistoryQuery,
+        *,
+        mode: Literal["mine", "node"],
+        owner_id: UUID | None,
+        reduce: Callable[[LedgerWindowRead], _Result],
+    ) -> _Result:
         actor = ActorContext.model_validate(actor.model_dump(mode="json"))
         query = UsageHistoryQuery.model_validate(query.model_dump(mode="json"))
         if mode not in ("mine", "node") or (mode == "mine" and owner_id is not None):
@@ -81,8 +123,10 @@ class IndexedUsageHistoryService(UsageHistoryService):
                     session, min(100, self.timeout_ms), min(1000, self.timeout_ms), self.timeout_ms
                 )
                 self.access.require_in_transaction(session, access)
-                result = self._indexed_in_transaction(
-                    session, query, owner_id=owner_id, deadline=deadline
+                result = reduce(
+                    self._window_in_transaction(
+                        session, query, owner_id=owner_id, deadline=deadline
+                    )
                 )
                 self.access.require_in_transaction(session, access)
                 if monotonic() >= deadline:

@@ -9,6 +9,7 @@ from aris.core.access.schemas import AccessContract, AccessRequest, AccessScope
 from aris.core.commands.budgets import transaction_budget
 from aris.core.commands.schemas import ActorContext
 from aris.core.contracts import DomainError
+from aris.modules.lyra.indexed_usage_history import indexed_usage_summary
 from aris.modules.lyra.indexed_usage_service import IndexedUsageHistoryService
 from aris.modules.lyra.usage_history import UsageHistoryQuery
 
@@ -37,11 +38,14 @@ class GeneralUsageService(IndexedUsageHistoryService):
             self.access.require_in_transaction(session, authority)
             if query.end_at > self._now():
                 raise DomainError("VALIDATION_ERROR", "Usage window has not ended", 422)
-            history = self._indexed_in_transaction(
-                session,
+            history = indexed_usage_summary(
                 query,
-                owner_id=None,
-                deadline=monotonic() + self.timeout_ms / 1000,
+                self._window_in_transaction(
+                    session,
+                    query,
+                    owner_id=None,
+                    deadline=monotonic() + self.timeout_ms / 1000,
+                ),
             )
             result = GeneralUsageTotal(
                 node_id=history.node_id,

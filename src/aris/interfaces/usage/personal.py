@@ -136,7 +136,7 @@ class PersonalUsageQueries:
                 raise DomainError(
                     "WINDOW_NOT_STARTED", "The reporting window has just started", 409
                 )
-            result = self.usage.read_in_transaction(
+            result = self.usage.summary_in_transaction(
                 session,
                 ActorContext(actor_id=principal.user_id, request_id=context.request_id),
                 UsageHistoryQuery(
