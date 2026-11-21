@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from threading import Event
 
 import pytest
 from alembic import command
@@ -178,7 +179,7 @@ def test_job_foreign_key_migration_preserves_old_rows_and_input_guards(stable_jo
 
 
 def test_postgresql_stable_job_execution_commits_one_result_under_competing_workers(
-    stable_jobs, database_url
+    stable_jobs, database_url, monkeypatch
 ):
     if not database_url.startswith("postgresql"):
         pytest.skip("requires real row locking")
@@ -186,8 +187,29 @@ def test_postgresql_stable_job_execution_commits_one_result_under_competing_work
     queue.enqueue(POST, request)
     claim = queue.claim(POST, selection=selection)
     before = counts(app)
+    entered, release = Event(), Event()
+    original = queue.stable_recorder.record_in_transaction
+
+    def held(*args):
+        entered.set()
+        assert release.wait(5), "competing execution did not finish its bounded lock attempt"
+        return original(*args)
+
+    monkeypatch.setattr(queue.stable_recorder, "record_in_transaction", held)
     with ThreadPoolExecutor(max_workers=2) as pool:
-        results = list(pool.map(lambda _: queue.execute(POST, claim), range(2)))
-    assert results[0] == results[1] and results[0].state == "completed"
+        winner = pool.submit(queue.execute, POST, claim)
+        assert entered.wait(5)
+        try:
+            loser = pool.submit(queue.execute, POST, claim)
+            with pytest.raises(DomainError) as rejected:
+                loser.result(timeout=3)
+            assert rejected.value.code == "RETRYABLE_DATABASE_ERROR"
+        finally:
+            release.set()
+        completed = winner.result(timeout=5)
+    assert completed.state == "completed"
+    # A bounded lock timeout is retryable; the original claim then returns the
+    # committed receipt without executing or charging the measurement twice.
+    assert queue.execute(POST, claim) == completed
     assert counts(app)[-2:] == tuple(value + 1 for value in before[-2:])
     assert queue.exact(request.id).attempts == 1
