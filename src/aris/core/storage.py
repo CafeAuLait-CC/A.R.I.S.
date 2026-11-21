@@ -3,11 +3,11 @@
 from datetime import UTC, datetime
 from typing import Literal
 
-from pydantic import AwareDatetime
+from pydantic import AwareDatetime, Field
 from sqlalchemy import Engine, func, select, text
 
 from aris.core.contracts import Contract
-from aris.core.events import OutboxEntry
+from aris.core.events import DomainEvent, OutboxEntry
 from aris.core.time import utc
 
 
@@ -28,6 +28,56 @@ class StorageSnapshot(Contract):
     pending_domain_events: int
     oldest_pending_event_at: AwareDatetime | None
     relations: list[RelationStorage]
+
+
+class PendingEventType(Contract):
+    event_type: str | None
+    pending_count: int = Field(gt=0)
+    oldest_created_at: AwareDatetime
+
+
+class PendingEventInventory(Contract):
+    assessment_scope: Literal["pending_domain_event_inventory"] = "pending_domain_event_inventory"
+    generated_at: AwareDatetime
+    read_only: Literal[True] = True
+    deletion_enabled: Literal[False] = False
+    total_pending: int = Field(ge=0)
+    oldest_created_at: AwareDatetime | None
+    event_types: tuple[PendingEventType, ...] = Field(max_length=64)
+    truncated: bool
+
+
+def inspect_pending_events(engine: Engine, *, type_limit: int = 64) -> PendingEventInventory:
+    """One metadata-only statement keeps totals exact even when type details are bounded."""
+    if type(type_limit) is not int or not 1 <= type_limit <= 64:
+        raise ValueError("event type limit must be an integer from 1 to 64")
+    count, oldest = func.count(), func.min(OutboxEntry.created_at)
+    with engine.connect() as connection:
+        rows = connection.execute(
+            select(
+                DomainEvent.event_type,
+                count,
+                oldest,
+                func.sum(count).over(),
+                func.min(oldest).over(),
+            )
+            .select_from(OutboxEntry)
+            .outerjoin(DomainEvent, DomainEvent.event_id == OutboxEntry.event_id)
+            .where(OutboxEntry.published_at.is_(None))
+            .group_by(DomainEvent.event_type)
+            .order_by(count.desc(), DomainEvent.event_type.asc().nulls_last())
+            .limit(type_limit + 1)
+        ).all()
+    return PendingEventInventory(
+        generated_at=datetime.now(UTC),
+        total_pending=int(rows[0][3]) if rows else 0,
+        oldest_created_at=utc(rows[0][4]) if rows else None,
+        event_types=tuple(
+            PendingEventType(event_type=row[0], pending_count=row[1], oldest_created_at=utc(row[2]))
+            for row in rows[:type_limit]
+        ),
+        truncated=len(rows) > type_limit,
+    )
 
 
 def inspect_storage(engine: Engine) -> StorageSnapshot:

@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import event
 
 from aris.core.db import Base, session_factory
-from aris.core.storage import inspect_storage
+from aris.core.storage import inspect_pending_events, inspect_storage
 from aris.modules.vega.service import VegaService
 from tests.test_heartbeat import beat, heartbeat
 from tests.test_telemetry import batch, post
@@ -34,6 +34,17 @@ def test_retention_preview_counts_streams_but_performs_no_writes(client, setting
         item.before_cutoff == 0
         for item in service.storage(datetime.now(UTC) - timedelta(days=1)).messages
     )
+    inventory = inspect_pending_events(client.app.state.engine)
+    assert inventory.total_pending == sum(row.pending_count for row in inventory.event_types) == 2
+    assert len(inventory.event_types) == 2 and not inventory.truncated
+    bounded = inspect_pending_events(client.app.state.engine, type_limit=1)
+    assert bounded.total_pending == 2 and len(bounded.event_types) == 1 and bounded.truncated
+    assert bounded.oldest_created_at == inventory.oldest_created_at
+    assert not bounded.deletion_enabled and bounded.read_only
+    assert not any(word in bounded.model_dump_json() for word in ("payload", "aggregate_id"))
+    for invalid in (0, 65, True):
+        with pytest.raises(ValueError, match="event type limit"):
+            inspect_pending_events(client.app.state.engine, type_limit=invalid)
     offset = future.astimezone(timezone(timedelta(hours=8)))
     assert service.storage(offset).messages == result.messages
     with pytest.raises(ValueError, match="time zone"):
@@ -42,6 +53,9 @@ def test_retention_preview_counts_streams_but_performs_no_writes(client, setting
 
 
 def test_storage_reports_pending_outbox_without_claiming_delivery_or_fake_bytes(client):
+    empty = inspect_pending_events(client.app.state.engine)
+    assert empty.total_pending == 0 and empty.oldest_created_at is None
+    assert empty.event_types == () and not empty.truncated
     assert post(client, batch()).status_code == 200
     result = inspect_storage(client.app.state.engine)
     assert result.pending_domain_events == 1
