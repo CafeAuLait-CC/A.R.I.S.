@@ -322,7 +322,17 @@ class LedgerSegmentService:
                 entries = self._source(
                     db, value.request, value.configuration, at=value.created_at, deadline=deadline
                 )
-                if tuple(ledger_entry_index(entry) for entry in entries) != value.entries:
+                if (
+                    tuple(
+                        ledger_entry_index(
+                            entry,
+                            include_posting_context=stored.posting_configuration_fingerprint
+                            is not None,
+                        )
+                        for entry, stored in zip(entries, value.entries, strict=True)
+                    )
+                    != value.entries
+                ):
                     raise segment_inconsistent()
                 return value
         except DBAPIError as error:

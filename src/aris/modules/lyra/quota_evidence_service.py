@@ -1,6 +1,8 @@
 """Authorized fixed-snapshot model totals; no current usage or quota writes."""
 
 from collections import defaultdict
+from collections.abc import Callable
+from datetime import UTC, datetime
 from time import monotonic
 
 from sqlalchemy import text
@@ -13,6 +15,10 @@ from aris.core.commands.budgets import database_failure, transaction_budget
 from aris.core.commands.schemas import ActorContext
 from aris.core.contracts import DomainError
 from aris.modules.lyra.ledger_repo import UsageLedgerRepository
+from aris.modules.lyra.ledger_schemas import PostedMeasurement
+from aris.modules.lyra.ledger_segment_schemas import ledger_read_configuration
+from aris.modules.lyra.ledger_window_read import LedgerWindowQuery
+from aris.modules.lyra.ledger_window_service import LedgerWindowReader
 from aris.modules.lyra.quota_evidence_schemas import (
     HistoricalModelUsage,
     HistoricalQuotaEvidence,
@@ -21,18 +27,25 @@ from aris.modules.lyra.quota_evidence_schemas import (
     QuotaEvidenceSelection,
     quota_evidence_fingerprint,
 )
-from aris.modules.lyra.recorded_usage import RecordedUsageQuery, recorded_usage_metrics
+from aris.modules.lyra.recorded_usage import MICROSECOND, RecordedUsageQuery, recorded_usage_metrics
 from aris.modules.lyra.window_reader_schemas import WindowPageCursor
 from aris.modules.lyra.window_snapshot_repo import UsageWindowRepository
 from aris.modules.lyra.window_snapshot_schemas import StoredUsageWindow
 
 
 class HistoricalQuotaEvidenceService:
-    def __init__(self, sessions: sessionmaker[Session], *, timeout_ms: int = 3000) -> None:
+    def __init__(
+        self,
+        sessions: sessionmaker[Session],
+        *,
+        timeout_ms: int = 3000,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         if type(timeout_ms) is not int or not 100 <= timeout_ms <= 10000:
             raise ValueError("historical quota evidence requires a bounded timeout")
         self.sessions, self.timeout_ms = sessions, timeout_ms
         self.access = AccessService(sessions)
+        self.clock = clock or (lambda: datetime.now(UTC))
 
     def _budget(self, session: Session) -> None:
         transaction_budget(session, 100, 1000, self.timeout_ms)
@@ -141,7 +154,7 @@ class HistoricalQuotaEvidenceService:
                     or stored.window.query.owner_id not in (None, selection.owner_id)
                 ):
                     raise DomainError("CONFLICT", "Usage snapshot scope differs", 409)
-                result = self._build(session, selection, stored)
+                result = self._build(session, selection, stored, deadline=deadline)
                 self._deadline(deadline)
             # REPEATABLE READ intentionally fixes old facts, not old permissions.
             with self.sessions() as session, session.no_autoflush:
@@ -156,15 +169,94 @@ class HistoricalQuotaEvidenceService:
                 "DEPENDENCY_UNAVAILABLE", "Historical usage evidence is inconsistent", 503
             ) from None
 
-    @staticmethod
+    def _indexed_models(
+        self,
+        session: Session,
+        selection: QuotaEvidenceSelection,
+        stored: StoredUsageWindow,
+        *,
+        deadline: float,
+    ) -> tuple[HistoricalModelUsage, ...]:
+        window = stored.window
+        reader = LedgerWindowReader(
+            self.sessions,
+            ledger_read_configuration(selection.node_id),
+            clock=self.clock,
+            timeout_ms=self.timeout_ms,
+        )
+        view = reader.read_in_transaction(
+            session,
+            LedgerWindowQuery(
+                node_id=selection.node_id,
+                start_at=window.query.start_at,
+                end_at=window.query.end_at,
+                owner_id=selection.owner_id,
+                snapshot=window.ledger,
+            ),
+            read_at=window.read_at,
+            deadline=deadline,
+        )
+        missing = tuple(
+            entry for entry in view.active if entry.posting_configuration_fingerprint is None
+        )
+        if len(missing) > 256:
+            raise DomainError(
+                "USAGE_POSTING_CONTEXT_NOT_INDEXED",
+                "Historical posting contexts exceed the bounded original detail allowance",
+                503,
+            )
+        configurations = {
+            entry.entry_id: entry.posting_configuration_fingerprint
+            for entry in view.active
+            if entry.posting_configuration_fingerprint is not None
+        }
+        if missing:
+            for original in reader.originals_in_transaction(session, view, missing):
+                assert isinstance(original.details, PostedMeasurement)
+                configurations[original.id] = original.details.configuration.fingerprint
+            self._deadline(deadline)
+        totals: dict[str, int] = defaultdict(int)
+        for entry in view.active:
+            if (
+                entry.timing_fingerprint != window.configuration.recording.timing_fingerprint
+                or configurations[entry.entry_id] != window.configuration.recording.fingerprint
+            ):
+                raise DomainError("CONFLICT", "Usage model timing configuration differs", 409)
+            measured = entry.window(selection.node_id)
+            duration = (
+                min(measured.end_at, window.query.end_at)
+                - max(measured.start_at, window.query.start_at)
+            ) // MICROSECOND
+            totals[measured.model] += duration
+        expected = sum(
+            cell.microseconds
+            for cell in window.cells
+            if cell.state == "recorded" and cell.owner_id == selection.owner_id
+        )
+        if sum(totals.values()) != expected:
+            raise DomainError("CONFLICT", "Usage model totals differ from verified cells", 409)
+        self._deadline(deadline)
+        return tuple(
+            HistoricalModelUsage(model=model, observed_microseconds=duration)
+            for model, duration in sorted(totals.items())
+        )
+
     def _build(
-        session: Session, selection: QuotaEvidenceSelection, stored: StoredUsageWindow
+        self,
+        session: Session,
+        selection: QuotaEvidenceSelection,
+        stored: StoredUsageWindow,
+        *,
+        deadline: float,
     ) -> HistoricalQuotaEvidence:
         window = stored.window
         complete = window.coverage == "complete"
         models: tuple[HistoricalModelUsage, ...] | None = None
         total = None
-        if complete:
+        if complete and window.configuration.method == "indexed_sampled_residency_edges":
+            models = self._indexed_models(session, selection, stored, deadline=deadline)
+            total = sum(value.observed_microseconds for value in models)
+        elif complete:
             entries = UsageLedgerRepository(session).prefix(window.ledger)
             recorded = recorded_usage_metrics(
                 RecordedUsageQuery(

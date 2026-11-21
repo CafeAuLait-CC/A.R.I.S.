@@ -1,10 +1,17 @@
 """Previously verified ledger chain segments, distinct from usage and quota coverage."""
 
 from datetime import UTC, datetime, timedelta
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 from uuid import UUID
 
-from pydantic import AwareDatetime, Field, field_validator, model_validator
+from pydantic import (
+    AwareDatetime,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from aris.modules.lyra.ledger_plan import MeasuredWindow
 from aris.modules.lyra.ledger_schemas import (
@@ -58,8 +65,16 @@ class LedgerEntryIndex(IntervalContract):
     timing_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
     window_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
     source_derivation_id: UUID | None
+    posting_configuration_fingerprint: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     target_id: UUID | None = None
     target_fingerprint: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+
+    @model_serializer(mode="wrap")
+    def preserve_original_encoding(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        value = cast(dict[str, Any], handler(self))
+        if self.posting_configuration_fingerprint is None:
+            value.pop("posting_configuration_fingerprint", None)
+        return value
 
     @field_validator("recorded_at", "start_at", "end_at")
     @classmethod
@@ -76,6 +91,7 @@ class LedgerEntryIndex(IntervalContract):
             or (self.kind == "measurement") != (self.source_derivation_id is not None)
             or (self.target_id is None) != (self.target_fingerprint is None)
             or self.target_id == self.entry_id
+            or (self.kind == "reversal" and self.posting_configuration_fingerprint is not None)
         ):
             raise ValueError("ledger index differs from its entry kind, time or chain")
         return self
@@ -96,7 +112,9 @@ class LedgerEntryIndex(IntervalContract):
         return value
 
 
-def ledger_entry_index(entry: UsageLedgerEntry) -> LedgerEntryIndex:
+def ledger_entry_index(
+    entry: UsageLedgerEntry, *, include_posting_context: bool = True
+) -> LedgerEntryIndex:
     entry = UsageLedgerEntry.model_validate(entry.model_dump(mode="json"))
     window = entry.details.measurement
     reversal = entry.details if isinstance(entry.details, ReversedMeasurement) else None
@@ -118,6 +136,11 @@ def ledger_entry_index(entry: UsageLedgerEntry) -> LedgerEntryIndex:
         source_derivation_id=(
             entry.details.measurement.source_derivation_id
             if isinstance(entry.details, PostedMeasurement)
+            else None
+        ),
+        posting_configuration_fingerprint=(
+            entry.details.configuration.fingerprint
+            if include_posting_context and isinstance(entry.details, PostedMeasurement)
             else None
         ),
         target_id=reversal.target_id if reversal else None,

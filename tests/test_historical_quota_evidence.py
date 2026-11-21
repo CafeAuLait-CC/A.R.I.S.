@@ -34,6 +34,7 @@ from tests.test_policy_catalog import catalog_state, confirmed, reference
 from tests.test_policy_source import policy
 from tests.test_processing_coverage import coverage
 from tests.test_recorded_usage import reading_service
+from tests.test_stable_coverage import acceptance, partition_recording, stable_recording
 from tests.test_trace_consumer import CONTEXT
 from tests.test_usage_derivations import derivations
 from tests.test_usage_ledger import ledger
@@ -51,6 +52,9 @@ __all__ = [
     "adjustments",
     "command_state",
     "catalog_state",
+    "acceptance",
+    "partition_recording",
+    "stable_recording",
 ]
 
 
@@ -90,6 +94,94 @@ def test_saved_evidence_uses_original_models_and_projects_only_the_requested_own
     assert s.service.read(s.actor, selection(s.saved, s.actor.actor_id)) == result
     assert str(s.other) not in result.model_dump_json()
     assert counts(s.windows.service) == before
+
+
+def test_indexed_evidence_keeps_partial_zero_and_old_index_encoding_honest(
+    stable_recording, monkeypatch
+):
+    from aris.modules.lyra import ledger_segment_service as segment_module
+    from aris.modules.lyra.ledger_repo import UsageLedgerRepository
+    from aris.modules.lyra.ledger_segment_schemas import ledger_read_configuration
+    from aris.modules.lyra.ledger_segment_service import LedgerSegmentService
+    from tests.test_ledger_segments import request as index_request
+    from tests.test_stable_coverage import manifests_for, post_remaining, service_for, window_for
+    from tests.test_stable_window_recording import open_reference
+    from tests.test_usage_ledger import POST
+
+    writer, closed, (app, _, fixture) = stable_recording
+    writer.accept_and_record(POST, open_reference(app, closed))
+    coverage_service = service_for(writer, method="indexed_sampled_residency_edges")
+    historical = HistoricalQuotaEvidenceService(writer.sessions, clock=coverage_service.clock)
+    _, actor, other, _ = reading_service(fixture[2])
+    partial = window_for(coverage_service, manifests_for(coverage_service))
+    unknown = historical.read(actor, selection(partial, actor.actor_id))
+    assert unknown.total_usage_microseconds is None and unknown.models is None
+    post_remaining(writer, closed)
+    complete = window_for(coverage_service, manifests_for(coverage_service))
+    before = historical.read(actor, selection(complete, actor.actor_id))
+    assert before.total_usage_microseconds == 135_000_000
+    assert sum(value.observed_microseconds for value in before.models) == 135_000_000
+    zero = historical.read(actor, selection(complete, other))
+    assert zero.total_usage_microseconds == 0 and zero.models == ()
+    assert not before.current_quota_authorization
+    segments = LedgerSegmentService(
+        writer.sessions,
+        configuration=ledger_read_configuration(complete.window.query.node_id),
+        clock=coverage_service.clock,
+    )
+    with writer.sessions() as db:
+        first = UsageLedgerRepository(db).revision(complete.window.query.node_id, 1)
+    one = UsageLedgerHead(node_id=first.node_id, revision=1, fingerprint=first.fingerprint)
+    original_index = segment_module.ledger_entry_index
+    with monkeypatch.context() as patch:
+        # Capture exactly the previously released header shape, without rewriting it later.
+        patch.setattr(
+            segment_module,
+            "ledger_entry_index",
+            lambda entry: original_index(entry, include_posting_context=False),
+        )
+        old = segments.capture(CONTEXT, index_request(segments, one))
+    old_body = old.model_dump_json()
+    assert "posting_configuration_fingerprint" not in old_body
+    assert '"target_id":null' in old_body
+    new = segments.capture(CONTEXT, index_request(segments, complete.window.ledger, old))
+    assert all(
+        entry.posting_configuration_fingerprint
+        == coverage_service.configuration.recording.fingerprint
+        for entry in new.entries
+    )
+    assert segments.reverify(old.request.id) == old
+    assert segments.reverify(new.request.id) == new
+    assert historical.read(actor, selection(complete, actor.actor_id)) == before
+    assert old.model_dump_json() == old_body
+
+
+def test_an_alias_cannot_replace_the_original_posting_configuration_for_quota(coverage):
+    from tests.test_usage_ledger import POST
+
+    state = coverage
+    ledger_writer, posting = state.ledger[:2]
+    original = ledger_writer.configuration
+    alternate = original.model_copy(update={"source_ref": original.source_ref + ".other"})
+    ledger_writer.configuration = alternate
+    measured = ledger_writer.post(
+        POST,
+        posting.model_copy(update={"expected_configuration_fingerprint": alternate.fingerprint}),
+    )
+    ledger_writer.configuration = original
+    alias = state.writer.record(POST, state.incoming)
+    assert alias.ledger.effect == "already_recorded" and alias.ledger.entries == measured.entries
+    state.service.configuration = state.service.configuration.model_copy(
+        update={"method": "indexed_sampled_residency_edges"}
+    )
+    view = windows.__wrapped__(state)
+    saved = view.service.capture(CONTEXT, incoming_window(view)).snapshot
+    assert saved.window.coverage == "complete"
+    _, actor, _, _ = reading_service(state.ledger)
+    reader = HistoricalQuotaEvidenceService(state.service.sessions, clock=state.service.clock)
+    with pytest.raises(DomainError) as error:
+        reader.read(actor, selection(saved, actor.actor_id))
+    assert error.value.code == "CONFLICT"
 
 
 def test_partial_and_reversed_windows_keep_null_while_old_evidence_remains_fixed(
@@ -152,10 +244,10 @@ def test_postgresql_reads_fixed_facts_but_rechecks_current_permissions_after_com
         pytest.skip("requires PostgreSQL repeatable-read and independent current authorization")
     original = s.service._build
 
-    def revoked(session, choice, stored):
+    def revoked(session, choice, stored, **options):
         assert session.scalar(text("SHOW transaction_read_only")) == "on"
         assert session.scalar(text("SHOW transaction_isolation")) == "repeatable read"
-        result = original(session, choice, stored)
+        result = original(session, choice, stored, **options)
         with s.service.sessions.begin() as writer:
             writer.execute(delete(RoleBinding).where(RoleBinding.id == s.ids["binding"]))
         return result

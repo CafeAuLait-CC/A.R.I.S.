@@ -281,7 +281,11 @@ class LedgerWindowReader:
             if (
                 original is None
                 or original.node_id != view.head.node_id
-                or ledger_entry_index(original) != entry
+                or ledger_entry_index(
+                    original,
+                    include_posting_context=entry.posting_configuration_fingerprint is not None,
+                )
+                != entry
             ):
                 raise inconsistent()
             result.append(original)
