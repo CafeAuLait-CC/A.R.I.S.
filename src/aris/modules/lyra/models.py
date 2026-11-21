@@ -19,6 +19,34 @@ from sqlalchemy.orm import Mapped, mapped_column
 from aris.core.db import Base
 
 
+class StableWindowAcceptanceRow(Base):
+    __tablename__ = "usage_stable_window_acceptances"
+    __table_args__ = (
+        CheckConstraint("length(key) = 64", name="ck_stable_acceptance_key"),
+        CheckConstraint("length(layout_key) = 64", name="ck_stable_acceptance_layout"),
+        CheckConstraint("length(run_id) = 64", name="ck_stable_acceptance_run"),
+        CheckConstraint(
+            "length(configuration_fingerprint) = 64", name="ck_stable_acceptance_config"
+        ),
+        CheckConstraint("length(fingerprint) = 64", name="ck_stable_acceptance_fingerprint"),
+        CheckConstraint("identity_revision >= 1", name="ck_stable_acceptance_identity"),
+        CheckConstraint(
+            "length(canonical_record) > 0 AND length(canonical_record) <= 4194304",
+            name="ck_stable_acceptance_size",
+        ),
+    )
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    layout_key: Mapped[str] = mapped_column(String(64))
+    node_id: Mapped[str] = mapped_column(String(128))
+    run_id: Mapped[str] = mapped_column(String(64))
+    configuration_fingerprint: Mapped[str] = mapped_column(String(64))
+    identity_revision: Mapped[int] = mapped_column(BigInteger)
+    event_id: Mapped[str] = mapped_column(ForeignKey("domain_events.event_id"), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    canonical_record: Mapped[str] = mapped_column(Text)
+
+
 class UsageWindowSnapshotRow(Base):
     __tablename__ = "usage_window_snapshots"
     __table_args__ = (
