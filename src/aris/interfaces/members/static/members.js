@@ -63,7 +63,7 @@
     return normalized;
   }
   function password(value,confirmation=value) {
-    if([...value].length<15 || [...value].length>128)throw new Error('Use a password of 15–128 characters.');
+    if([...value].length<6 || [...value].length>128)throw new Error('Use a password of 6–128 characters.');
     if(value!==confirmation)throw new Error('The passwords do not match.');
     return value;
   }

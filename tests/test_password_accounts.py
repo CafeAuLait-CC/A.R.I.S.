@@ -17,8 +17,8 @@ from tests.test_member_portal_api import portal as portal
 from tests.test_member_portal_core import ADMIN_TOKEN, apply, register
 from tests.test_member_portal_core import members as members
 
-PASSWORD = "a long private password 🦉"
-SECOND_PASSWORD = "another private password ☄"
+PASSWORD = "a🦉bcde"
+SECOND_PASSWORD = "f☄ghij"
 
 
 class Sender:
@@ -246,6 +246,10 @@ def test_password_login_origin_csrf_profile_email_and_browser_migration(portal):
     app, components, _, _ = portal
     with TestClient(app) as client:
         login(client)
+        too_short = post(
+            client, "/internal/members/password", {"username": "admin", "password": "ab🦉de"}
+        )
+        assert too_short.status_code == 422
         response = post(
             client, "/internal/members/password", {"username": "admin", "password": PASSWORD}
         )

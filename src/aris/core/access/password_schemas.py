@@ -16,7 +16,7 @@ def normalize_username(value: str) -> str:
 
 class PasswordFields(AccessContract):
     username: Username
-    password: SecretStr = Field(min_length=15, max_length=128, repr=False)
+    password: SecretStr = Field(min_length=6, max_length=128, repr=False)
 
     @field_validator("username", mode="before")
     @classmethod
