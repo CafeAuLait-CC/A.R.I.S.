@@ -1,3 +1,4 @@
+import argparse
 import gc
 import os
 import shutil
@@ -19,6 +20,16 @@ READ_TOKEN = "test-read-credential-12345"
 FROM_POSTGRES_TEMPLATE = pytest.StashKey[bool]()
 
 
+def ci_shard(value):
+    try:
+        number, count = map(int, value.split("/"))
+        if 1 <= number <= count <= 16:
+            return number, count
+    except ValueError:
+        pass
+    raise argparse.ArgumentTypeError("use N/M with 1 <= N <= M <= 16")
+
+
 def pytest_addoption(parser):
     parser.addoption(
         "--database-only",
@@ -30,14 +41,28 @@ def pytest_addoption(parser):
         action="store_true",
         help="Clone a migrated template for settings-based tests (local aris_test only).",
     )
+    parser.addoption("--ci-shard", type=ci_shard, help="Run one disjoint N/M collection shard.")
 
 
 def pytest_collection_modifyitems(config, items):
-    if config.getoption("--database-only"):
-        selected, omitted = [], []
-        for item in items:
-            (selected if "database_url" in item.fixturenames else omitted).append(item)
-        items[:] = selected
+    selected = [
+        item
+        for item in items
+        if not config.getoption("--database-only") or "database_url" in item.fixturenames
+    ]
+    shard = config.getoption("--ci-shard")
+    if shard is not None:
+        number, count = shard
+        assigned = {
+            item.nodeid
+            for index, item in enumerate(sorted(selected, key=lambda item: item.nodeid))
+            if index % count == number - 1
+        }
+        selected = [item for item in selected if item.nodeid in assigned]
+    selected_ids = {item.nodeid for item in selected}
+    omitted = [item for item in items if item.nodeid not in selected_ids]
+    items[:] = selected
+    if omitted:
         config.hook.pytest_deselected(items=omitted)
 
 
