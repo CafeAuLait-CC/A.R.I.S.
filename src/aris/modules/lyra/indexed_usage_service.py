@@ -12,6 +12,11 @@ from sqlalchemy.orm import Session, sessionmaker
 from aris.core.commands.budgets import database_failure, transaction_budget
 from aris.core.commands.schemas import ActorContext
 from aris.core.contracts import DomainError
+from aris.modules.lyra.continuous_usage import (
+    ContinuousUsageHistory,
+    UsageRowContext,
+    continuous_usage_history,
+)
 from aris.modules.lyra.indexed_usage_history import (
     IndexedUsageSummary,
     indexed_usage_history,
@@ -98,6 +103,30 @@ class IndexedUsageHistoryService(UsageHistoryService):
             mode=mode,
             owner_id=owner_id,
             reduce=lambda window: indexed_usage_summary(query, window),
+        )
+
+    def read_continuous_in_transaction(
+        self,
+        session: Session,
+        actor: ActorContext,
+        query: UsageHistoryQuery,
+        *,
+        mode: Literal["mine", "node"] = "mine",
+        owner_id: UUID | None = None,
+    ) -> ContinuousUsageHistory:
+        return self._authorized_read(
+            session,
+            actor,
+            query,
+            mode=mode,
+            owner_id=owner_id,
+            reduce=lambda window: continuous_usage_history(
+                indexed_usage_history(query, window),
+                tuple(
+                    UsageRowContext(entry.entry_id, entry.fingerprint, entry.timing_fingerprint)
+                    for entry in window.active
+                ),
+            ),
         )
 
     def _authorized_read(

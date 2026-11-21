@@ -23,6 +23,7 @@ from aris.core.contracts import DomainError
 from aris.interfaces.commands.auth import UserCommandAuthenticator
 from aris.interfaces.usage.activity_service import ActivityPreviewAccess
 from aris.interfaces.usage.report import history_report
+from aris.modules.lyra.continuous_usage import ContinuousUsageHistory, ContinuousUsageInterval
 from aris.modules.lyra.ledger_schemas import UsageLedgerHead
 from aris.modules.lyra.ledger_window_read import (
     MAX_LEDGER_WINDOW_ENTRIES,
@@ -72,6 +73,7 @@ class UsageHistoryInput(AccessContract):
     snapshot: UsageLedgerHead | None = None
     offset: int = Field(default=0, ge=0, le=MAX_LEDGER_WINDOW_ENTRIES, strict=True)
     limit: int = Field(default=25, ge=1, le=100, strict=True)
+    presentation: Literal["segments", "continuous"] = "segments"
 
     @model_validator(mode="after")
     def fixed_pages(self) -> "UsageHistoryInput":
@@ -111,6 +113,9 @@ class UsageHistoryPage(AccessContract):
     offset: int
     limit: int
     has_more: bool
+    presentation: Literal["segments", "continuous"] = "segments"
+    interval_count: int | None = None
+    intervals: tuple[ContinuousUsageInterval, ...] = ()
 
 
 def csv_text(value: str) -> str:
@@ -161,6 +166,60 @@ def history_csv(report: UsageHistory, labels: dict[str, str]) -> bytes:
                 str(row.source_derivation_id),
                 str(row.entry_id),
                 row.entry_fingerprint,
+                report.fingerprint,
+                "unknown",
+                "false",
+            )
+        )
+    return ("\ufeff" + output.getvalue()).encode("utf-8")
+
+
+def continuous_history_csv(view: ContinuousUsageHistory, labels: dict[str, str]) -> bytes:
+    report = view.history
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(
+        (
+            "node",
+            "user_id",
+            "display_name",
+            "gpu_uuid",
+            "gpu_model",
+            "start_utc",
+            "end_utc",
+            "display_timezone",
+            "recorded_gpu_hours",
+            "recorded_microseconds",
+            "source_segment_count",
+            "first_ledger_entry_id",
+            "last_ledger_entry_id",
+            "interval_fingerprint",
+            "report_fingerprint",
+            "source_coverage",
+            "quota_usage_available",
+        )
+    )
+    for row in view.intervals:
+        writer.writerow(
+            (
+                csv_text(report.node_id),
+                str(row.owner_id),
+                csv_text(labels.get(str(row.owner_id), str(row.owner_id))),
+                csv_text(row.gpu_uuid),
+                csv_text(row.model),
+                row.start_at.isoformat(),
+                row.end_at.isoformat(),
+                report.timezone,
+                str(
+                    (Decimal(row.recorded_microseconds) / Decimal(3600000000)).quantize(
+                        Decimal("0.000000000")
+                    )
+                ),
+                row.recorded_microseconds,
+                row.source_segment_count,
+                str(row.first_entry_id),
+                str(row.last_entry_id),
+                row.fingerprint,
                 report.fingerprint,
                 "unknown",
                 "false",
@@ -291,8 +350,19 @@ class UsageHistorySurface:
                 if principal is None:
                     raise DomainError("PERMISSION_DENIED", "Current identity is unavailable", 403)
                 actor = ActorContext(actor_id=principal.user_id, request_id=request_id)
-                report = self.history.read_in_transaction(
-                    session, actor, selection, mode=query.mode, owner_id=query.owner_id
+                continuous = (
+                    self.history.read_continuous_in_transaction(
+                        session, actor, selection, mode=query.mode, owner_id=query.owner_id
+                    )
+                    if query.presentation == "continuous"
+                    else None
+                )
+                report = (
+                    continuous.history
+                    if continuous is not None
+                    else self.history.read_in_transaction(
+                        session, actor, selection, mode=query.mode, owner_id=query.owner_id
+                    )
                 )
                 labels = {
                     str(label.user_id): label.display_name
@@ -303,19 +373,45 @@ class UsageHistorySurface:
                 }
                 result = (
                     (
-                        history_csv(report, labels)
+                        (
+                            continuous_history_csv(continuous, labels)
+                            if continuous is not None
+                            else history_csv(report, labels)
+                        )
                         if output == "csv"
-                        else history_report(report, labels)
+                        else (
+                            history_report(
+                                report, labels, continuous_interval_count=len(continuous.intervals)
+                            )
+                            if continuous is not None
+                            else history_report(report, labels)
+                        )
                     )
                     if output != "page"
                     else UsageHistoryPage(
                         report=report.model_copy(
-                            update={"rows": report.rows[query.offset : query.offset + query.limit]}
+                            update={
+                                "rows": ()
+                                if continuous is not None
+                                else report.rows[query.offset : query.offset + query.limit]
+                            }
                         ),
                         labels=labels,
                         offset=query.offset,
                         limit=query.limit,
-                        has_more=query.offset + query.limit < report.segment_count,
+                        has_more=query.offset + query.limit
+                        < (
+                            len(continuous.intervals)
+                            if continuous is not None
+                            else report.segment_count
+                        ),
+                        presentation=query.presentation,
+                        interval_count=len(continuous.intervals)
+                        if continuous is not None
+                        else None,
+                        intervals=continuous.intervals[query.offset : query.offset + query.limit]
+                        if continuous is not None
+                        else (),
                     )
                 )
                 if isinstance(result, bytes) and len(result) > MAX_LEDGER_WINDOW_INDEX_BYTES:

@@ -47,7 +47,9 @@ def daily_chart(days: tuple[UsageHistoryDay, ...]) -> str:
     )
 
 
-def history_report(report: UsageHistory, labels: dict[str, str]) -> bytes:
+def history_report(
+    report: UsageHistory, labels: dict[str, str], *, continuous_interval_count: int | None = None
+) -> bytes:
     zone = ZoneInfo(report.timezone)
     start = report.start_at.astimezone(zone).strftime("%Y/%m/%d %H:%M:%S")
     end = report.end_at.astimezone(zone).strftime("%Y/%m/%d %H:%M:%S")
@@ -86,6 +88,13 @@ def history_report(report: UsageHistory, labels: dict[str, str]) -> bytes:
         total=hours(report.recorded_microseconds),
         gpu_count=report.gpu_count,
         segment_count=report.segment_count,
+        records_label="连续使用时段" if continuous_interval_count is not None else "原始记账分段",
+        records_count=continuous_interval_count
+        if continuous_interval_count is not None
+        else report.segment_count,
+        records_note=f"来自 {report.segment_count} 个原始记账分段"
+        if continuous_interval_count is not None
+        else "分段数量不是任务数量",
         empty=empty,
         chart=daily_chart(report.days),
         owner_rows=owner_rows,
