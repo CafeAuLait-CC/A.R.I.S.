@@ -273,6 +273,7 @@ def test_segment_verification_continues_past_the_legacy_4096_history_limit(ledge
 
     from aris.interfaces.usage.service import UsageHistoryInput
     from aris.modules.lyra.indexed_usage_service import IndexedUsageHistoryService
+    from aris.modules.lyra.ledger_head_proof import LedgerHeadVerifier
     from aris.modules.lyra.ledger_window_service import LedgerWindowReader
     from aris.modules.lyra.usage_history import UsageHistoryQuery
     from tests.test_ledger_window_reading import reverse, window
@@ -318,6 +319,17 @@ def test_segment_verification_continues_past_the_legacy_4096_history_limit(ledge
         sum((value.end_at - value.start_at) // timedelta(microseconds=1) for value in full.active)
         == first.details.measurement.observed_microseconds + 4096 * 30000000
     )
+    last_only = reads.read(window(last, head=head))
+    first_head = UsageLedgerHead(node_id=first.node_id, revision=1, fingerprint=first.fingerprint)
+    with (
+        patch.object(UsageLedgerRepository, "prefix", side_effect=AssertionError("whole history")),
+        patch.object(
+            LedgerSegmentRepository, "entries", side_effect=AssertionError("original bodies")
+        ),
+    ):
+        membership = LedgerHeadVerifier(reads).verify(last_only, (head, first_head))
+    assert membership.heads == (first_head, head) and len(membership.index_segments) == 2
+    assert not membership.original_tail_heads and len(last_only.active) == 1
     scope = reading_service(ledger)
     surface, actor, _ = surface_for((ledger, scope, None), settings)
     surface.history = IndexedUsageHistoryService(
@@ -392,6 +404,10 @@ def test_segment_verification_continues_past_the_legacy_4096_history_limit(ledge
     assert reads.read(window(first, head=head)).fingerprint == old.fingerprint
     service.capture(CONTEXT, request(service, changed, final))
     assert reads.read(window(first, head=changed)).fingerprint == adjusted.fingerprint
+    assert (
+        LedgerHeadVerifier(reads).verify(last_only, (first_head, head)).fingerprint
+        == membership.fingerprint
+    )
 
 
 @pytest.mark.skipif(

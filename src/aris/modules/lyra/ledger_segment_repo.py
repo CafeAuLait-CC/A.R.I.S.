@@ -232,6 +232,57 @@ class LedgerSegmentRepository:
         )
         return self.get(UUID(id)) if id is not None else None
 
+    def covering_many(
+        self, node_id: str, revisions: tuple[int, ...], *, max_bytes: int
+    ) -> tuple[StoredLedgerSegment, ...]:
+        """At most 128 point lookups, without loading intervening lifetime history."""
+        if not revisions:
+            return ()
+        if len(revisions) > 128 or any(type(value) is not int or value < 1 for value in revisions):
+            raise DomainError("VALIDATION_ERROR", "Invalid ledger head dependency page", 422)
+        lookups = tuple(
+            select(LedgerSegmentRow.id)
+            .where(
+                LedgerSegmentRow.node_id == node_id,
+                LedgerSegmentRow.first_revision <= revision,
+                LedgerSegmentRow.last_revision >= revision,
+            )
+            .order_by(LedgerSegmentRow.last_revision)
+            .limit(1)
+            .correlate(None)
+            .scalar_subquery()
+            for revision in sorted(set(revisions))
+        )
+        scope = LedgerSegmentRow.id.in_(lookups)
+        column = LedgerSegmentRow.canonical_segment
+        encoded = (
+            func.octet_length(column)
+            if self.session.get_bind().dialect.name == "postgresql"
+            else func.length(cast(column, LargeBinary))
+        )
+        count, size = self.session.execute(
+            select(func.count(), func.coalesce(func.sum(encoded), 0)).where(scope)
+        ).one()
+        if int(count) > len(revisions) or int(size) > max_bytes:
+            raise DomainError("USAGE_REPORT_TOO_LARGE", "Split ledger head dependencies", 503)
+        if not int(count):
+            return ()
+        rows = (
+            self.session.execute(
+                select(*LedgerSegmentRow.__table__.c)
+                .where(scope)
+                .order_by(LedgerSegmentRow.first_revision)
+                .limit(129)
+            )
+            .mappings()
+            .all()
+        )
+        if len(rows) != int(count):
+            raise DomainError(
+                "RETRYABLE_DATABASE_ERROR", "Ledger index advanced during dependency read", 503
+            )
+        return tuple(self._stored(dict(row)) for row in rows)
+
     def intersecting(
         self,
         node_id: str,
