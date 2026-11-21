@@ -9,16 +9,26 @@ from aris.modules.lyra.ledger_schemas import UsagePostingConfiguration
 from aris.modules.lyra.recording_job_schemas import RecordingJobResult, RecordingWorkSelection
 from aris.modules.lyra.recording_pump_schemas import RecordingSourceStep, RecordingStageFailure
 from aris.modules.lyra.residency_layout import StableResidencyLayoutMethod
+from aris.modules.lyra.source_batching import SourceBatchSelection
 from aris.modules.lyra.stable_dispatch_schemas import StableAutoDispatchReceipt
 from aris.modules.lyra.trace_consumer_schemas import canonical_trace, trace_fingerprint
 from aris.modules.lyra.usage_intervals import IntervalContract
 
 
-class StableRecordingPumpConfiguration(IntervalContract):
+class StableRecordingPumpConfiguration(SourceBatchSelection):
     recording: UsagePostingConfiguration
     method: StableResidencyLayoutMethod
     source_limit: int = Field(default=32, ge=1, le=128, strict=True)
     dispatch_limit: int = Field(default=1, ge=1, le=8, strict=True)
+
+    @model_validator(mode="after")
+    def source_batch_fits(self) -> "StableRecordingPumpConfiguration":
+        if (
+            self.source_batching is not None
+            and self.source_batching.minimum_messages > self.source_limit
+        ):
+            raise ValueError("source minimum batch exceeds the configured page limit")
+        return self
 
     @property
     def selection(self) -> RecordingWorkSelection:

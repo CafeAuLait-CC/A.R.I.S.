@@ -32,7 +32,7 @@ class RecordingPumpConfiguration(IntervalContract):
 
 
 class RecordingSourceStep(IntervalContract):
-    state: Literal["prepared", "caught_up", "gap", "paused"]
+    state: Literal["prepared", "caught_up", "gap", "paused", "buffering"]
     consumer_id: str | None = Field(default=None, min_length=1, max_length=128)
     after_seq: int | None = Field(default=None, ge=0, strict=True)
     ceiling: int | None = Field(default=None, ge=0, strict=True)
@@ -64,6 +64,10 @@ class RecordingSourceStep(IntervalContract):
                 and (self.after_seq != self.ceiling or self.missing_seq is not None)
             )
             or (self.state == "gap" and self.missing_seq is None)
+            or (
+                self.state == "buffering"
+                and (self.after_seq >= self.ceiling or self.missing_seq is not None)
+            )
             or (
                 self.missing_seq is not None
                 and (self.missing_seq != self.after_seq + 1 or self.after_seq >= self.ceiling)

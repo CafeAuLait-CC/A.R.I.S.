@@ -38,6 +38,7 @@ from aris.modules.lyra.residency_segment_service import ResidencySegmentService
 from aris.modules.lyra.residency_sessions import ResidencyFormationRule, residency_fingerprint
 from aris.modules.lyra.run_recording_service import ClosedRunRecordingService
 from aris.modules.lyra.segment_store_service import ResidencySegmentStore
+from aris.modules.lyra.source_batching import SourceBatchSelection
 from aris.modules.lyra.stable_dispatch_schemas import StableAutoDispatchReceipt
 from aris.modules.lyra.stable_pipeline_schemas import StableRecordingPipelineConfiguration
 from aris.modules.lyra.stable_pipeline_service import StableRecordingPipelineService
@@ -72,7 +73,7 @@ class LyraSourceBinding(IntervalContract):
     initial_after_seq: int = Field(ge=0, lt=9223372036854775807, strict=True)
 
 
-class LyraRuntimeConfig(IntervalContract):
+class LyraRuntimeConfig(SourceBatchSelection):
     enabled: bool = Field(default=False, strict=True)
     source_ref: str = Field(default="explicit-private-lyra-runtime", min_length=1, max_length=128)
     recording: UsagePostingConfiguration | None = None
@@ -89,6 +90,11 @@ class LyraRuntimeConfig(IntervalContract):
 
     @model_validator(mode="after")
     def explicit_recording_context(self) -> "LyraRuntimeConfig":
+        if self.source_batching is not None and (
+            (self.method is not None and not isinstance(self.method, StableResidencyLayoutMethod))
+            or self.source_batching.minimum_messages > self.source_limit
+        ):
+            raise ValueError("source batching requires stable mode and a sufficient page limit")
         required = (
             self.recording,
             self.continuity,
@@ -379,7 +385,9 @@ def build_lyra_components(
             stable_plans,
             stable_jobs,
             clock=now,
+            batch_reader=archive if config.source_batching is not None else None,
             configuration=StableRecordingPumpConfiguration(
+                source_batching=config.source_batching,
                 recording=config.recording,
                 method=config.method,
                 source_limit=config.source_limit,

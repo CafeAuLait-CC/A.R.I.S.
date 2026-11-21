@@ -12,6 +12,7 @@ from aris.modules.lyra.recording_job_service import RecordingJobService
 from aris.modules.lyra.recording_pipeline_schemas import RecordingPipelineRequest
 from aris.modules.lyra.recording_pump import SourceCeilingReader
 from aris.modules.lyra.recording_pump_schemas import RecordingSourceStep, RecordingStageFailure
+from aris.modules.lyra.source_batching import SourceBatchPageReader, should_buffer_source
 from aris.modules.lyra.stable_dispatch_service import StableWindowDispatcher
 from aris.modules.lyra.stable_pipeline_service import StableRecordingPipelineService
 from aris.modules.lyra.stable_pump_schemas import (
@@ -35,6 +36,7 @@ class StableRecordingPump:
         *,
         configuration: StableRecordingPumpConfiguration | None = None,
         clock: Callable[[], datetime] | None = None,
+        batch_reader: SourceBatchPageReader | None = None,
     ) -> None:
         if len(pipelines) > 16:
             raise ValueError("one recording pump supports at most 16 configured sources")
@@ -48,6 +50,7 @@ class StableRecordingPump:
         self._source_index = 0
         self._source_limits: dict[str, int] = {}
         self.dispatcher = StableWindowDispatcher(plans)
+        self.batch_reader = batch_reader
 
     def _now(self) -> datetime:
         now = self.clock()
@@ -74,6 +77,8 @@ class StableRecordingPump:
         ):
             raise DomainError("CONFLICT", "Stable pump authority or configuration differs", 409)
         bindings = []
+        if current.source_batching is not None and self.batch_reader is None:
+            raise DomainError("CONFLICT", "Source batching has no archive preview reader", 409)
         for producer in self.pipelines:
             source = producer.configuration
             if source is not None:
@@ -133,6 +138,29 @@ class StableRecordingPump:
                 after_seq=position.after_seq,
                 ceiling=through,
             )
+        rule = config.source_batching
+        if rule is not None:
+            if source_limit < rule.minimum_messages:
+                raise DomainError(
+                    "SOURCE_BATCH_LIMIT_TOO_SMALL",
+                    "Learned source page limit is below the required batch",
+                    503,
+                )
+            assert self.batch_reader is not None
+            if should_buffer_source(
+                rule,
+                self.batch_reader,
+                source.trace,
+                after_seq=position.after_seq,
+                through_seq=through,
+                now=self._now(),
+            ):
+                return RecordingSourceStep(
+                    state="buffering",
+                    consumer_id=source.trace.consumer_id,
+                    after_seq=position.after_seq,
+                    ceiling=through,
+                )
         key = (
             source.fingerprint
             + ":"
