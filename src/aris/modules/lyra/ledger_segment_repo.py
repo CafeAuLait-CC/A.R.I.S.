@@ -12,6 +12,7 @@ from aris.core.contracts import DomainError
 from aris.core.time import utc
 from aris.modules.lyra.ledger_repo import UsageLedgerRepository
 from aris.modules.lyra.ledger_schemas import UsageLedgerEntry, canonical_ledger
+from aris.modules.lyra.ledger_segment_decode import decode_segment_row
 from aris.modules.lyra.ledger_segment_schemas import (
     MAX_LEDGER_SEGMENT_BYTES,
     MAX_LEDGER_SEGMENT_SOURCE_BYTES,
@@ -38,7 +39,7 @@ class LedgerSegmentRepository:
         )
         if row is None:
             return None
-        return self._stored(dict(row))
+        return decode_segment_row(self.session, dict(row), self._stored)
 
     @staticmethod
     def _stored(row: dict[str, Any]) -> StoredLedgerSegment:
@@ -281,7 +282,7 @@ class LedgerSegmentRepository:
             raise DomainError(
                 "RETRYABLE_DATABASE_ERROR", "Ledger index advanced during dependency read", 503
             )
-        return tuple(self._stored(dict(row)) for row in rows)
+        return tuple(decode_segment_row(self.session, dict(row), self._stored) for row in rows)
 
     def intersecting(
         self,
@@ -333,7 +334,7 @@ class LedgerSegmentRepository:
                 seen += 1
                 if seen > max_segments:
                     raise segment_inconsistent()
-                yield self._stored(dict(row))
+                yield decode_segment_row(self.session, dict(row), self._stored)
             after = rows[-1]["first_revision"]
         if seen != int(count):
             raise segment_inconsistent()

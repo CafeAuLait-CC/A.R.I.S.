@@ -23,6 +23,7 @@ from aris.modules.lyra.coverage_ledger_service import CoverageLedgerReader
 from aris.modules.lyra.coverage_schemas import ProcessingCoverageConfiguration
 from aris.modules.lyra.coverage_service import ProcessingCoverageService
 from aris.modules.lyra.ledger_repo import UsageLedgerRepository
+from aris.modules.lyra.ledger_segment_decode import segment_decoding_scope
 from aris.modules.lyra.ledger_window_read import LedgerWindowQuery
 from aris.modules.lyra.source_prefix_repo import SourcePrefixRepository
 from aris.modules.lyra.trace_consumer_schemas import UsageTraceConsumeContext
@@ -114,6 +115,21 @@ class UsageWindowSnapshotService:
             raise DomainError("RETRYABLE_DATABASE_ERROR", "Window snapshot budget exceeded", 503)
 
     def _build(
+        self,
+        session: Session,
+        request: CaptureUsageWindow,
+        config: ProcessingCoverageConfiguration,
+        source: UsageArchiveHead,
+        revision: int | None,
+        read_at: datetime,
+        deadline: float,
+    ) -> SampledUsageWindow:
+        with segment_decoding_scope(session):
+            return self._build_in_scope(
+                session, request, config, source, revision, read_at, deadline
+            )
+
+    def _build_in_scope(
         self,
         session: Session,
         request: CaptureUsageWindow,

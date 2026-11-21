@@ -18,6 +18,7 @@ from aris.modules.lyra.ledger_schemas import (
     UsageLedgerHead,
     make_ledger_entry,
 )
+from aris.modules.lyra.ledger_segment_decode import decode_segment_row, segment_decoding_scope
 from aris.modules.lyra.ledger_segment_repo import LedgerSegmentRepository
 from aris.modules.lyra.ledger_segment_schemas import (
     CaptureLedgerSegment,
@@ -111,6 +112,43 @@ def request(service, head, previous=None):
 def segment_count(service):
     with service.sessions() as db:
         return db.scalar(select(func.count()).select_from(LedgerSegmentRow))
+
+
+def test_window_decode_scope_rejects_changed_sql_metadata_and_canonical_content(ledger):
+    service, first, _ = fixture(ledger)
+    head = UsageLedgerHead(node_id=first.node_id, revision=1, fingerprint=first.fingerprint)
+    stored = service.capture(CONTEXT, request(service, head))
+    with service.sessions() as db:
+        original = dict(
+            db.execute(
+                select(*LedgerSegmentRow.__table__.c).where(
+                    LedgerSegmentRow.id == str(stored.request.id)
+                )
+            )
+            .mappings()
+            .one()
+        )
+        before = dict(db.info)
+        with segment_decoding_scope(db):
+            repo = LedgerSegmentRepository(db)
+            assert repo.get(stored.request.id) == stored
+            with pytest.raises(RuntimeError, match="scope interruption"):
+                with segment_decoding_scope(db):
+                    assert repo.get(stored.request.id) == stored
+                    raise RuntimeError("scope interruption")
+            for changes in (
+                {"maximum_end": first.details.measurement.end_at + timedelta(seconds=1)},
+                {"canonical_segment": " " + original["canonical_segment"]},
+            ):
+                # Actual rows are immutable. Inject a corrupted SQL-row copy
+                # at the decoder boundary without disabling that protection.
+                with pytest.raises(DomainError, match="inconsistent"):
+                    decode_segment_row(db, {**original, **changes}, repo._stored)
+                assert repo.get(stored.request.id) == stored
+        assert db.info == before
+        db.rollback()
+        with db.begin():
+            assert LedgerSegmentRepository(db).get(stored.request.id) == stored
 
 
 def test_segment_binds_original_chain_retries_and_keeps_old_anchor_after_growth(ledger):
