@@ -23,7 +23,6 @@ from aris.interfaces.usage.activity_service import ActivityPreviewAccess, Activi
 from aris.interfaces.usage.service import UsageHistorySurface
 from aris.modules.lyra.activity_preview_service import ActivityPreviewService
 from aris.modules.lyra.indexed_usage_service import IndexedUsageHistoryService
-from aris.modules.lyra.usage_history_service import UsageHistoryService
 from aris.modules.lyra.weekly_report_service import WeeklyReportReader
 from aris.modules.lyra.window_reader import UsageWindowReader
 from aris.modules.nova.weekly_plan_reader import WeeklyPlanReader
@@ -103,16 +102,15 @@ def main(argv: list[str] | None = None) -> int:
         engine = build_engine(settings.database_url)
         check_database(engine)
         sessions = session_factory(engine)
+        history = IndexedUsageHistoryService(sessions)
         surface = UsageHistorySurface(
-            IndexedUsageHistoryService(sessions),
+            history,
             auth,
             config.node_ids,
             saved_windows=UsageWindowReader(session_factory(engine))
             if config.saved_snapshots
             else None,
-            weekly_reports=WeeklyReportReader(UsageHistoryService(session_factory(engine)))
-            if config.weekly_reports
-            else None,
+            weekly_reports=WeeklyReportReader(history) if config.weekly_reports else None,
             weekly_plans=WeeklyPlanReader(session_factory(engine))
             if config.weekly_reports
             else None,
