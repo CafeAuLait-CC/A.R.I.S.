@@ -23,6 +23,15 @@ from aris.core.db import Base
 class StableWindowPlanRow(Base):
     __tablename__ = "usage_stable_window_plans"
     __table_args__ = (
+        Index(
+            "ix_stable_plan_pending",
+            "configuration_fingerprint",
+            "method_fingerprint",
+            "created_at",
+            "key",
+            postgresql_where=text("next_window<planned_windows"),
+            sqlite_where=text("next_window<planned_windows"),
+        ),
         CheckConstraint(
             "length(key)=64 AND length(configuration_fingerprint)=64 "
             "AND length(method_fingerprint)=64 AND length(fingerprint)=64",
@@ -59,6 +68,34 @@ class StableWindowPlanRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     canonical_plan: Mapped[str] = mapped_column(Text)
     fingerprint: Mapped[str] = mapped_column(String(64))
+
+
+class StableDispatchStateRow(Base):
+    __tablename__ = "usage_stable_dispatch_states"
+    __table_args__ = (
+        CheckConstraint(
+            "version>=1 AND observed_plan_version>=1 AND failures>=0 AND failures<=20",
+            name="ck_stable_dispatch_counters",
+        ),
+        CheckConstraint(
+            "available_at>=updated_at AND updated_at>=created_at", name="ck_stable_dispatch_times"
+        ),
+        CheckConstraint(
+            "(failures=0 AND last_error_code IS NULL AND NOT blocked) "
+            "OR (failures>0 AND last_error_code IS NOT NULL)",
+            name="ck_stable_dispatch_outcome",
+        ),
+    )
+    key: Mapped[str] = mapped_column(ForeignKey("usage_stable_window_plans.key"), primary_key=True)
+    version: Mapped[int] = mapped_column(BigInteger)
+    observed_plan_version: Mapped[int] = mapped_column(BigInteger)
+    failures: Mapped[int] = mapped_column(Integer)
+    blocked: Mapped[bool] = mapped_column(Boolean)
+    last_error_code: Mapped[str | None] = mapped_column(String(64))
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    event_id: Mapped[str] = mapped_column(ForeignKey("domain_events.event_id"), unique=True)
 
 
 class StableWindowAcceptanceRow(Base):

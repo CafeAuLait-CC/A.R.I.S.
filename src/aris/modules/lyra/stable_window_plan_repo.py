@@ -28,6 +28,17 @@ class StableWindowPlanRepository:
             )
             self.session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": value})
 
+    def try_lock(self, key: str) -> bool:
+        if self.session.get_bind().dialect.name != "postgresql":
+            return True
+        value = int.from_bytes(
+            hashlib.sha256(b"aris.lyra.stable_plan.lock\x00" + key.encode()).digest()[:8],
+            signed=True,
+        )
+        return bool(
+            self.session.scalar(text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": value})
+        )
+
     @staticmethod
     def _fields(value: StoredStableWindowPlan) -> dict[str, object]:
         run = value.witness.parent_run
