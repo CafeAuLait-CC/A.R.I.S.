@@ -141,6 +141,18 @@ class StableWindowAcceptanceService:
         except DBAPIError as error:
             raise self._failure(error) from None
 
+    def verified_in_transaction(self, session: Session, key: str) -> StoredAcceptedStableWindow:
+        """Recheck the first fixed sources and parent identity before new recording."""
+        value = self.exact_in_transaction(session, key)
+        proof = self._proof(session, value.request)
+        if (
+            proof.fingerprint != value.proof.fingerprint
+            or self._identity(session, value.request, proof) != value.parent_identity
+            or self._configuration(value.request) != value.configuration
+        ):
+            raise DomainError("CONFLICT", "First accepted stable evidence differs", 409)
+        return value
+
     def accept(
         self, context: UsagePostingContext, request: AcceptStableWindow
     ) -> AcceptedStableWindowReceipt:
