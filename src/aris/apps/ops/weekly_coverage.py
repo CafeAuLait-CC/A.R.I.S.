@@ -7,7 +7,7 @@ import sys
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from threading import Event
+from time import monotonic, sleep
 from uuid import uuid4
 
 from pydantic import Field, JsonValue, SecretStr, model_validator
@@ -159,7 +159,13 @@ def main(argv: list[str] | None = None) -> int:
         mode.add_argument("--" + flag, action="store_true")
     args = parser.parse_args(argv)
     engine = None
-    stopped = Event()
+    stop_requested = False
+
+    def request_stop(_signal: int, _frame: object) -> None:
+        nonlocal stop_requested
+        # Signal callbacks may reenter: do not acquire a threading primitive here.
+        stop_requested = True
+
     try:
         config = read_private(args.config, WeeklyCoverageConfig)
         if args.validate or (not config.enabled and not args.status):
@@ -183,7 +189,7 @@ def main(argv: list[str] | None = None) -> int:
         schedules = CoverageScheduleService(session_factory(engine), enabled=config.enabled)
         if args.run:
             for value in (signal.SIGINT, signal.SIGTERM):
-                signal.signal(value, lambda *_: stopped.set())
+                signal.signal(value, request_stop)
         while True:
             result = run_tick(config, schedules, status_only=args.status)
             print(json.dumps(result), flush=True)
@@ -194,7 +200,14 @@ def main(argv: list[str] | None = None) -> int:
                 if result.get("needs_attention") or not result.get("made_progress")
                 else 0
             )
-            if stopped.wait(delay):
+            resume_at = monotonic() + delay
+            while not stop_requested:
+                remaining = resume_at - monotonic()
+                if remaining <= 0:
+                    break
+                # Keep the configured database poll interval; this wait does no I/O.
+                sleep(min(0.1, remaining))
+            if stop_requested:
                 return 1 if result.get("needs_attention") else 0
     except (ValueError, OSError, DomainError, SQLAlchemyError) as error:
         print(

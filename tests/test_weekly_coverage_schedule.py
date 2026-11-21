@@ -1,6 +1,12 @@
 import json
+import os
+import select as io_ready
+import signal
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
+from time import monotonic
 from uuid import UUID, uuid4
 
 import pytest
@@ -21,6 +27,7 @@ from aris.core.commands.schemas import ActorContext
 from aris.core.contracts import DomainError
 from aris.core.scheduler.schemas import SchedulerContext
 from aris.modules.lyra.coverage_schemas import ProcessingCoverageConfiguration
+from aris.modules.lyra.ledger_repo import UsageLedgerRepository
 from aris.modules.nova.coverage_schedule_models import CoveragePeriodResultRow, CoverageScheduleRow
 from aris.modules.nova.coverage_schedule_reader import CoverageScheduleReader
 from aris.modules.nova.coverage_schedule_repo import CoverageScheduleRepository
@@ -41,6 +48,118 @@ from tests.test_stable_recording_worker import (
 
 __all__ = ["admin_state", "derivations", "history_state", "ledger", "partition_recording"]
 CONTEXT = SchedulerContext(request_id="fixture-weekly-coverage")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="native Unix signal contract")
+def test_native_idle_worker_stops_with_single_and_repeated_signals(
+    partition_recording, settings, tmp_path
+):
+    today = datetime.now(UTC).date()
+    future = today + timedelta(days=7 - today.weekday())
+    schedules, _, definition, _, _ = setup(partition_recording, settings, first_week=future)
+    personal = definition.model_copy(
+        update={"calendar": definition.calendar.model_copy(update={"report_type": "usage.mine"})}
+    )
+    config = WeeklyCoverageConfig(
+        enabled=True,
+        environment="test",
+        database_url=settings.database_url,
+        plans=(definition, personal),
+        poll_seconds=60,
+    )
+    path = tmp_path / "weekly-native.json"
+    path.write_text(
+        json.dumps(
+            {
+                **config.model_dump(mode="json"),
+                "database_url": config.database_url.get_secret_value(),
+            }
+        )
+    )
+    path.chmod(0o600)
+    with schedules.sessions() as db:
+        before = UsageLedgerRepository(db).head("node-a")
+    root = Path(__file__).resolve().parents[1]
+    for number, (received, count) in enumerate(
+        ((signal.SIGTERM, 1), (signal.SIGINT, 1), (signal.SIGTERM, 256), (signal.SIGINT, 256))
+    ):
+        stack = tmp_path / f"signal-{number}.log"
+        code = (
+            "import faulthandler,signal,runpy,sys; f=open(sys.argv[2],'ab'); "
+            "faulthandler.register(signal.SIGUSR1,file=f,all_threads=True); "
+            "sys.argv=['weekly','--config',sys.argv[1],'--run']; "
+            "runpy.run_module('aris.apps.ops.weekly_coverage',run_name='__main__')"
+        )
+        process = subprocess.Popen(
+            [
+                str(root / "scripts/uv"),
+                "run",
+                "--no-sync",
+                "python",
+                "-c",
+                code,
+                str(path),
+                str(stack),
+            ],
+            cwd=root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        target = None
+        try:
+            assert io_ready.select([process.stdout], [], [], 15)[0], (
+                "native worker did not report ready"
+            )
+            first = json.loads(process.stdout.readline())
+            assert all(item["state"] == "caught_up" for item in first["plans"])
+            candidates = []
+            for row in subprocess.check_output(
+                ["ps", "-axo", "pid=,pgid=,uid=,command="], text=True
+            ).splitlines():
+                parts = row.split(maxsplit=3)
+                if (
+                    len(parts) == 4
+                    and int(parts[1]) == process.pid
+                    and int(parts[2]) == os.getuid()
+                    and str(path) in parts[3]
+                    and "faulthandler" in parts[3]
+                    and "python" in parts[3].split()[0].lower()
+                ):
+                    candidates.append(int(parts[0]))
+            assert len(candidates) == 1
+            target = candidates[0]
+            began = monotonic()
+            for _ in range(count):
+                try:
+                    if os.getpgid(target) != process.pid:
+                        break
+                    os.kill(target, received)
+                except ProcessLookupError:
+                    break
+            try:
+                _, error = process.communicate(timeout=3)
+            except subprocess.TimeoutExpired:
+                if target is not None and os.getpgid(target) == process.pid:
+                    os.kill(target, signal.SIGUSR1)
+                raise
+            assert process.returncode == 0, error
+            assert monotonic() - began < 3, "shutdown must interrupt a 60-second idle wait"
+        finally:
+            if process.poll() is None:
+                try:
+                    group = os.getpgid(process.pid)
+                except ProcessLookupError:
+                    pass
+                else:
+                    assert group == process.pid
+                    os.killpg(process.pid, signal.SIGKILL)
+                process.communicate(timeout=5)
+    with schedules.sessions() as db:
+        assert UsageLedgerRepository(db).head("node-a") == before
+        assert db.scalar(select(func.count()).select_from(CoverageScheduleRow)) == 2
+        assert db.scalar(select(func.count()).select_from(CoveragePeriodResultRow)) == 0
 
 
 def setup(state, settings, *, first_week=date(2026, 11, 16)):
