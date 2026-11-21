@@ -74,6 +74,7 @@
   }
   function authMode(mode) {
     if(state.authBusy)return;
+    notice('');
     state.authMode=mode;state.invitation=null;
     $('login-form').hidden=mode!=='login';$('invitation-form').hidden=mode==='login';$('legacy-login').hidden=mode!=='login';$('invitation-fields').hidden=true;
     $('login-title').textContent=mode==='login'?'Sign in':mode==='activate'?'Activate account':'Reset password';
@@ -99,7 +100,7 @@
   $('send-invitation').addEventListener('click',async()=>{
     if(state.authBusy || Date.now()<state.invitationSendAfter || state.authMode==='login')return;
     let account;try{account=username($('invitation-username').value);}catch(error){notice(error.message,true);return;}
-    state.authBusy=true;state.invitation=null;state.invitationSendAfter=Date.now()+60000;authControls();$('invitation-fields').hidden=true;$('invitation-message').textContent='Sending invitation code…';
+    state.authBusy=true;state.invitation=null;state.invitationSendAfter=Date.now()+60000;authControls();notice('');$('invitation-fields').hidden=true;$('invitation-message').textContent='Sending invitation code…';
     clearTimeout(invitationTimer);invitationTimer=setTimeout(()=>{invitationTimer=null;authControls();},60000);
     try {
       const data=await request('/internal/members/invitation',{username:account,purpose:state.authMode});

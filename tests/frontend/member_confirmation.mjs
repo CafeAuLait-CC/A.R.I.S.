@@ -20,10 +20,12 @@ async function page(layout,options={}) {
   const calls=[],timers=new Map();let timerID=0;
   const control={submitted:0,confirmed:0,cancelled:0,phase:'awaiting_confirmation',...options};
   const session=()=>({actor:{user_id:'operator',display_name:'Operator',email:'operator@example.test',role:'admin',timezone:'UTC',directory_revision:2},account:{username:null,password_ready:false},nodes:['node-a'],workspace_namespace:'TDEMO',csrf_token:'fixture-csrf',slack_roster_available:false});
-  const response=data=>({ok:true,status:200,json:async()=>structuredClone(data)});
+  const response=(data,status=200)=>({ok:status>=200 && status<300,status,json:async()=>structuredClone(data)});
   const fetch=async(path,request={})=>{
     calls.push({path,...request});
-    if(path===layout.account+'/session')return response(session());
+    if(path===layout.account+'/session')return control.signedOut?response({error:{message:'Please sign in to continue'}},401):response(session());
+    if(path===layout.account+'/login')return response({error:{message:'Please sign in to continue'}},401);
+    if(path===layout.account+'/invitation')return response({challenge_id:'fixture-challenge',expires_in:600,message:'Check Slack for your invitation code.'});
     if(path===layout.account+'/directory')return response({directory:{namespace:{namespace:'TDEMO'},revision:2,next_cursor:null,members:[]},access:[]});
     if(path===layout.commands){
       control.submitted++;const payload=JSON.parse(request.body);control.command=payload.command;control.parameters=structuredClone(payload.parameters);
@@ -58,6 +60,27 @@ let checks=0;
 for(const layout of layouts){
   assert(!layout.html.includes('id="account-remember"'));
   assert(!layout.source.includes("$('account-remember')"));
+  {
+    const p=await page(layout,{signedOut:true});
+    p.$('login-username').value='test-only';p.$('login-password').value='fixture-password-123';
+    p.$('login-form').listeners.submit[0]({preventDefault(){}});await settle();
+    assert.equal(p.$('notice').textContent,'Please sign in to continue');
+    assert(p.$('notice').classList.contains('error'));
+    p.$('auth-reset').listeners.click[0]();
+    assert(p.$('notice').hidden,'switching to password reset clears the previous login error');
+    p.$('invitation-form').listeners.submit[0]({preventDefault(){}});await settle();
+    assert(!p.$('notice').hidden,'current validation errors remain visible');
+    p.$('invitation-username').value='test-only';
+    await p.$('send-invitation').listeners.click[0]();
+    assert(p.$('notice').hidden,'successful code delivery must not retain an earlier error');
+    assert.equal(p.$('notice').classList.contains('error'),false);
+    assert.equal(p.$('invitation-fields').hidden,false);
+    assert.equal(p.$('invitation-message').textContent,'Check Slack for your invitation code.');
+    p.$('invitation-code').value='incorrect';
+    await p.$('invitation-form').listeners.submit[0]({preventDefault(){}});
+    assert.equal(p.$('notice').textContent,'Enter the six-digit invitation code from Slack.');
+    assert(!p.$('notice').hidden,'actual errors in the reset flow remain visible');checks++;
+  }
   {
     const p=await page(layout);p.begin();
     assert(p.$('review-dialog').open);assert.equal(p.$('confirm-review').disabled,false);
