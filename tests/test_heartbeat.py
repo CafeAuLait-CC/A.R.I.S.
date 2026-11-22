@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from aris.core.audit import AuditEntry
 from aris.core.db import SCHEMA_REVISION
 from aris.core.events import DomainEvent, OutboxEntry
-from aris.modules.vega.models import AgentMessage, Node
+from aris.modules.vega.models import AgentMessage, AgentMessageReceipt, Node
 from tests.conftest import AGENT_TOKEN
 from tests.test_telemetry import batch, post, status
 
@@ -103,6 +103,38 @@ def test_heartbeat_auth_validation_and_global_message_identity(client):
     assert post(client, batch(seq=1)).status_code == 409
     with Session(client.app.state.engine) as session:
         assert session.scalar(select(func.count()).select_from(AgentMessage)) == 1
+
+    assert beat(client, heartbeat(seq=2)).status_code == 200
+    with Session(client.app.state.engine) as session, session.begin():
+        row = session.scalar(
+            select(AgentMessage).where(AgentMessage.message_id == original["message_id"])
+        )
+        assert row is not None
+        session.add(
+            AgentMessageReceipt(
+                agent_id=row.agent_id,
+                seq=row.seq,
+                message_id=row.message_id,
+                fingerprint=row.fingerprint,
+                applied_to_current=row.applied_to_current,
+            )
+        )
+        raw_id = row.id
+    assert beat(client, original).json()["duplicate"] is True
+    with Session(client.app.state.engine) as session, session.begin():
+        row = session.get(AgentMessage, raw_id)
+        assert row is not None
+        session.delete(row)
+    replay = beat(client, original)
+    assert replay.status_code == 200
+    assert replay.json()["duplicate"] is True and replay.json()["applied_to_current"] is True
+    assert beat(client, {**original, "collector_status": "error"}).status_code == 409
+    assert beat(client, heartbeat(seq=1)).status_code == 409
+    assert beat(client, {**original, "seq": 3}).status_code == 409
+    assert status(client)["nodes"][0]["seq"] == 2
+    with Session(client.app.state.engine) as session:
+        assert session.scalar(select(func.count()).select_from(AgentMessage)) == 1
+        assert session.scalar(select(func.count()).select_from(DomainEvent)) == 2
 
 
 def test_postgres_heartbeat_and_sample_concurrent_first_reports(client):

@@ -5,6 +5,7 @@ from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Integer,
@@ -79,3 +80,19 @@ class AgentMessage(Base):
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     applied_to_current: Mapped[bool] = mapped_column(Boolean)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class AgentMessageReceipt(Base):
+    __tablename__ = "agent_message_receipts"
+    __table_args__ = (
+        UniqueConstraint("agent_id", "message_id", name="uq_agent_message_receipt_id"),
+        CheckConstraint(
+            "seq > 0 AND length(fingerprint)=64",
+            name="ck_agent_message_receipt_identity",
+        ),
+    )
+    agent_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    seq: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    message_id: Mapped[str] = mapped_column(String(36))
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    applied_to_current: Mapped[bool] = mapped_column(Boolean)

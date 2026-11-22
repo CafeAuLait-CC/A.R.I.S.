@@ -8,8 +8,15 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
+from aris.core.contracts import DomainError
 from aris.core.time import utc
-from aris.modules.vega.models import AgentMessage, GpuDevice, Node, NodeResource
+from aris.modules.vega.models import (
+    AgentMessage,
+    AgentMessageReceipt,
+    GpuDevice,
+    Node,
+    NodeResource,
+)
 from aris.modules.vega.reports import AgentReport
 from aris.modules.vega.storage_schemas import MessageStorage
 from aris.modules.vega.target_schemas import GpuInventoryLabel
@@ -41,6 +48,12 @@ class StoredUsageMessage:
     received_at: datetime
     fingerprint: str
     payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class MessageAcknowledgment:
+    fingerprint: str
+    applied_to_current: bool
 
 
 class VegaRepository:
@@ -104,12 +117,21 @@ class VegaRepository:
             select(Node).where(Node.id == batch.node_id).with_for_update()
         ).one_or_none()
 
-    def message(self, agent_id: str, message_id: str) -> AgentMessage | None:
-        return self.session.scalar(
-            select(AgentMessage).where(
-                AgentMessage.agent_id == agent_id, AgentMessage.message_id == message_id
+    def message(self, agent_id: str, message_id: str) -> MessageAcknowledgment | None:
+        archived = AgentMessage
+        receipt = AgentMessageReceipt
+        rows = self.session.execute(
+            select(archived.seq, archived.fingerprint, archived.applied_to_current)
+            .where(archived.agent_id == agent_id, archived.message_id == message_id)
+            .union(
+                select(receipt.seq, receipt.fingerprint, receipt.applied_to_current).where(
+                    receipt.agent_id == agent_id, receipt.message_id == message_id
+                )
             )
-        )
+        ).all()
+        if len(rows) > 1:
+            raise DomainError("DEPENDENCY_UNAVAILABLE", "Stored message receipts disagree", 503)
+        return MessageAcknowledgment(rows[0][1], rows[0][2]) if rows else None
 
     def usage_message(self, agent_id: str, message_id: str) -> StoredUsageMessage | None:
         row = self.session.execute(
@@ -220,14 +242,15 @@ class VegaRepository:
         return tuple(sorted(((r[0], r[1], r[2]) for r in rows), key=lambda r: r[1]))
 
     def sequence_exists(self, agent_id: str, seq: int) -> bool:
-        return (
-            self.session.scalar(
-                select(AgentMessage.id).where(
-                    AgentMessage.agent_id == agent_id, AgentMessage.seq == seq
-                )
-            )
-            is not None
+        archived = AgentMessage
+        receipt = AgentMessageReceipt
+        present = self.session.scalar(
+            select(archived.seq)
+            .where(archived.agent_id == agent_id, archived.seq == seq)
+            .union_all(select(receipt.seq).where(receipt.agent_id == agent_id, receipt.seq == seq))
+            .limit(1)
         )
+        return present is not None
 
     def nodes(self) -> Sequence[Node]:
         return self.session.scalars(select(Node).order_by(Node.id)).all()
