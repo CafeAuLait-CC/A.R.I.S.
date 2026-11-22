@@ -20,7 +20,7 @@ from sqlalchemy import delete, event, func, select, text, update
 from sqlalchemy.exc import DBAPIError
 
 from aris.apps.api.main import create_app
-from aris.apps.composition.daily_coverage import verify_daily_coverage
+from aris.apps.composition.daily_coverage import prepare_day_revision, verify_daily_coverage
 from aris.apps.composition.lyra import build_lyra_components
 from aris.apps.composition.lyra_coverage import (
     CoverageBuildTarget,
@@ -61,7 +61,9 @@ from aris.modules.nova.report_calendar import WeeklyReportPlan, weekly_report_pe
 from aris.modules.nova.weekly_coverage import weekly_coverage_target
 from aris.modules.vega.models import AgentMessage
 from tests.test_heartbeat import beat, heartbeat
+from tests.test_historical_usage_facts import owner, ownership
 from tests.test_recorded_usage import reading_service
+from tests.test_resource_telemetry import put, resource_batch
 from tests.test_stable_recording_worker import (
     admin_state,
     derivations,
@@ -698,6 +700,80 @@ def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
         assert refused_timeline.value.code == "PERMISSION_DENIED"
     finally:
         event.remove(engine, "before_cursor_execute", only_report)
+
+
+def test_day_revision_uses_distinct_saved_rollup_and_preserves_published_week(
+    partition_recording, settings
+):
+    schedules, config, legacy, _, graph = setup(partition_recording, settings)
+    definition = CoverageScheduleDefinition.model_validate(
+        {**legacy.model_dump(mode="json"), "daily_rollups": True}
+    )
+    config = config.model_copy(update={"plans": (definition,)})
+    for _ in range(64):
+        outcome = run_tick(config, schedules, clock=schedules.clock)
+        assert not outcome["needs_attention"]
+        if outcome["plans"][0]["state"] == "daily_report_saved":
+            break
+    else:
+        pytest.fail("Original daily report was not published")
+
+    week = definition.calendar.first_week
+    old = schedules.verify_daily_week(CONTEXT, definition, week)
+    old_review = schedules.evidence_review(definition, week)
+    day = week
+    evening = old.report.start_at + timedelta(hours=19)
+    with schedules.sessions() as db:
+        last = db.scalar(select(func.max(AgentMessage.seq)))
+    client = partition_recording[2][4]
+    for offset in range(4):
+        sample = resource_batch(
+            seq=last + offset + 1, observed_at=evening + timedelta(seconds=15 * offset)
+        )
+        if offset < 3:
+            ownership(sample, [owner(username="linux-user")])
+        else:
+            sample["resources"]["compute"].update(reported_processes=0, gpus=[])
+        assert put(client, sample).status_code == 200
+    for _ in range(8):
+        assert not graph.run_once()["failures"]
+    held = preview_week_retention(schedules, definition, week)
+    assert "packets_outside_daily_freeze" in held.blockers
+    request = uuid4()
+    paused = CoverageScheduleService(schedules.sessions, clock=schedules.clock)
+
+    def prepare(service):
+        return prepare_day_revision(
+            service,
+            definition,
+            day,
+            request,
+            prefix_proofs_per_tick=8,
+            transaction_timeout_ms=30000,
+        )
+
+    with pytest.raises(DomainError) as error:
+        prepare(paused)
+    assert error.value.code == "WEEKLY_COVERAGE_NOT_CONFIGURED"
+    for _ in range(24):
+        candidate = prepare(schedules)
+        assert not candidate["published"]
+        if candidate["state"] == "revision_ready":
+            break
+    else:
+        pytest.fail("Replacement daily rollup was not saved")
+    proposed = candidate["candidate"]
+    assert candidate["official_report_fingerprint"] == old.fingerprint
+    assert proposed["fingerprint"] != old.report.fingerprint
+    assert candidate["comparison"]["verified_usage_microseconds_delta"] == 30_000_000
+    assert [
+        source["day"]
+        for source, official_day in zip(proposed["days"], old.report.days, strict=True)
+        if source["snapshot_id"] != str(official_day.snapshot_id)
+    ] == [day.isoformat()]
+    assert prepare(paused) == candidate
+    assert schedules.verify_daily_week(CONTEXT, definition, week) == old
+    assert schedules.evidence_review(definition, week) == old_review
 
 
 def test_snapshot_saved_before_cursor_failure_is_recovered_atomically_and_retained(

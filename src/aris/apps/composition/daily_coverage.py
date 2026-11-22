@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
+from uuid import UUID, uuid5
 
 from pydantic import JsonValue
 from sqlalchemy.orm import Session, sessionmaker
@@ -15,6 +16,7 @@ from aris.core.access.history_service import NodeUserHistoryService
 from aris.core.commands.schemas import ActorContext
 from aris.core.contracts import DomainError
 from aris.core.scheduler.schemas import SchedulerContext
+from aris.modules.lyra.coverage_build_schemas import completed_coverage_window_id
 from aris.modules.lyra.daily_session_occupancy_service import DailySessionOccupancyService
 from aris.modules.lyra.indexed_usage_service import IndexedUsageHistoryService
 from aris.modules.lyra.session_occupancy_service import SessionOccupancyService
@@ -29,7 +31,7 @@ from aris.modules.nova.coverage_schedule_schemas import (
     DailyCoverageEvidence,
 )
 from aris.modules.nova.coverage_schedule_service import CoverageScheduleService
-from aris.modules.nova.daily_coverage_calendar import daily_coverage_targets
+from aris.modules.nova.daily_coverage_calendar import DailyCoverageTarget, daily_coverage_targets
 from aris.modules.vega.usage_span import VegaUsageSpans
 
 
@@ -96,6 +98,32 @@ def daily_coverage_step(
     report.update(day=current.day.isoformat(), due_at=current.scheduled_for.isoformat())
     if current.scheduled_for > now or status_only:
         return {**report, "state": "future_day" if current.scheduled_for > now else "pending"}
+    return {
+        **report,
+        **_build_day(
+            sessions,
+            definition,
+            current,
+            actor,
+            reports,
+            clock=clock,
+            prefix_proofs_per_tick=prefix_proofs_per_tick,
+            transaction_timeout_ms=transaction_timeout_ms,
+        ),
+    }
+
+
+def _build_day(
+    sessions: sessionmaker[Session],
+    definition: CoverageScheduleDefinition,
+    current: DailyCoverageTarget,
+    actor: ActorContext,
+    reports: WeeklyFromDailyReader,
+    *,
+    clock: Callable[[], datetime],
+    prefix_proofs_per_tick: int,
+    transaction_timeout_ms: int,
+) -> dict[str, JsonValue]:
     graph = build_lyra_coverage_components(
         sessions,
         LyraCoverageRuntimeConfig(
@@ -111,7 +139,7 @@ def daily_coverage_step(
     step = graph.run_once()
     if step["state"] == "finished":
         completed = reports.daily_windows.node_snapshot_fingerprints(
-            actor, calendar.scope.id, (current.snapshot_id,)
+            actor, current.query.node_id, (current.snapshot_id,)
         )
         fingerprint = completed.get(current.snapshot_id)
         if fingerprint is None:
@@ -122,11 +150,95 @@ def daily_coverage_step(
             DailyWindowReference(snapshot_id=current.snapshot_id, snapshot_fingerprint=fingerprint),
         )
     else:
-        reports.stored_references(actor, calendar.scope.id, (current.snapshot_id,))
+        reports.stored_references(actor, current.query.node_id, (current.snapshot_id,))
     return {
-        **report,
         "state": "day_saved" if step["state"] == "finished" else step["state"],
         "build": step,
+    }
+
+
+def prepare_day_revision(
+    schedules: CoverageScheduleService,
+    definition: CoverageScheduleDefinition,
+    day: date,
+    revision_id: UUID,
+    *,
+    prefix_proofs_per_tick: int,
+    transaction_timeout_ms: int,
+) -> dict[str, JsonValue]:
+    """Build a separate daily rollup and compare it without publishing a changed week."""
+    week = day - timedelta(days=day.weekday())
+    actor = ActorContext(actor_id=definition.calendar.owner_id, request_id="prepare-day-revision")
+    official = schedules.verify_daily_week(
+        SchedulerContext(request_id=actor.request_id), definition, week
+    )
+    original = next((value for value in official.report.days if value.day == day), None)
+    target = next(
+        (value for value in daily_coverage_targets(definition, week) if value.day == day), None
+    )
+    if original is None or target is None or original.snapshot_id != target.snapshot_id:
+        raise DomainError("NOT_FOUND", "Saved reporting day is unavailable", 404)
+    revision_plan = uuid5(target.plan_id, "daily-revision/" + str(revision_id))
+    proposed = target.model_copy(
+        update={
+            "plan_id": revision_plan,
+            "snapshot_id": completed_coverage_window_id(revision_plan),
+        }
+    )
+    reports = _daily_report_reader(schedules.sessions, definition, schedules.clock)
+    known = reports.stored_references(actor, target.query.node_id, (proposed.snapshot_id,))
+    result: dict[str, JsonValue] = {
+        "state": "revision_ready",
+        "revision_id": str(revision_id),
+        "node_id": target.query.node_id,
+        "day": day.isoformat(),
+        "official_report_id": str(official.id),
+        "official_report_fingerprint": official.fingerprint,
+        "published": False,
+    }
+    if proposed.snapshot_id not in known:
+        if not schedules.enabled:
+            raise DomainError(
+                "WEEKLY_COVERAGE_NOT_CONFIGURED", "Preparing revisions is paused", 503
+            )
+        return {
+            **result,
+            **_build_day(
+                schedules.sessions,
+                definition,
+                proposed,
+                actor,
+                reports,
+                clock=schedules.clock,
+                prefix_proofs_per_tick=prefix_proofs_per_tick,
+                transaction_timeout_ms=transaction_timeout_ms,
+            ),
+        }
+    candidate = reports.read(
+        actor,
+        official.report.query,
+        tuple(
+            DailyWindowReference(
+                snapshot_id=proposed.snapshot_id, snapshot_fingerprint=known[proposed.snapshot_id]
+            )
+            if source.day == day
+            else DailyWindowReference(
+                snapshot_id=source.snapshot_id, snapshot_fingerprint=source.snapshot_fingerprint
+            )
+            for source in official.report.days
+        ),
+    )
+    return {
+        **result,
+        "comparison": {
+            "recorded_microseconds_delta": candidate.recorded_microseconds
+            - official.report.recorded_microseconds,
+            "verified_usage_microseconds_delta": candidate.verified_usage_microseconds
+            - official.report.verified_usage_microseconds,
+            "official_coverage": official.report.coverage,
+            "candidate_coverage": candidate.coverage,
+        },
+        "candidate": candidate.model_dump(mode="json"),
     }
 
 
