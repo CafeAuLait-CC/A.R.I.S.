@@ -54,6 +54,7 @@ from aris.modules.nova.coverage_schedule_models import (
     CoveragePeriodResultRow,
     CoverageScheduleRow,
     DailyCoveragePeriodResultRow,
+    VerifiedDailyCoverageRevisionRow,
 )
 from aris.modules.nova.coverage_schedule_reader import CoverageScheduleReader
 from aris.modules.nova.coverage_schedule_repo import CoverageScheduleRepository
@@ -839,14 +840,15 @@ def test_day_revision_uses_distinct_saved_rollup_and_preserves_published_week(
             transaction_timeout_ms=30000,
         )
 
-    def verify(fingerprint):
+    def verify(fingerprint, *, record=False, service=paused):
         return verify_day_revision(
-            paused,
+            service,
             definition,
             day,
             request,
             expected_fingerprint=fingerprint,
             transaction_timeout_ms=30000,
+            record=record,
         )
 
     with pytest.raises(DomainError) as error:
@@ -882,6 +884,22 @@ def test_day_revision_uses_distinct_saved_rollup_and_preserves_published_week(
     assert checked["other_days_pending"] == [
         value.isoformat() for value in old_review.pending_days if value != day
     ]
+    assert checked["saved_verification_fingerprint"] is None
+    with pytest.raises(DomainError) as no_saved_result:
+        paused.read_verified_revision(definition, day, request)
+    assert no_saved_result.value.code == "NOT_FOUND"
+    with pytest.raises(DomainError) as disabled:
+        verify(proposed["fingerprint"], record=True)
+    assert disabled.value.code == "WEEKLY_COVERAGE_NOT_CONFIGURED"
+    saved = verify(proposed["fingerprint"], record=True, service=schedules)
+    saved_fingerprint = saved["saved_verification_fingerprint"]
+    assert saved_fingerprint and not saved["published"]
+    original_receipt = paused.read_verified_revision(definition, day, request)
+    assert original_receipt.fingerprint == saved_fingerprint
+    assert original_receipt.candidate.model_dump(mode="json") == proposed
+    assert verify(proposed["fingerprint"], record=True, service=schedules) == saved
+    with pytest.raises(DBAPIError), schedules.sessions.begin() as db:
+        db.execute(update(VerifiedDailyCoverageRevisionRow).values(fingerprint="f" * 64))
     assert (
         put(
             client,
@@ -893,6 +911,7 @@ def test_day_revision_uses_distinct_saved_rollup_and_preserves_published_week(
         verify(proposed["fingerprint"])
     assert stale.value.code == "CONFLICT"
     assert stale.value.message == "Prepared reporting evidence changed"
+    assert paused.read_verified_revision(definition, day, request) == original_receipt
     assert schedules.verify_daily_week(CONTEXT, definition, week) == old
     assert schedules.evidence_review(definition, week) == old_review
 

@@ -166,6 +166,33 @@ class DailyCoverageEvidenceCheck(DailyCoverageEvidence):
     checked_at: AwareDatetime
 
 
+class VerifiedDailyCoverageRevision(AccessContract):
+    original_report_id: UUID
+    original_report_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    revision_id: UUID
+    day: date
+    candidate: WeeklyFromDaily
+    checked_at: AwareDatetime
+    fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    published: Literal[False] = False
+
+    def content_fingerprint(self) -> str:
+        return schedule_fingerprint(
+            "verified_daily_coverage_revision", schedule_canonical(self, exclude={"fingerprint"})
+        )
+
+    @model_validator(mode="after")
+    def verified_candidate(self) -> "VerifiedDailyCoverageRevision":
+        if (
+            self.candidate.missing_days
+            or self.candidate.end_at > self.checked_at
+            or all(day.day != self.day for day in self.candidate.days)
+            or self.fingerprint != self.content_fingerprint()
+        ):
+            raise ValueError("Verified revision differs from its complete saved weekly candidate")
+        return self
+
+
 class WeeklyEvidenceReview(AccessContract):
     report_id: UUID
     report_fingerprint: str

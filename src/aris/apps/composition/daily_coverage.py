@@ -2,10 +2,11 @@
 
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
-from uuid import UUID, uuid5
+from uuid import UUID
 
 from pydantic import JsonValue
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, sessionmaker
 
 from aris.apps.composition.lyra_coverage import (
@@ -14,11 +15,11 @@ from aris.apps.composition.lyra_coverage import (
     build_lyra_coverage_components,
 )
 from aris.core.access.history_service import NodeUserHistoryService
-from aris.core.commands.budgets import transaction_budget
+from aris.core.commands.budgets import database_failure, transaction_budget
 from aris.core.commands.schemas import ActorContext
 from aris.core.contracts import DomainError
+from aris.core.db import commit_owned_transaction
 from aris.core.scheduler.schemas import SchedulerContext
-from aris.modules.lyra.coverage_build_schemas import completed_coverage_window_id
 from aris.modules.lyra.coverage_rollup import SavedCoverageRollup
 from aris.modules.lyra.daily_session_occupancy_service import DailySessionOccupancyService
 from aris.modules.lyra.indexed_usage_service import IndexedUsageHistoryService
@@ -39,7 +40,11 @@ from aris.modules.nova.coverage_schedule_schemas import (
     DailyCoveragePeriodResult,
 )
 from aris.modules.nova.coverage_schedule_service import CoverageScheduleService
-from aris.modules.nova.daily_coverage_calendar import DailyCoverageTarget, daily_coverage_targets
+from aris.modules.nova.daily_coverage_calendar import (
+    DailyCoverageTarget,
+    daily_coverage_targets,
+    revision_coverage_target,
+)
 from aris.modules.vega.usage_archive_service import VegaUsageArchive
 from aris.modules.vega.usage_span import VegaUsageSpans
 
@@ -181,7 +186,7 @@ def prepare_day_revision(
     official = schedules.verify_daily_week(
         SchedulerContext(request_id=actor.request_id), definition, week
     )
-    proposed = _revision_target(definition, official, day, revision_id)
+    proposed = revision_coverage_target(definition, official, day, revision_id)
     reports = _daily_report_reader(schedules.sessions, definition, schedules.clock)
     known = reports.stored_references(actor, proposed.query.node_id, (proposed.snapshot_id,))
     result: dict[str, JsonValue] = {
@@ -226,25 +231,6 @@ def prepare_day_revision(
     }
 
 
-def _revision_target(
-    definition: CoverageScheduleDefinition,
-    official: DailyCoveragePeriodResult,
-    day: date,
-    revision_id: UUID,
-) -> DailyCoverageTarget:
-    original = next((value for value in official.report.days if value.day == day), None)
-    target = next(
-        (value for value in daily_coverage_targets(definition, official.week) if value.day == day),
-        None,
-    )
-    if original is None or target is None or original.snapshot_id != target.snapshot_id:
-        raise DomainError("NOT_FOUND", "Saved reporting day is unavailable", 404)
-    plan = uuid5(target.plan_id, "daily-revision/" + str(revision_id))
-    return target.model_copy(
-        update={"plan_id": plan, "snapshot_id": completed_coverage_window_id(plan)}
-    )
-
-
 def _revision_week(
     reports: WeeklyFromDailyReader,
     actor: ActorContext,
@@ -274,13 +260,16 @@ def verify_day_revision(
     *,
     expected_fingerprint: str,
     transaction_timeout_ms: int,
+    record: bool = False,
 ) -> dict[str, JsonValue]:
     """Recheck one prepared revision without replacing the saved week."""
+    if record and not schedules.enabled:
+        raise DomainError("WEEKLY_COVERAGE_NOT_CONFIGURED", "Saving revisions is paused", 503)
     week = day - timedelta(days=day.weekday())
     context = SchedulerContext(request_id="daily-revision-verification")
     actor = ActorContext(actor_id=definition.calendar.owner_id, request_id=context.request_id)
     official = schedules.verify_daily_week(context, definition, week)
-    target = _revision_target(definition, official, day, revision_id)
+    target = revision_coverage_target(definition, official, day, revision_id)
     reports = _daily_report_reader(schedules.sessions, definition, schedules.clock)
     known = reports.stored_references(actor, definition.calendar.scope.id, (target.snapshot_id,))
     if target.snapshot_id not in known:
@@ -297,16 +286,35 @@ def verify_day_revision(
     freeze = daily_archive_freeze(
         snapshot, include_session_context=definition.session_occupancy is True
     )
-    with schedules.sessions() as db, db.no_autoflush:
-        if db.get_bind().dialect.name == "postgresql":
-            db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
-        transaction_budget(db, 100, 1000, 3000)
-        (new_arrivals,) = VegaUsageArchive(
-            schedules.sessions
-        ).arrivals_outside_freezes_in_transaction(db, (freeze,))
-        review, current = schedules.evidence_review_in_transaction(db, definition, week)
-        if new_arrivals or current != official:
-            raise DomainError("CONFLICT", "Prepared reporting evidence changed", 409)
+    saved = None
+    try:
+        with schedules.sessions() as db, db.no_autoflush:
+            if db.get_bind().dialect.name == "postgresql":
+                db.execute(
+                    text(
+                        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"
+                        if record
+                        else "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
+                    )
+                )
+            elif db.get_bind().dialect.name == "sqlite":
+                db.execute(text("BEGIN"))
+            transaction_budget(db, 100, 1000, 3000)
+            (new_arrivals,) = VegaUsageArchive(
+                schedules.sessions
+            ).arrivals_outside_freezes_in_transaction(db, (freeze,))
+            review, current = schedules.evidence_review_in_transaction(db, definition, week)
+            if new_arrivals or current != official:
+                raise DomainError("CONFLICT", "Prepared reporting evidence changed", 409)
+            if record:
+                saved = schedules.save_verified_revision_in_transaction(
+                    db, definition, official, day, revision_id, candidate
+                )
+                commit_owned_transaction(db)
+    except DBAPIError as error:
+        raise DomainError(
+            database_failure(error), "Reporting revision verification is unavailable", 503
+        ) from None
     return {
         "state": "revision_verified",
         "revision_id": str(revision_id),
@@ -318,6 +326,7 @@ def verify_day_revision(
         "rollup_fingerprint": rollup.fingerprint,
         "other_days_pending": [value.isoformat() for value in review.pending_days if value != day],
         "published": False,
+        "saved_verification_fingerprint": saved.fingerprint if saved else None,
     }
 
 

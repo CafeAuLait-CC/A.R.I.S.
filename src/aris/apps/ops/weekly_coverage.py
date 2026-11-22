@@ -254,6 +254,12 @@ def main(argv: list[str] | None = None) -> int:
         metavar="YYYY-MM-DD",
         help="Recheck the retained evidence for a prepared replacement day",
     )
+    mode.add_argument(
+        "--read-day-revision",
+        type=date.fromisoformat,
+        metavar="YYYY-MM-DD",
+        help="Read an exact previously checked draft revision",
+    )
     parser.add_argument("--revision-node", help="Select the node whose reporting day is revised")
     parser.add_argument("--revision-id", type=UUID, help="Use the same ID when resuming a revision")
     parser.add_argument(
@@ -274,8 +280,13 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Save the successful check of --verify-day",
     )
+    parser.add_argument(
+        "--record-revision-verification",
+        action="store_true",
+        help="Save the checked draft without publishing it",
+    )
     args = parser.parse_args(argv)
-    revision_day = args.prepare_day_revision or args.verify_day_revision
+    revision_day = args.prepare_day_revision or args.verify_day_revision or args.read_day_revision
     review = any(
         value is not None
         for value in (
@@ -291,6 +302,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("Choose one operation on a saved natural week")
     if args.record_verification and args.verify_day is None:
         parser.error("--record-verification requires --verify-day")
+    if args.record_revision_verification and args.verify_day_revision is None:
+        parser.error("--record-revision-verification requires --verify-day-revision")
     if revision_day is not None and (args.revision_id is None or args.revision_node is None):
         parser.error("Day revision requires --revision-node and --revision-id")
     if revision_day is None and (args.revision_id is not None or args.revision_node is not None):
@@ -316,7 +329,7 @@ def main(argv: list[str] | None = None) -> int:
                 daily_coverage_targets(plan, args.from_daily_week)
         if review and (not config.plans or any(not plan.daily_rollups for plan in config.plans)):
             raise ValueError("Verification requires configured daily coverage plans")
-        if args.record_verification and not config.enabled:
+        if (args.record_verification or args.record_revision_verification) and not config.enabled:
             raise DomainError(
                 "WEEKLY_COVERAGE_NOT_CONFIGURED", "Saving coverage evidence is paused", 503
             )
@@ -345,7 +358,11 @@ def main(argv: list[str] | None = None) -> int:
             )
             if len(selected) != 1:
                 raise ValueError("Day revision requires one configured plan for the selected node")
-            if args.verify_day_revision is not None:
+            if args.read_day_revision is not None:
+                revision = schedules.read_verified_revision(
+                    selected[0], revision_day, args.revision_id
+                ).model_dump(mode="json")
+            elif args.verify_day_revision is not None:
                 revision = verify_day_revision(
                     schedules,
                     selected[0],
@@ -353,6 +370,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.revision_id,
                     expected_fingerprint=args.expected_revision_fingerprint,
                     transaction_timeout_ms=config.transaction_timeout_ms,
+                    record=args.record_revision_verification,
                 )
             else:
                 revision = prepare_day_revision(

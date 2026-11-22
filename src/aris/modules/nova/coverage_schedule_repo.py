@@ -14,6 +14,7 @@ from aris.modules.nova.coverage_schedule_models import (
     CoverageScheduleRow,
     DailyCoverageEvidenceCheckRow,
     DailyCoveragePeriodResultRow,
+    VerifiedDailyCoverageRevisionRow,
 )
 from aris.modules.nova.coverage_schedule_schemas import (
     CoveragePeriodResult,
@@ -21,6 +22,7 @@ from aris.modules.nova.coverage_schedule_schemas import (
     CoverageScheduleStatus,
     DailyCoverageEvidenceCheck,
     DailyCoveragePeriodResult,
+    VerifiedDailyCoverageRevision,
     schedule_canonical,
 )
 
@@ -184,6 +186,48 @@ class CoverageScheduleRepository:
                 report_id=str(value.report_id),
             )
             .on_conflict_do_nothing(index_elements=[row.report_id, row.day])
+        )
+
+    def verified_revision(
+        self, report_id: UUID, revision_id: UUID
+    ) -> VerifiedDailyCoverageRevision | None:
+        row = self.session.get(VerifiedDailyCoverageRevisionRow, (str(report_id), str(revision_id)))
+        if row is None:
+            return None
+        try:
+            raw = row.canonical_revision
+            if len(raw.encode()) > 262144:
+                raise ValueError("oversized revision")
+            result = VerifiedDailyCoverageRevision.model_validate_json(raw)
+            if schedule_canonical(result) != raw or (
+                result.original_report_id,
+                result.revision_id,
+                result.fingerprint,
+            ) != (report_id, revision_id, row.fingerprint):
+                raise ValueError("verified revision metadata differs")
+            return result
+        except (ValueError, TypeError, KeyError, RecursionError):
+            raise inconsistent() from None
+
+    def add_verified_revision(self, value: VerifiedDailyCoverageRevision) -> None:
+        row = VerifiedDailyCoverageRevisionRow
+        raw = schedule_canonical(value)
+        if len(raw.encode()) > 262144:
+            raise DomainError("VALIDATION_ERROR", "Verified revision exceeds its size limit", 422)
+        insert = (
+            postgres_insert
+            if self.session.get_bind().dialect.name == "postgresql"
+            else sqlite_insert
+        )
+        self.session.execute(
+            insert(row)
+            .values(
+                original_report_id=str(value.original_report_id),
+                revision_id=str(value.revision_id),
+                fingerprint=value.fingerprint,
+                canonical_revision=raw,
+            )
+            .on_conflict_do_nothing(index_elements=[row.original_report_id, row.revision_id])
         )
 
     def append(self, value: CoverageScheduleStatus) -> None:

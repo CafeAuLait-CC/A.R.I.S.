@@ -6,10 +6,14 @@ from uuid import UUID, uuid5
 from pydantic import AwareDatetime
 
 from aris.core.access.schemas import AccessContract
+from aris.core.contracts import DomainError
 from aris.modules.lyra.coverage_build_schemas import completed_coverage_window_id
 from aris.modules.lyra.usage_history import calendar_boundaries
 from aris.modules.lyra.window_schemas import UsageWindowQuery
-from aris.modules.nova.coverage_schedule_schemas import CoverageScheduleDefinition
+from aris.modules.nova.coverage_schedule_schemas import (
+    CoverageScheduleDefinition,
+    DailyCoveragePeriodResult,
+)
 from aris.modules.nova.report_calendar import weekly_report_period
 
 
@@ -53,3 +57,22 @@ def daily_coverage_targets(
             )
         )
     return tuple(targets)
+
+
+def revision_coverage_target(
+    definition: CoverageScheduleDefinition,
+    original: DailyCoveragePeriodResult,
+    day: date,
+    revision_id: UUID,
+) -> DailyCoverageTarget:
+    source = next((value for value in original.report.days if value.day == day), None)
+    target = next(
+        (value for value in daily_coverage_targets(definition, original.week) if value.day == day),
+        None,
+    )
+    if source is None or target is None or source.snapshot_id != target.snapshot_id:
+        raise DomainError("NOT_FOUND", "Saved reporting day is unavailable", 404)
+    plan = uuid5(target.plan_id, "daily-revision/" + str(revision_id))
+    return target.model_copy(
+        update={"plan_id": plan, "snapshot_id": completed_coverage_window_id(plan)}
+    )

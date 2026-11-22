@@ -94,3 +94,20 @@ class DailyCoverageEvidenceCheckRow(Base):
     snapshot_fingerprint: Mapped[str] = mapped_column(String(64))
     rollup_fingerprint: Mapped[str] = mapped_column(String(64))
     checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class VerifiedDailyCoverageRevisionRow(Base):
+    __tablename__ = "weekly_daily_verified_revisions"
+    __table_args__ = (
+        CheckConstraint(
+            "length(fingerprint)=64 AND length(canonical_revision) BETWEEN 1 AND 262144",
+            name="ck_weekly_daily_verified_revision",
+        ),
+    )
+
+    original_report_id: Mapped[str] = mapped_column(
+        ForeignKey("weekly_daily_coverage_results.id"), primary_key=True
+    )
+    revision_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    canonical_revision: Mapped[str] = mapped_column(Text)

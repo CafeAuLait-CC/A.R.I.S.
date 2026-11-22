@@ -4,7 +4,7 @@ from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from time import monotonic
 from typing import Literal
-from uuid import uuid4, uuid5
+from uuid import UUID, uuid4, uuid5
 
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
@@ -22,6 +22,7 @@ from aris.core.scheduler.schemas import SchedulerContext
 from aris.modules.lyra.coverage_build_service import CoverageBuildService
 from aris.modules.lyra.weekly_from_daily import (
     SavedDailyTimeline,
+    WeeklyFromDaily,
     WeeklyFromDailyQuery,
     WeeklyFromDailyReader,
 )
@@ -35,9 +36,13 @@ from aris.modules.nova.coverage_schedule_schemas import (
     DailyCoverageEvidence,
     DailyCoverageEvidenceCheck,
     DailyCoveragePeriodResult,
+    VerifiedDailyCoverageRevision,
     WeeklyEvidenceReview,
 )
-from aris.modules.nova.daily_coverage_calendar import daily_coverage_targets
+from aris.modules.nova.daily_coverage_calendar import (
+    daily_coverage_targets,
+    revision_coverage_target,
+)
 from aris.modules.nova.report_calendar import weekly_report_period
 from aris.modules.nova.weekly_coverage import weekly_coverage_target
 
@@ -409,6 +414,98 @@ class CoverageScheduleService:
                 self._active()
                 commit_owned_transaction(db)
                 return saved
+        except DBAPIError as error:
+            raise self._failure(error) from None
+
+    @staticmethod
+    def _check_revision(
+        definition: CoverageScheduleDefinition,
+        original: DailyCoveragePeriodResult,
+        value: VerifiedDailyCoverageRevision,
+    ) -> None:
+        expected = revision_coverage_target(definition, original, value.day, value.revision_id)
+        revised_day = next((day for day in value.candidate.days if day.day == value.day), None)
+        if (
+            (value.original_report_id, value.original_report_fingerprint)
+            != (original.id, original.fingerprint)
+            or value.checked_at < original.created_at
+            or value.candidate.query != original.report.query
+            or revised_day is None
+            or revised_day.snapshot_id != expected.snapshot_id
+            or tuple(day for day in original.report.days if day.day != value.day)
+            != tuple(day for day in value.candidate.days if day.day != value.day)
+        ):
+            raise DomainError("CONFLICT", "Verified revision differs from the original week", 409)
+
+    def save_verified_revision_in_transaction(
+        self,
+        db: Session,
+        definition: CoverageScheduleDefinition,
+        original: DailyCoveragePeriodResult,
+        day: date,
+        revision_id: UUID,
+        candidate: WeeklyFromDaily,
+    ) -> VerifiedDailyCoverageRevision:
+        self._active()
+        self._require(db, definition)
+        repo = CoverageScheduleRepository(db)
+        if self._published_daily_week(repo, definition, original.week) != original:
+            raise DomainError(
+                "CONFLICT", "Weekly report changed before verification was saved", 409
+            )
+        draft = VerifiedDailyCoverageRevision.model_construct(
+            original_report_id=original.id,
+            original_report_fingerprint=original.fingerprint,
+            revision_id=revision_id,
+            day=day,
+            candidate=candidate,
+            checked_at=self._now(),
+            fingerprint="0" * 64,
+        )
+        value = VerifiedDailyCoverageRevision.model_validate(
+            {**draft.model_dump(mode="json"), "fingerprint": draft.content_fingerprint()}
+        )
+        self._check_revision(definition, original, value)
+        actor = ActorContext(actor_id=definition.calendar.owner_id, request_id="save-week-revision")
+        rebuilt = WeeklyFromDailyReader(UsageWindowReader(self.sessions)).build_in_transaction(
+            db, actor, candidate.query, tuple(source.snapshot_id for source in candidate.days)
+        )
+        if rebuilt != candidate:
+            raise DomainError(
+                "CONFLICT", "Verified revision differs from its saved daily results", 409
+            )
+        repo.add_verified_revision(value)
+        saved = repo.verified_revision(original.id, revision_id)
+        if saved is None or (saved.day, saved.candidate) != (day, candidate):
+            raise DomainError("CONFLICT", "Revision ID was bound to different evidence", 409)
+        self._check_revision(definition, original, saved)
+        self._require(db, definition)
+        self._active()
+        return saved
+
+    def read_verified_revision(
+        self, definition: CoverageScheduleDefinition, day: date, revision_id: UUID
+    ) -> VerifiedDailyCoverageRevision:
+        definition = CoverageScheduleDefinition.model_validate(definition.model_dump(mode="json"))
+        week = day - timedelta(days=day.weekday())
+        try:
+            with self.sessions() as db, db.no_autoflush:
+                if db.get_bind().dialect.name == "postgresql":
+                    db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
+                elif db.get_bind().dialect.name == "sqlite":
+                    db.execute(text("BEGIN"))
+                transaction_budget(db, 100, 1000, 3000)
+                self._require(db, definition)
+                repo = CoverageScheduleRepository(db)
+                original = self._published_daily_week(repo, definition, week)
+                result = repo.verified_revision(original.id, revision_id)
+                if result is None or result.day != day:
+                    raise DomainError("NOT_FOUND", "Saved revision was not found", 404)
+                self._check_revision(definition, original, result)
+            with self.sessions() as current, current.no_autoflush:
+                transaction_budget(current, 100, 1000, 1500)
+                self._require(current, definition)
+            return result
         except DBAPIError as error:
             raise self._failure(error) from None
 
