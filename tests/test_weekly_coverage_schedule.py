@@ -40,6 +40,7 @@ from aris.core.contracts import DomainError
 from aris.core.scheduler.schemas import SchedulerContext
 from aris.interfaces.commands.auth import BoundSubjectTokens, UserTokenBinding
 from aris.interfaces.slack.config import SlackSettings
+from aris.interfaces.slack.weekly_digest import combined_week_slack_preview
 from aris.interfaces.usage.combined_week_export import combined_week_csv, combined_week_html
 from aris.interfaces.usage.service import UsageHistorySurface
 from aris.modules.lyra.coverage_schemas import ProcessingCoverageConfiguration
@@ -684,6 +685,13 @@ def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
         assert partial.fingerprint in combined_html
         assert "缺少周报" in combined_html and "总用量 未知" in combined_html
         assert owner not in combined_html and "<script" not in combined_html
+        slack = combined_week_slack_preview(partial)
+        assert slack["report_fingerprint"] == partial.fingerprint
+        assert not slack["notification_delivery"] and "channel" not in slack
+        assert "Total GPU use: Unknown" in slack["text"]
+        assert "node-b: No saved weekly report" in slack["text"]
+        assert owner not in json.dumps(slack) and str(original.id) not in json.dumps(slack)
+        assert all(field["type"] == "plain_text" for field in slack["blocks"][2]["fields"])
         with TestClient(app) as client:
             for route in ("read", "report", "csv"):
                 path = "/internal/usage/weekly/" + route

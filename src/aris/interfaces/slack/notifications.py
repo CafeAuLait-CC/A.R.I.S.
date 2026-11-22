@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 
 from aris.core.notifications.schemas import (
+    NoticeContent,
     NotificationDeliveryError,
     PreparedNotification,
     TransportReceipt,
@@ -15,8 +16,7 @@ from aris.core.notifications.schemas import (
 from aris.interfaces.slack.config import SlackSettings
 
 
-def message_body(notification: PreparedNotification) -> dict[str, Any]:
-    content = notification.content
+def notice_blocks(content: NoticeContent) -> list[dict[str, Any]]:
     blocks: list[dict[str, Any]] = [
         {"type": "header", "text": {"type": "plain_text", "text": content.title, "emoji": False}},
         {
@@ -34,10 +34,15 @@ def message_body(notification: PreparedNotification) -> dict[str, Any]:
                 ],
             }
         )
+    return blocks
+
+
+def message_body(notification: PreparedNotification) -> dict[str, Any]:
+    content = notification.content
     return {
         "channel": notification.target.external_id,
         "text": content.fallback(),
-        "blocks": blocks,
+        "blocks": notice_blocks(content),
         "mrkdwn": False,
         "parse": "none",
         "link_names": False,

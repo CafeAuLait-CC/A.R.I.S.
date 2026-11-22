@@ -31,6 +31,7 @@ from aris.core.access.schemas import AccessContract
 from aris.core.contracts import DomainError
 from aris.core.db import build_engine, check_database, session_factory
 from aris.core.scheduler.schemas import SchedulerContext
+from aris.interfaces.slack.weekly_digest import combined_week_slack_preview
 from aris.interfaces.usage.combined_week_export import combined_week_csv, combined_week_html
 from aris.modules.nova.coverage_schedule_schemas import CoverageScheduleDefinition
 from aris.modules.nova.coverage_schedule_service import CoverageScheduleService
@@ -261,7 +262,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--format",
-        choices=("json", "html", "csv"),
+        choices=("json", "html", "csv", "slack-preview"),
         help="Output format for --combine-week (default: json)",
     )
     parser.add_argument(
@@ -398,6 +399,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(combined_week_html(report))
             elif args.format == "csv":
                 print(combined_week_csv(report), end="")
+            elif args.format == "slack-preview":
+                print(json.dumps(combined_week_slack_preview(report)))
             else:
                 print(json.dumps(report.model_dump(mode="json")))
             return 0
