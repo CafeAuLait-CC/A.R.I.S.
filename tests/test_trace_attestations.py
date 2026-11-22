@@ -25,6 +25,7 @@ from aris.modules.lyra.trace_consumer_schemas import (
     canonical_trace,
     trace_fingerprint,
 )
+from aris.modules.lyra.trace_consumer_service import trace_replay_scope
 from aris.modules.vega.models import AgentMessage
 from tests.test_heartbeat import beat, heartbeat
 from tests.test_residency_evidence import reference
@@ -156,6 +157,35 @@ def test_current_segment_and_old_anchor_are_verified_against_originals(attested,
     with pytest.raises(DomainError):
         service(state).reverify(value.request.id)
     assert snapshot(state) == before
+
+
+def test_replay_reuse_still_reads_the_original_anchor_on_each_verification(attested, monkeypatch):
+    state, _, attestations = attested
+    reader = service(state)
+    value = attestations[-1].attestation
+    original = reader.verifier._replay
+    replayed = []
+
+    def track(inputs):
+        replayed.append(inputs)
+        return original(inputs)
+
+    monkeypatch.setattr(reader.verifier, "_replay", track)
+    with state.sessions() as session:
+        with session.begin(), trace_replay_scope(session):
+            assert reader.reverify_in_transaction(session, value.request.id) == value
+            assert reader.reverify_in_transaction(session, value.request.id) == value
+            assert len(replayed) == 1
+            with session.begin_nested() as corrupt:
+                anchor = session.scalar(select(AgentMessage).where(AgentMessage.seq == 3))
+                anchor.fingerprint = "f" * 64
+                session.flush()
+                with pytest.raises(DomainError):
+                    reader.reverify_in_transaction(session, value.request.id)
+                corrupt.rollback()
+        with session.begin(), trace_replay_scope(session):
+            assert reader.reverify_in_transaction(session, value.request.id) == value
+            assert len(replayed) == 2
 
 
 def test_revalidating_a_later_segment_does_not_claim_rechecking_all_prior_originals(attested):

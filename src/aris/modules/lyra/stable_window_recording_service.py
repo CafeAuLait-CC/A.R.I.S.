@@ -23,6 +23,7 @@ from aris.modules.lyra.stable_window_recording_schemas import (
     RecordAcceptedStableWindow,
     StableWindowRecordingReceipt,
 )
+from aris.modules.lyra.trace_consumer_service import trace_replay_scope
 
 
 class StableWindowRecordingService:
@@ -72,7 +73,7 @@ class StableWindowRecordingService:
         self, session: Session, context: UsagePostingContext, request: AcceptStableWindow
     ) -> StableWindowRecordingReceipt:
         deadline = monotonic() + self.timeout_ms / 1000
-        with transaction_savepoint(session), session.no_autoflush:
+        with transaction_savepoint(session), session.no_autoflush, trace_replay_scope(session):
             accepted = self.acceptances.accept_in_transaction(session, context, request)
             result = self.record_in_transaction(
                 session,
@@ -108,7 +109,7 @@ class StableWindowRecordingService:
         request = RecordAcceptedStableWindow.model_validate(request.model_dump(mode="json"))
         deadline = monotonic() + self.timeout_ms / 1000
         try:
-            with transaction_savepoint(session), session.no_autoflush:
+            with transaction_savepoint(session), session.no_autoflush, trace_replay_scope(session):
                 accepted = self.acceptances.exact_in_transaction(session, request.key)
                 if accepted.fingerprint != request.expected_acceptance_fingerprint:
                     raise DomainError("CONFLICT", "First stable acceptance differs", 409)

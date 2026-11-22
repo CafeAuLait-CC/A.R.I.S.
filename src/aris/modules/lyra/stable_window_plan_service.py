@@ -31,6 +31,7 @@ from aris.modules.lyra.stable_window_plan_schemas import (
     stable_plan_fingerprint,
 )
 from aris.modules.lyra.stable_window_recording_schemas import StableWindowJobRequest
+from aris.modules.lyra.trace_consumer_service import trace_replay_scope
 
 
 class StableWindowPlanService:
@@ -137,7 +138,7 @@ class StableWindowPlanService:
         request = StableWindowPlanObservation.model_validate(request.model_dump(mode="json"))
         deadline = monotonic() + self.timeout_ms / 1000
         try:
-            with transaction_savepoint(session), session.no_autoflush:
+            with transaction_savepoint(session), session.no_autoflush, trace_replay_scope(session):
                 witness = self.evidence.layout_witness_in_transaction(session, request.window)
                 page = plan_residency_windows(
                     witness, self.evidence.method, first_window=0, limit=1
@@ -245,7 +246,7 @@ class StableWindowPlanService:
         request = StableWindowDispatchRequest.model_validate(request.model_dump(mode="json"))
         deadline = monotonic() + self.timeout_ms / 1000
         try:
-            with transaction_savepoint(session), session.no_autoflush:
+            with transaction_savepoint(session), session.no_autoflush, trace_replay_scope(session):
                 repo = StableWindowPlanRepository(session)
                 repo.lock(request.key)
                 prior = self.progress_in_transaction(session, request.key)

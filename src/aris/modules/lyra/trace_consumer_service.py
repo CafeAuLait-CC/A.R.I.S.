@@ -1,14 +1,15 @@
 """Persist bounded candidate trace progress; no daemon, session or charge activation."""
 
 import json
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Protocol
 from uuid import UUID, uuid4
 
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, SessionTransaction, sessionmaker
 
 from aris.core.audit import AuditEntry
 from aris.core.commands.budgets import database_failure, transaction_budget
@@ -41,7 +42,11 @@ from aris.modules.lyra.trace_state import (
     advance_usage_trace,
     observation_stamp,
 )
-from aris.modules.vega.usage_archive_schemas import UsageArchivePage, UsageArchiveQuery
+from aris.modules.vega.usage_archive_schemas import (
+    ArchivedUsageItem,
+    UsageArchivePage,
+    UsageArchiveQuery,
+)
 from aris.modules.vega.usage_schemas import UsageObservationFact, UsageObservationQuery
 
 
@@ -64,6 +69,50 @@ class _TraceEvaluation:
     transitions_fingerprint: str
     sources: tuple[ConsumedTraceSource, ...]
     closed_runs: tuple[ClosedResidencyCandidate, ...]
+
+
+@dataclass(frozen=True)
+class _ReplayInput:
+    before: UsageTracePosition
+    items: tuple[ArchivedUsageItem, ...]
+    anchor: UsageObservationFact | None
+    source_cutoff: datetime | None
+
+
+_REPLAY_SCOPE = "aris.lyra.trace_replay"
+_MAX_REPLAYS = 4
+
+
+@dataclass
+class _ReplayScope:
+    transaction: SessionTransaction
+    results: dict[tuple[str, datetime | None], tuple[_ReplayInput, _TraceEvaluation]] = field(
+        default_factory=dict
+    )
+
+
+def _active_replay_scope(session: Session) -> _ReplayScope | None:
+    scope = session.info.get(_REPLAY_SCOPE)
+    if isinstance(scope, _ReplayScope) and scope.transaction is session.get_transaction():
+        return scope
+    return None
+
+
+@contextmanager
+def trace_replay_scope(session: Session) -> Iterator[None]:
+    transaction = session.get_transaction()
+    if transaction is None or _active_replay_scope(session) is not None:
+        yield
+        return
+    previous = session.info.get(_REPLAY_SCOPE)
+    session.info[_REPLAY_SCOPE] = _ReplayScope(transaction)
+    try:
+        yield
+    finally:
+        if previous is None:
+            session.info.pop(_REPLAY_SCOPE, None)
+        else:
+            session.info[_REPLAY_SCOPE] = previous
 
 
 class UsageTraceConsumerService:
@@ -135,9 +184,7 @@ class UsageTraceConsumerService:
         *,
         source_cutoff: datetime | None = None,
     ) -> _TraceEvaluation:
-        checkpoint = before.trace
-        residency = before.residency
-        cache: dict[UUID, UsageObservationFact] = {}
+        checkpoint, anchor = before.trace, None
         if checkpoint is not None and any(item.observation is not None for item in page.items):
             ref = checkpoint.anchor.reference
             anchor = self.observations.observation_in_transaction(
@@ -158,11 +205,32 @@ class UsageTraceConsumerService:
                 and max(anchor.observed_at, anchor.received_at) > source_cutoff
             ):
                 raise DomainError("CONFLICT", "Original trace anchor follows the cutoff", 409)
-            cache[anchor.message_id] = anchor
+        inputs = _ReplayInput(before, page.items, anchor, source_cutoff)
+        scope = _active_replay_scope(session)
+        if scope is None:
+            return self._replay(inputs)
+        # Page and anchor were read and validated again above. Only reuse the
+        # computation when all the current inputs match within this transaction.
+        key = (page.fingerprint, source_cutoff)
+        previous = scope.results.get(key)
+        if previous is not None and previous[0] == inputs:
+            return previous[1]
+        result = self._replay(inputs)
+        if len(scope.results) < _MAX_REPLAYS:
+            scope.results[key] = (inputs, result)
+        return result
+
+    @staticmethod
+    def _replay(inputs: _ReplayInput) -> _TraceEvaluation:
+        before, source_cutoff = inputs.before, inputs.source_cutoff
+        checkpoint, residency = before.trace, before.residency
+        cache: dict[UUID, UsageObservationFact] = {}
+        if inputs.anchor is not None:
+            cache[inputs.anchor.message_id] = inputs.anchor
         sources: list[ConsumedTraceSource] = []
         closed: list[ClosedResidencyCandidate] = []
         transitions = trace_fingerprint("transitions", "[]")
-        for item in page.items:
+        for item in inputs.items:
             if (
                 source_cutoff is not None
                 and max(item.reference.observed_at, item.reference.received_at) > source_cutoff
