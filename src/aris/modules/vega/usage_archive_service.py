@@ -13,8 +13,14 @@ from aris.core.contracts import DomainError
 from aris.core.time import utc
 from aris.modules.vega.repo import StoredUsageMessage, VegaRepository
 from aris.modules.vega.resource_schemas import ResourceTelemetryBatch
-from aris.modules.vega.storage_schemas import ObservedWindowStorage
+from aris.modules.vega.storage_schemas import (
+    ObservedWindowStorage,
+    RetentionPrefixPreview,
+    RetentionPrefixStop,
+)
 from aris.modules.vega.usage_archive_schemas import (
+    MAX_ARCHIVE_MESSAGES,
+    MAX_ARCHIVE_SEQ,
     MAX_ARCHIVE_SOURCE_CHARACTERS,
     ArchivedUsageItem,
     ArchivedUsageReference,
@@ -87,6 +93,67 @@ class VegaUsageArchive:
                 UsageArchiveFreeze.model_validate(value.model_dump(mode="json"))
                 for value in freezes
             )
+        )
+
+    def retention_prefix_in_transaction(
+        self,
+        session: Session,
+        query: UsageArchiveHeadQuery,
+        *,
+        start: datetime,
+        end: datetime,
+        through_seq: int,
+        limit: int = MAX_ARCHIVE_MESSAGES,
+    ) -> RetentionPrefixPreview:
+        """Describe the oldest contiguous, unprotected payloads using metadata alone."""
+        query = UsageArchiveHeadQuery.model_validate(query.model_dump(mode="json"))
+        if start.utcoffset() is None or end.utcoffset() is None or start >= end:
+            raise ValueError("Retention preview requires a positive aware interval")
+        if (
+            type(through_seq) is not int
+            or not 0 <= through_seq <= MAX_ARCHIVE_SEQ
+            or type(limit) is not int
+            or not 1 <= limit <= MAX_ARCHIVE_MESSAGES
+        ):
+            raise ValueError("Retention preview requires a bounded sequence range")
+        with session.no_autoflush:
+            repo = VegaRepository(session)
+            if repo.usage_source_node(query.agent_id) != query.node_id:
+                raise DomainError("CONFLICT", "Archived usage source binding differs", 409)
+            rows = repo.oldest_payload_metadata(query.agent_id, limit + 1)
+            if not rows:
+                return RetentionPrefixPreview(stop_reason="payload_end")
+            first = rows[0][0]
+            if first < 1 or (
+                first > 1 and repo.retired_sequence_count_before(query.agent_id, first) != first - 1
+            ):
+                return RetentionPrefixPreview(
+                    stop_reason="unverified_prior_sequences", stopped_before_seq=first
+                )
+        reason: RetentionPrefixStop = "payload_end"
+        expected = first
+        for seq, node, observed, received in rows:
+            if seq != expected:
+                reason = "sequence_gap"
+            elif node != query.node_id:
+                reason = "source_binding_differs"
+            elif not start <= observed < end:
+                reason = "outside_observation_window"
+            elif received >= end:
+                reason = "received_after_cutoff"
+            elif seq > through_seq:
+                reason = "protected_sequence"
+            elif expected - first == limit:
+                reason = "batch_limit"
+            else:
+                expected += 1
+                continue
+            break
+        return RetentionPrefixPreview(
+            first_seq=first if expected > first else None,
+            through_seq=expected - 1 if expected > first else None,
+            stop_reason=reason,
+            stopped_before_seq=expected if reason != "payload_end" else None,
         )
 
     def head(self, query: UsageArchiveHeadQuery) -> UsageArchiveHead:

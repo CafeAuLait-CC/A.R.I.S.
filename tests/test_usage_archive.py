@@ -10,11 +10,13 @@ from sqlalchemy import event, select, text
 from sqlalchemy.orm import sessionmaker
 
 from aris.core.contracts import DomainError
-from aris.modules.vega.models import AgentMessage
+from aris.core.time import utc
+from aris.modules.vega.models import AgentMessage, AgentMessageReceipt
 from aris.modules.vega.schemas import Heartbeat
 from aris.modules.vega.usage_archive_schemas import (
     ArchivedUsageItem,
     ArchivedUsageReference,
+    UsageArchiveHeadQuery,
     UsageArchivePage,
     UsageArchiveQuery,
     archive_page_fingerprint,
@@ -174,6 +176,61 @@ def test_high_sequence_and_later_arrival_do_not_advance_over_an_archive_gap(clie
     assert complete.state == "range_end" and complete.next_after_seq == 3
     assert complete.items[0] == partial.items[0]
     assert service.page(query(through_seq=4)).missing_seq == 4
+
+
+def test_retention_prefix_requires_prior_receipts_and_stops_before_protected_rows(client):
+    seed(client)
+    service = archive(client)
+    scope = UsageArchiveHeadQuery(agent_id="agent-a", node_id="node-a")
+    with service.sessions() as session:
+        first = session.scalar(select(AgentMessage).where(AgentMessage.seq == 1))
+        assert first is not None
+        start = utc(first.observed_at) - timedelta(days=1)
+        end = utc(first.received_at) + timedelta(days=1)
+
+    def preview(through=5, *, limit=128):
+        with service.sessions() as session:
+            return service.retention_prefix_in_transaction(
+                session, scope, start=start, end=end, through_seq=through, limit=limit
+            )
+
+    prefix = preview(2)
+    assert (prefix.first_seq, prefix.through_seq, prefix.stopped_before_seq) == (1, 2, 3)
+    assert prefix.stop_reason == "protected_sequence"
+    assert preview(limit=2).stop_reason == "batch_limit"
+
+    with service.sessions.begin() as session:
+        first = session.scalar(select(AgentMessage).where(AgentMessage.seq == 1))
+        assert first is not None
+        receipt = AgentMessageReceipt(
+            agent_id=first.agent_id,
+            seq=first.seq,
+            message_id=first.message_id,
+            fingerprint=first.fingerprint,
+            applied_to_current=first.applied_to_current,
+        )
+        session.delete(first)
+    assert preview().stop_reason == "unverified_prior_sequences"
+    assert preview().first_seq is None
+    with service.sessions.begin() as session:
+        session.add(receipt)
+        third = session.scalar(select(AgentMessage).where(AgentMessage.seq == 3))
+        assert third is not None
+        third.received_at = end
+    assert preview().first_seq == 2
+    assert preview().stop_reason == "received_after_cutoff"
+    with service.sessions.begin() as session:
+        third = session.scalar(select(AgentMessage).where(AgentMessage.seq == 3))
+        assert third is not None
+        third.observed_at = start - timedelta(seconds=1)
+    assert preview().stop_reason == "outside_observation_window"
+    with service.sessions.begin() as session:
+        third = session.scalar(select(AgentMessage).where(AgentMessage.seq == 3))
+        assert third is not None
+        session.delete(third)
+    gap = preview()
+    assert (gap.first_seq, gap.through_seq, gap.stopped_before_seq) == (2, 2, 3)
+    assert gap.stop_reason == "sequence_gap"
 
 
 def test_source_binding_is_checked_without_exposing_a_route_or_querying_current_gpus(client):

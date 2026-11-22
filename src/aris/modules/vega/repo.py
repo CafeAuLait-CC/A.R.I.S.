@@ -313,6 +313,28 @@ class VegaRepository:
             messages=count, late_arrivals=late, first_seq=first, last_seq=last
         )
 
+    def oldest_payload_metadata(
+        self, agent_id: str, limit: int
+    ) -> tuple[tuple[int, str, datetime, datetime], ...]:
+        row = AgentMessage
+        rows = self.session.execute(
+            select(row.seq, row.node_id, row.observed_at, row.received_at)
+            .where(row.agent_id == agent_id)
+            .order_by(row.seq)
+            .limit(limit)
+        )
+        return tuple(
+            (seq, node, utc(observed), utc(received)) for seq, node, observed, received in rows
+        )
+
+    def retired_sequence_count_before(self, agent_id: str, seq: int) -> int:
+        receipt = AgentMessageReceipt
+        return self.session.execute(
+            select(func.count())
+            .select_from(receipt)
+            .where(receipt.agent_id == agent_id, receipt.seq > 0, receipt.seq < seq)
+        ).scalar_one()
+
     def arrivals_outside_freezes(self, freezes: tuple[UsageArchiveFreeze, ...]) -> tuple[int, ...]:
         if not freezes:
             return ()

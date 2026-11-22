@@ -26,3 +26,22 @@ class ObservedWindowStorage(Contract):
     late_arrivals: int
     first_seq: int | None
     last_seq: int | None
+
+
+RetentionPrefixStop = Literal[
+    "payload_end",
+    "batch_limit",
+    "unverified_prior_sequences",
+    "sequence_gap",
+    "source_binding_differs",
+    "outside_observation_window",
+    "received_after_cutoff",
+    "protected_sequence",
+]
+
+
+class RetentionPrefixPreview(Contract):
+    first_seq: int | None = None
+    through_seq: int | None = None
+    stop_reason: RetentionPrefixStop
+    stopped_before_seq: int | None = None

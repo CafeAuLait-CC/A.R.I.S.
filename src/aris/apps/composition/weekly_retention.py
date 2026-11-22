@@ -25,7 +25,7 @@ from aris.modules.nova.coverage_schedule_schemas import (
 from aris.modules.nova.coverage_schedule_service import CoverageScheduleService
 from aris.modules.nova.daily_coverage_calendar import daily_coverage_targets
 from aris.modules.nova.report_calendar import weekly_report_period
-from aris.modules.vega.storage_schemas import ObservedWindowStorage
+from aris.modules.vega.storage_schemas import ObservedWindowStorage, RetentionPrefixPreview
 from aris.modules.vega.usage_archive_schemas import UsageArchiveFreeze, UsageArchiveHeadQuery
 from aris.modules.vega.usage_archive_service import VegaUsageArchive
 
@@ -49,6 +49,7 @@ class WeeklyRetentionPreview(Contract):
     daily_arrivals: tuple[DailyArrivalPreview, ...] = Field(default=(), max_length=7)
     known_consumers: tuple[TraceRetentionBoundary, ...] = ()
     coverage_builds: CoverageBuildDependencies | None = None
+    payload_prefix: RetentionPrefixPreview | None = None
     blockers: tuple[str, ...]
     remaining_checks: tuple[str, ...] = (
         "historical_intermediate_proofs",
@@ -153,6 +154,20 @@ def preview_week_retention(
             if builds.truncated:
                 blockers.append("coverage_build_check_incomplete")
             last = observations.last_seq
+            prefix = None
+            if not blockers and last is not None:
+                through = last
+                for consumer in consumers:
+                    through = min(
+                        through,
+                        consumer.processed_through_seq,
+                        consumer.checkpoint_through_seq or 0,
+                    )
+                    if consumer.earliest_protected_seq is not None:
+                        through = min(through, consumer.earliest_protected_seq - 1)
+                prefix = archive.retention_prefix_in_transaction(
+                    db, scope, start=period.start_at, end=boundary, through_seq=through
+                )
             if last is not None:
                 if any(last > consumer.processed_through_seq for consumer in consumers):
                     blockers.append("unprocessed_packets")
@@ -177,6 +192,7 @@ def preview_week_retention(
                     "daily_arrivals": tuple(daily_arrivals),
                     "known_consumers": consumers,
                     "coverage_builds": builds,
+                    "payload_prefix": prefix,
                     "blockers": tuple(blockers),
                 }
             )

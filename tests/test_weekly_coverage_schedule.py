@@ -481,6 +481,7 @@ def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
         consumer.consumer_id for consumer in retirement.known_consumers
     }
     assert "unsatisfied_daily_evidence_checks" in retirement.blockers
+    assert retirement.payload_prefix is None
     assert "future_report_after_retirement" in retirement.remaining_checks
     assert len(retirement.daily_arrivals) == 7
     selected_day = next(value for value in retirement.daily_arrivals if value.day == day)
@@ -494,6 +495,26 @@ def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
     assert retirement.coverage_builds is not None
     assert retirement.coverage_builds.builds_without_saved_windows == 0
     assert not retirement.coverage_builds.truncated
+    for unchecked in review.pending_days:
+        verify_daily_coverage(
+            schedules, definition, unchecked, transaction_timeout_ms=30000, record=True
+        )
+    review = schedules.evidence_review(definition, week)
+    assert not review.pending_days
+    checked_statements.clear()
+    event.listen(engine, "before_cursor_execute", retention_reads)
+    try:
+        checked_retirement = preview_week_retention(schedules, definition, week)
+    finally:
+        event.remove(engine, "before_cursor_execute", retention_reads)
+    assert checked_retirement.payload_prefix is not None, checked_retirement.blockers
+    assert not checked_retirement.deletion_enabled
+    assert any(
+        "order by agent_messages.seq" in statement.lower() for statement in checked_statements
+    )
+    assert not any(
+        "agent_messages.payload" in statement.lower() for statement in checked_statements
+    )
     draft = build_lyra_coverage_components(
         schedules.sessions,
         LyraCoverageRuntimeConfig(
@@ -513,7 +534,8 @@ def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
     )
     assert with_draft.coverage_builds.builds_without_saved_windows == 1
     assert "coverage_builds_without_saved_windows" in with_draft.blockers
-    (check,) = review.checked_days
+    assert with_draft.payload_prefix is None
+    check = next(value for value in review.checked_days if value.day == day)
     assert check.day == day and check.checked_at.isoformat() == checked["checked_at"]
     evidence = DailyCoverageEvidence(**check.model_dump(exclude={"checked_at"}))
     assert schedules.save_evidence_check(definition, evidence) == check
