@@ -9,7 +9,7 @@ window.createSavedUsage = function ({el, request, lock, message, isBusy, selecti
   function format(value) {return new Intl.DateTimeFormat('zh-CN',{timeZone:timezone(),month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(new Date(value));}
   function badge(status) {return node('span',names[status],`coverage-badge ${status}`);}
   function reset() {version++;cursor=null;chosen=null;chosenRead=null;selectedQuery=null;el('saved-list').replaceChildren();el('saved-cells').replaceChildren();el('saved-timeline').replaceChildren();el('saved-plan-list').replaceChildren();el('saved-plans').hidden=true;el('saved-detail').hidden=true;el('saved-more').hidden=true;el('saved-empty').hidden=true;}
-  function plans(page) {
+  function plans(page, input) {
     const stateNames={scheduled:'尚未到期',pending:'等待生成',delayed:'生成延迟'};
     const stamp=(value,zone)=>new Intl.DateTimeFormat('zh-CN',{timeZone:zone,month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).format(new Date(value));
     const cards=page.items.map(item=>{
@@ -18,7 +18,18 @@ window.createSavedUsage = function ({el, request, lock, message, isBusy, selecti
       card.append(head,node('p',`下一统计周 · ${item.next_week}`),node('p',`预计生成 · ${stamp(item.next_due_at,item.timezone)}`));
       if(item.last_result)card.append(node('p',`最近保存 · ${item.last_result.week} · ${names[item.last_result.coverage]}`));
       else card.append(node('p','尚未保存周期结果','muted'));
-      card.append(node('small',item.timezone));return card;
+      card.append(node('small',item.timezone));
+      if(item.last_result?.report_id) {
+        const actions=node('div','','export-actions');
+        const query={node_id:item.node_id,mode:input.mode,id:item.last_result.report_id,source:'daily_rollups'};
+        for(const [label,route,extension] of [['导出周报','report','html'],['周报 CSV','csv','csv']]){
+          const button=node('button',label,'secondary');button.type='button';
+          button.addEventListener('click',()=>downloadFile(`weekly/${route}`,query,`aris-weekly-usage-${item.last_result.week}.${extension}`,extension));
+          actions.append(button);
+        }
+        card.append(actions);
+      }
+      return card;
     });
     el('saved-plan-list').replaceChildren(...cards);el('saved-plans').hidden=false;
     el('saved-plan-note').textContent=cards.length ? '计划状态按周历和已保存结果显示；尚未判断后台进程是否运行。日期筛选仅影响下方快照列表。' : '当前节点和视图没有已登记的自动统计计划。';
@@ -65,18 +76,21 @@ window.createSavedUsage = function ({el, request, lock, message, isBusy, selecti
     const input=more && selectedQuery ? {...selectedQuery,before:cursor}:{...selection(),limit:16,...(plansAvailable()?{include_plans:true}:{})};
     if(!more)reset();const ticket=version;
     try{
-      const response=await (await request('snapshots/query',input)).json();if(ticket!==version)return;const result=input.include_plans?response.snapshots:response;if(input.include_plans)plans(response.plans);selectedQuery=input;cursor=result.next_cursor;
+      const response=await (await request('snapshots/query',input)).json();if(ticket!==version)return;const result=input.include_plans?response.snapshots:response;if(input.include_plans)plans(response.plans,input);selectedQuery=input;cursor=result.next_cursor;
       const cards=result.items.map(item=>{const li=document.createElement('li'),button=node('button','');button.type='button';button.dataset.snapshot=item.id;button.setAttribute('aria-current',String(chosen===item.id));button.append(node('strong',`${format(item.start_at)} – ${format(item.end_at)}`),badge(item.coverage),node('small',`保存于 ${format(item.created_at)}`));button.addEventListener('click',()=>open(item,input));li.append(button);return li;});
       el('saved-list').append(...cards);el('saved-more').hidden=!cursor;el('saved-empty').hidden=el('saved-list').children.length!==0;
       if(!more && result.items.length)await openItem(result.items[0],input,ticket);
       if(ticket===version)message('');
     }catch(error){if(ticket===version)message(error.message,true);}finally{if(ticket===version)lock(false);}
   }
-  async function download(kind){
-    if(isBusy() || !chosenRead)return;const ticket=version,input={...chosenRead};lock(true);message('正在准备下载…');
-    try{const blob=await (await request('snapshots/read',input,kind==='report'?'text/html':'text/csv')).blob();if(ticket!==version)return;const url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download=`aris-saved-usage.${kind==='report' ? 'html':'csv'}`;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);message('已导出这份统计快照。');}catch(error){if(ticket===version)message(error.message,true);}finally{if(ticket===version)lock(false);}
+  async function downloadFile(path,input,filename,extension){
+    if(isBusy())return;const ticket=version;lock(true);message('正在准备下载…');
+    try{const blob=await (await request(path,input,extension==='html'?'text/html':'text/csv')).blob();if(ticket!==version)return;const url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download=filename;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);message('已导出。');}catch(error){if(ticket===version)message(error.message,true);}finally{if(ticket===version)lock(false);}
+  }
+  function download(extension){
+    if(chosenRead)return downloadFile('snapshots/read',{...chosenRead},`aris-saved-usage.${extension}`,extension);
   }
   el('saved-more').addEventListener('click',()=>load(true));
-  el('saved-report').addEventListener('click',()=>download('report'));el('saved-csv').addEventListener('click',()=>download('export'));
+  el('saved-report').addEventListener('click',()=>download('html'));el('saved-csv').addEventListener('click',()=>download('csv'));
   return {get active(){return active;},set active(value){active=value;el('saved-results').hidden=!value;},load,reset};
 };

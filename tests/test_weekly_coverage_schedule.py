@@ -1,3 +1,5 @@
+import csv
+import io
 import json
 import os
 import select as io_ready
@@ -12,9 +14,12 @@ from uuid import UUID, uuid4
 import pytest
 from alembic import command
 from alembic.config import Config
+from fastapi.testclient import TestClient
+from pydantic import SecretStr
 from sqlalchemy import delete, event, func, select, text, update
 from sqlalchemy.exc import DBAPIError
 
+from aris.apps.api.main import create_app
 from aris.apps.composition.lyra import build_lyra_components
 from aris.apps.composition.lyra_coverage import (
     CoverageBuildTarget,
@@ -22,12 +27,18 @@ from aris.apps.composition.lyra_coverage import (
     build_lyra_coverage_components,
 )
 from aris.apps.ops.weekly_coverage import WeeklyCoverageConfig, main, run_tick
-from aris.core.access.models import Role, RoleBinding
+from aris.core.access.models import ExternalIdentity, Permission, Role, RoleBinding, RolePermission
+from aris.core.access.schemas import ExternalSubject
 from aris.core.commands.schemas import ActorContext
 from aris.core.contracts import DomainError
 from aris.core.scheduler.schemas import SchedulerContext
+from aris.interfaces.commands.auth import BoundSubjectTokens, UserTokenBinding
+from aris.interfaces.slack.config import SlackSettings
+from aris.interfaces.usage.service import UsageHistorySurface
 from aris.modules.lyra.coverage_schemas import ProcessingCoverageConfiguration
 from aris.modules.lyra.ledger_repo import UsageLedgerRepository
+from aris.modules.lyra.usage_history_service import UsageHistoryService
+from aris.modules.lyra.window_reader import UsageWindowReader
 from aris.modules.nova.coverage_schedule_models import (
     CoveragePeriodResultRow,
     CoverageScheduleRow,
@@ -389,6 +400,106 @@ def test_closed_days_survive_restart_and_feed_weekly_report_without_raw_samples(
         )
         assert str(plan.last_result.report_id) == output["id"]
         assert plan.last_result.snapshot_id is None
+
+
+def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
+    partition_recording, settings
+):
+    schedules, config, legacy, _, _ = setup(partition_recording, settings)
+    definition = CoverageScheduleDefinition.model_validate(
+        {**legacy.model_dump(mode="json"), "daily_rollups": True}
+    )
+    config = config.model_copy(update={"plans": (definition,)})
+    for _ in range(64):
+        tick = run_tick(config, schedules, clock=schedules.clock)
+        assert not tick["needs_attention"], tick
+        step = tick["plans"][0]
+        if step["state"] == "daily_report_saved":
+            break
+    else:
+        pytest.fail("Daily weekly result was not saved")
+    result = step["result"]
+    owner = str(definition.calendar.owner_id)
+    member = str(partition_recording[2][2][2][4][1])
+    role = str(uuid4())
+    with schedules.sessions.begin() as db:
+        permission = db.scalar(select(Permission.id).where(Permission.name == "usage.read_own"))
+        assert permission
+        db.add(Role(id=role, name="fixture-weekly-member"))
+        db.flush()
+        db.add(RolePermission(role_id=role, permission_id=permission))
+        db.add(
+            RoleBinding(
+                id=str(uuid4()), user_id=member, role_id=role, scope_type="node", scope_id="node-a"
+            )
+        )
+        members = {
+            identity.user_id: ExternalSubject(
+                provider=identity.provider,
+                namespace=identity.namespace,
+                external_id=identity.external_id,
+            )
+            for identity in db.scalars(
+                select(ExternalIdentity).where(ExternalIdentity.user_id.in_((owner, member)))
+            )
+        }
+    token_admin, token_member = str(uuid4()), str(uuid4())
+    auth = BoundSubjectTokens(
+        [
+            UserTokenBinding(subject=members[owner], token=SecretStr(token_admin)),
+            UserTokenBinding(subject=members[member], token=SecretStr(token_member)),
+        ],
+        reserved_tokens=[settings.read_token],
+    )
+    surface = UsageHistorySurface(
+        UsageHistoryService(schedules.sessions, clock=schedules.clock),
+        auth,
+        ("node-a",),
+        saved_windows=UsageWindowReader(schedules.sessions),
+        coverage_plans=CoverageScheduleReader(
+            schedules.sessions, (definition.id,), include_node_for_personal=True
+        ),
+    )
+    app = create_app(
+        settings,
+        SlackSettings(_env_file=None, signing_secret="", bot_token="", team_id=""),
+        usage_history=surface,
+    )
+
+    def only_report(conn, cursor, statement, parameters, context, executemany):
+        sql = statement.lower()
+        for table in ("agent_messages", "usage_daily_rollups", "usage_window_snapshots"):
+            assert table not in sql
+
+    engine = schedules.sessions.kw["bind"]
+    event.listen(engine, "before_cursor_execute", only_report)
+    payload = {"id": result["id"], "source": "daily_rollups", "node_id": "node-a"}
+    try:
+        with TestClient(app) as client:
+            for route in ("read", "report", "csv"):
+                path = "/internal/usage/weekly/" + route
+                admin = {"Authorization": f"Bearer {token_admin}"}
+                regular = {"Authorization": f"Bearer {token_member}"}
+                visible = client.post(path, headers=admin, json={**payload, "mode": "node"})
+                hidden = client.post(path, headers=regular, json={**payload, "mode": "mine"})
+                denied = client.post(path, headers=regular, json={**payload, "mode": "node"})
+                assert visible.status_code == hidden.status_code == 200
+                assert "no-store" in hidden.headers["cache-control"]
+                assert denied.status_code == 403
+                assert owner not in hidden.text
+                if route == "read":
+                    assert visible.json()["verified_usage_microseconds"] > 0
+                    assert hidden.json()["durations"] == []
+                    assert hidden.json()["total_usage_microseconds"] is None
+                    assert len(hidden.json()["days"]) == 7
+                elif route == "report":
+                    assert "GPU 用量周报" in visible.text
+                else:
+                    rows = list(csv.DictReader(io.StringIO(visible.content.decode("utf-8-sig"))))
+                    assert any(row["owner_id"] == owner for row in rows)
+                    assert all(None not in row and None not in row.values() for row in rows)
+    finally:
+        event.remove(engine, "before_cursor_execute", only_report)
 
 
 def test_snapshot_saved_before_cursor_failure_is_recovered_atomically_and_retained(
