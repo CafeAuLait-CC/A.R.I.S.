@@ -1,5 +1,7 @@
 """Read-only source ceilings and original pages; never skip a sequence gap."""
 
+import hashlib
+import json
 from collections.abc import Callable
 from datetime import UTC, datetime
 from time import monotonic
@@ -22,6 +24,7 @@ from aris.modules.vega.usage_archive_schemas import (
     MAX_ARCHIVE_MESSAGES,
     MAX_ARCHIVE_SEQ,
     MAX_ARCHIVE_SOURCE_CHARACTERS,
+    ArchivedReportingPage,
     ArchivedUsageItem,
     ArchivedUsageReference,
     UsageArchiveFreeze,
@@ -55,6 +58,47 @@ def _archived_item(row: StoredUsageMessage, query: UsageArchiveQuery) -> Archive
             else None
         ),
     )
+
+
+def _archived_reporting_reference(
+    row: StoredUsageMessage, query: UsageArchiveQuery
+) -> ArchivedUsageReference:
+    payload = row.payload
+    fingerprint = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    kind = payload.get("type")
+    if kind is None and row.message_kind == "telemetry" and isinstance(payload.get("gpus"), list):
+        kind = "telemetry"
+    reference = ArchivedUsageReference(
+        agent_id=payload["agent_id"],
+        node_id=payload["node_id"],
+        message_id=payload["message_id"],
+        seq=payload["seq"],
+        kind=kind,
+        fingerprint=fingerprint,
+        observed_at=payload["observed_at"],
+        received_at=utc(row.received_at),
+    )
+    if (row.agent_id, row.node_id) != (query.agent_id, query.node_id) or (
+        reference.agent_id,
+        reference.node_id,
+        str(reference.message_id),
+        reference.seq,
+        reference.kind,
+        reference.observed_at,
+        reference.fingerprint,
+    ) != (
+        row.agent_id,
+        row.node_id,
+        row.message_id,
+        row.seq,
+        row.message_kind,
+        utc(row.observed_at),
+        row.fingerprint,
+    ):
+        raise ValueError("Reporting reference differs from the verified archived envelope")
+    return reference
 
 
 class VegaUsageArchive:
@@ -229,38 +273,69 @@ class VegaUsageArchive:
             503,
         )
 
+    @staticmethod
+    def _source_rows(
+        session: Session, query: UsageArchiveQuery
+    ) -> tuple[tuple[StoredUsageMessage, ...], int]:
+        repo = VegaRepository(session)
+        binding = repo.usage_source_node(query.agent_id)
+        if binding is None:
+            raise DomainError("NOT_FOUND", "Archived usage source is unknown", 404)
+        if binding != query.node_id:
+            raise DomainError("CONFLICT", "Archived usage source binding differs", 409)
+        metadata = repo.usage_range_metadata(
+            query.agent_id, query.after_seq, query.page_through_seq
+        )
+        selected = []
+        characters = 0
+        for index, (message_id, seq, size) in enumerate(metadata, start=1):
+            if seq != query.after_seq + index:
+                break
+            characters += size
+            if characters > min(MAX_ARCHIVE_SOURCE_CHARACTERS, query.source_character_budget):
+                raise DomainError(
+                    "USAGE_ARCHIVE_TOO_LARGE", "Archive page exceeds its source budget", 503
+                )
+            selected.append(message_id)
+        rows = repo.usage_messages(query.agent_id, tuple(selected)) if selected else ()
+        if len(rows) != len(selected) or tuple(row.message_id for row in rows) != tuple(selected):
+            raise ValueError("archived source prefix changed while loading")
+        return rows, characters
+
+    def reporting_page_in_transaction(
+        self, session: Session, query: UsageArchiveQuery
+    ) -> ArchivedReportingPage:
+        """Verify original envelope timing for health history without deriving usage."""
+        query = UsageArchiveQuery.model_validate(query.model_dump(mode="json"))
+        deadline = monotonic() + self.timeout_ms / 1000
+        try:
+            with session.no_autoflush:
+                rows, _ = self._source_rows(session, query)
+                page = ArchivedReportingPage(
+                    query=query,
+                    reports=tuple(_archived_reporting_reference(row, query) for row in rows),
+                    read_at=self.clock(),
+                )
+                if monotonic() >= deadline:
+                    raise DomainError(
+                        "RETRYABLE_DATABASE_ERROR",
+                        "Archive report timing read budget exceeded",
+                        503,
+                    )
+                return page
+        except DBAPIError as error:
+            raise self._database_failure(error) from None
+        except (ValueError, TypeError, KeyError, RecursionError):
+            raise DomainError(
+                "DEPENDENCY_UNAVAILABLE", "Original reporting envelope is inconsistent", 503
+            ) from None
+
     def page_in_transaction(self, session: Session, query: UsageArchiveQuery) -> UsageArchivePage:
         query = UsageArchiveQuery.model_validate(query.model_dump(mode="json"))
         deadline = monotonic() + self.timeout_ms / 1000
         try:
             with session.no_autoflush:
-                repo = VegaRepository(session)
-                binding = repo.usage_source_node(query.agent_id)
-                if binding is None:
-                    raise DomainError("NOT_FOUND", "Archived usage source is unknown", 404)
-                if binding != query.node_id:
-                    raise DomainError("CONFLICT", "Archived usage source binding differs", 409)
-                metadata = repo.usage_range_metadata(
-                    query.agent_id, query.after_seq, query.page_through_seq
-                )
-                selected = []
-                characters = 0
-                for index, (message_id, seq, size) in enumerate(metadata, start=1):
-                    if seq != query.after_seq + index:
-                        break
-                    characters += size
-                    if characters > min(
-                        MAX_ARCHIVE_SOURCE_CHARACTERS, query.source_character_budget
-                    ):
-                        raise DomainError(
-                            "USAGE_ARCHIVE_TOO_LARGE", "Archive page exceeds its source budget", 503
-                        )
-                    selected.append(message_id)
-                rows = repo.usage_messages(query.agent_id, tuple(selected)) if selected else ()
-                if len(rows) != len(selected) or tuple(row.message_id for row in rows) != tuple(
-                    selected
-                ):
-                    raise ValueError("archived source prefix changed while loading")
+                rows, characters = self._source_rows(session, query)
                 items = tuple(_archived_item(row, query) for row in rows)
                 end = query.after_seq + len(items)
                 state: Literal["range_end", "page_end", "gap"] = (

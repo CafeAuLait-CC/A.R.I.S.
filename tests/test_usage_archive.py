@@ -64,6 +64,41 @@ def test_late_arrivals_include_compute_observed_inside_the_freeze(client):
         assert source.arrivals_outside_freezes_in_transaction(session, (freeze, trimmed)) == (3, 2)
 
 
+def test_reporting_timing_verifies_early_envelopes_without_inferring_usage(client):
+    assert put(client, resource_batch()).status_code == 200
+    assert beat(client, heartbeat(seq=2)).status_code == 200
+    source = archive(client)
+    with source.sessions.begin() as session:
+        row = session.scalar(select(AgentMessage).where(AgentMessage.seq == 1))
+        payload = dict(row.payload)
+        payload.pop("type")
+        resources = payload.pop("resources")
+        payload["gpus"] = resources["gpu"]["gpus"]
+        payload["schema_version"] = "aris.agent/v1"
+        row.fingerprint = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        row.payload = payload
+        row.compute_observed_at = None
+
+    selected = query(through_seq=2)
+    with source.sessions() as session:
+        page = source.reporting_page_in_transaction(session, selected)
+        assert page.state == "range_end" and page.missing_seq is None
+        assert tuple(value.kind for value in page.reports) == ("telemetry", "heartbeat")
+        assert "gpus" not in page.model_dump_json()
+    with pytest.raises(DomainError) as invalid_usage:
+        source.page(selected)
+    assert invalid_usage.value.code == "DEPENDENCY_UNAVAILABLE"
+
+    with source.sessions.begin() as session:
+        row = session.scalar(select(AgentMessage).where(AgentMessage.seq == 1))
+        row.fingerprint = "f" * 64
+    with source.sessions() as session, pytest.raises(DomainError) as invalid_header:
+        source.reporting_page_in_transaction(session, selected)
+    assert invalid_header.value.code == "DEPENDENCY_UNAVAILABLE"
+
+
 def seed(client):
     payloads = []
     for seq in range(1, 6):

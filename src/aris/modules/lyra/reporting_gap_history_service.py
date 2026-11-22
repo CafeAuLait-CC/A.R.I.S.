@@ -168,7 +168,7 @@ class ReportingGapHistoryService:
                         already_saved=0,
                         uncertain_clock_pairs=uncertain,
                     )
-                page = self.preview.source.page_in_transaction(
+                page = self.preview.source.reporting_page_in_transaction(
                     db,
                     UsageArchiveQuery(
                         agent_id=source.agent_id,
@@ -178,7 +178,7 @@ class ReportingGapHistoryService:
                         limit=max_messages,
                     ),
                 )
-                reports = tuple(ReportingPoint.from_archive(item.reference) for item in page.items)
+                reports = tuple(ReportingPoint.from_archive(report) for report in page.reports)
                 records: tuple[StoredReportingGap, ...] = ()
                 saved = 0
                 if reports:

@@ -110,6 +110,39 @@ class ArchivedUsageReference(UsageFactContract):
         return value.astimezone(UTC)
 
 
+class ArchivedReportingPage(UsageFactContract):
+    query: UsageArchiveQuery
+    reports: tuple[ArchivedUsageReference, ...] = Field(max_length=MAX_ARCHIVE_MESSAGES)
+    read_at: AwareDatetime
+
+    @property
+    def next_after_seq(self) -> int:
+        return self.query.after_seq + len(self.reports)
+
+    @property
+    def state(self) -> Literal["range_end", "page_end", "gap"]:
+        if self.next_after_seq == self.query.through_seq:
+            return "range_end"
+        if self.next_after_seq == self.query.page_through_seq:
+            return "page_end"
+        return "gap"
+
+    @property
+    def missing_seq(self) -> int | None:
+        return self.next_after_seq + 1 if self.state == "gap" else None
+
+    @model_validator(mode="after")
+    def exact_prefix(self) -> "ArchivedReportingPage":
+        if self.next_after_seq > self.query.page_through_seq or any(
+            (report.agent_id, report.node_id, report.seq)
+            != (self.query.agent_id, self.query.node_id, self.query.after_seq + ordinal)
+            or report.received_at > self.read_at
+            for ordinal, report in enumerate(self.reports, start=1)
+        ):
+            raise ValueError("Reporting page differs from its contiguous source binding")
+        return self
+
+
 class ArchivedUsageItem(UsageFactContract):
     reference: ArchivedUsageReference
     observation: UsageObservationFact | None = None
