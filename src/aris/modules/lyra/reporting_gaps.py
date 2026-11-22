@@ -1,5 +1,6 @@
 """Describe long intervals between consecutive archived node reports."""
 
+from collections.abc import Iterable
 from datetime import timedelta
 from itertools import chain, pairwise
 from typing import Literal
@@ -52,29 +53,38 @@ def archived_reporting_gaps(
     pages: tuple[UsageArchivePage, ...],
     threshold_seconds: int = DEFAULT_REPORTING_GAP_SECONDS,
 ) -> ReportingGapPreview:
-    threshold = timedelta(seconds=threshold_seconds)
-    reports = chain.from_iterable((item.reference for item in page.items) for page in pages)
-    gaps = []
-    uncertain = 0
-    for previous, following in pairwise(reports):
-        observed = following.observed_at - previous.observed_at
-        received = following.received_at - previous.received_at
-        if following.seq != previous.seq + 1 or min(observed, received) < timedelta(0):
-            uncertain += 1
-            continue
-        if observed >= threshold or received >= threshold:
-            gaps.append(
-                ReportingGap(
-                    previous_report=ReportingPoint.from_archive(previous),
-                    next_report=ReportingPoint.from_archive(following),
-                    large_observed_interval=observed >= threshold,
-                    large_received_interval=received >= threshold,
-                )
-            )
+    reports = chain.from_iterable(
+        (ReportingPoint.from_archive(item.reference) for item in page.items) for page in pages
+    )
+    gaps, uncertain = reporting_gaps(reports, threshold_seconds)
     return ReportingGapPreview(
         source_preview_fingerprint=preview.fingerprint,
         interval_threshold_seconds=threshold_seconds,
         source_range_complete=preview.range_complete,
         pairs_with_uncertain_clock_order=uncertain,
-        gaps=tuple(gaps),
+        gaps=gaps,
     )
+
+
+def reporting_gaps(
+    reports: Iterable[ReportingPoint], threshold_seconds: int
+) -> tuple[tuple[ReportingGap, ...], int]:
+    threshold = timedelta(seconds=threshold_seconds)
+    gaps = []
+    uncertain = 0
+    for previous, following in pairwise(reports):
+        observed = following.observed_at - previous.observed_at
+        received = following.received_at - previous.received_at
+        if int(following.seq) != int(previous.seq) + 1 or min(observed, received) < timedelta(0):
+            uncertain += 1
+            continue
+        if observed >= threshold or received >= threshold:
+            gaps.append(
+                ReportingGap(
+                    previous_report=previous,
+                    next_report=following,
+                    large_observed_interval=observed >= threshold,
+                    large_received_interval=received >= threshold,
+                )
+            )
+    return tuple(gaps), uncertain

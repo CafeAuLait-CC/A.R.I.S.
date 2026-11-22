@@ -17,3 +17,18 @@ class ReportingGapHistoryRow(Base):
     agent_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     next_seq: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     canonical_record: Mapped[str] = mapped_column(Text)
+
+
+class ReportingGapScanRow(Base):
+    __tablename__ = "reporting_gap_scan_progress"
+    __table_args__ = (
+        CheckConstraint(
+            "through_seq > 0 AND length(canonical_position) BETWEEN 1 AND 4096",
+            name="ck_reporting_gap_scan_progress_value",
+        ),
+    )
+
+    node_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    agent_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    through_seq: Mapped[int] = mapped_column(BigInteger)
+    canonical_position: Mapped[str] = mapped_column(Text)

@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 from datetime import UTC, datetime
+from itertools import chain
 
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
@@ -18,10 +19,21 @@ from aris.modules.lyra.reporting_gap_history_repo import ReportingGapHistoryRepo
 from aris.modules.lyra.reporting_gap_history_schemas import (
     MAX_SAVED_GAPS,
     ReportingGapCapture,
+    ReportingGapScan,
+    ReportingGapScanPosition,
     StoredReportingGap,
 )
-from aris.modules.lyra.reporting_gaps import DEFAULT_REPORTING_GAP_SECONDS
-from aris.modules.vega.usage_archive_schemas import MAX_ARCHIVE_SEQ, UsageArchiveHeadQuery
+from aris.modules.lyra.reporting_gaps import (
+    DEFAULT_REPORTING_GAP_SECONDS,
+    ReportingGap,
+    ReportingPoint,
+    reporting_gaps,
+)
+from aris.modules.vega.usage_archive_schemas import (
+    MAX_ARCHIVE_SEQ,
+    UsageArchiveHeadQuery,
+    UsageArchiveQuery,
+)
 
 
 class ReportingGapHistoryService:
@@ -66,15 +78,38 @@ class ReportingGapHistoryService:
             max_messages=max_messages,
             through_seq=through_seq,
         )
-        if len(view.gaps) > MAX_SAVED_GAPS:
+        records = self._records(source, view.gaps, view.interval_threshold_seconds)
+        saved = 0
+        if records:
+            try:
+                with self.sessions() as db:
+                    transaction_budget(db, 100, 1000, 3000)
+                    request = self._permission(actor, source)
+                    self.access.require_in_transaction(db, request)
+                    saved = ReportingGapHistoryRepository(db).save(source, records)
+                    self.access.require_in_transaction(db, request)
+                    commit_owned_transaction(db)
+            except DBAPIError as error:
+                raise self._failure(error) from None
+        return ReportingGapCapture(
+            source=source,
+            source_range_complete=view.source_range_complete,
+            saved=saved,
+            already_saved=len(records) - saved,
+        )
+
+    def _records(
+        self, source: UsageArchiveHeadQuery, gaps: tuple[ReportingGap, ...], threshold_seconds: int
+    ) -> tuple[StoredReportingGap, ...]:
+        if len(gaps) > MAX_SAVED_GAPS:
             raise DomainError("REPORTING_GAP_BATCH_TOO_LARGE", "Select a smaller source range", 422)
         now = self.clock()
         records = []
-        for gap in view.gaps:
+        for gap in gaps:
             draft = StoredReportingGap.model_construct(
                 source=source,
                 gap=gap,
-                threshold_seconds=view.interval_threshold_seconds,
+                threshold_seconds=threshold_seconds,
                 recorded_at=now,
                 fingerprint="0" * 64,
             )
@@ -86,24 +121,107 @@ class ReportingGapHistoryService:
                     }
                 )
             )
-        saved = 0
-        if records:
-            try:
-                with self.sessions() as db:
-                    transaction_budget(db, 100, 1000, 3000)
-                    request = self._permission(actor, source)
+        return tuple(records)
+
+    def scan_next(
+        self,
+        actor: ActorContext,
+        source: UsageArchiveHeadQuery,
+        *,
+        first_seq: int,
+        max_messages: int = MAX_SAVED_GAPS,
+    ) -> ReportingGapScan:
+        actor = ActorContext.model_validate(actor.model_dump(mode="json"))
+        source = UsageArchiveHeadQuery.model_validate(source.model_dump(mode="json"))
+        if (
+            type(first_seq) is not int
+            or not 1 <= first_seq <= MAX_ARCHIVE_SEQ
+            or type(max_messages) is not int
+            or not 1 <= max_messages <= MAX_SAVED_GAPS
+        ):
+            raise DomainError("VALIDATION_ERROR", "Select a bounded reporting scan", 422)
+        request = self._permission(actor, source)
+        try:
+            with self.sessions() as db, db.no_autoflush:
+                transaction_budget(db, 100, 1000, 5000)
+                self.access.require_in_transaction(db, request)
+                repository = ReportingGapHistoryRepository(db)
+                previous = repository.position(source)
+                head = self.preview.source.head_in_transaction(db, source).highest_committed_seq
+                after = first_seq - 1
+                uncertain = 0
+                if previous is not None:
+                    after = int(previous.last_report.seq)
+                    uncertain = previous.uncertain_clock_pairs
+                    if previous.first_seq != first_seq or after > head:
+                        raise DomainError("CONFLICT", "Reporting scan origin or head differs", 409)
+                if after >= head:
                     self.access.require_in_transaction(db, request)
-                    saved = ReportingGapHistoryRepository(db).save(source, tuple(records))
-                    self.access.require_in_transaction(db, request)
+                    return ReportingGapScan(
+                        source=source,
+                        first_seq=first_seq,
+                        through_seq=after if previous is not None else None,
+                        archive_head=head,
+                        state="caught_up",
+                        missing_seq=None,
+                        saved=0,
+                        already_saved=0,
+                        uncertain_clock_pairs=uncertain,
+                    )
+                page = self.preview.source.page_in_transaction(
+                    db,
+                    UsageArchiveQuery(
+                        agent_id=source.agent_id,
+                        node_id=source.node_id,
+                        after_seq=after,
+                        through_seq=head,
+                        limit=max_messages,
+                    ),
+                )
+                reports = tuple(ReportingPoint.from_archive(item.reference) for item in page.items)
+                records: tuple[StoredReportingGap, ...] = ()
+                saved = 0
+                if reports:
+                    anchor = (previous.last_report,) if previous is not None else ()
+                    gaps, additional_uncertain = reporting_gaps(
+                        chain(anchor, reports), DEFAULT_REPORTING_GAP_SECONDS
+                    )
+                    uncertain += additional_uncertain
+                    draft = ReportingGapScanPosition.model_construct(
+                        source=source,
+                        first_seq=first_seq,
+                        last_report=reports[-1],
+                        uncertain_clock_pairs=uncertain,
+                        fingerprint="0" * 64,
+                    )
+                    position = ReportingGapScanPosition.model_validate(
+                        {
+                            **draft.model_dump(mode="json"),
+                            "fingerprint": draft.content_fingerprint(),
+                        }
+                    )
+                    repository.advance(position, previous)
+                    records = self._records(source, gaps, DEFAULT_REPORTING_GAP_SECONDS)
+                    if records:
+                        saved = repository.save(source, records)
+                self.access.require_in_transaction(db, request)
+                if reports:
                     commit_owned_transaction(db)
-            except DBAPIError as error:
-                raise self._failure(error) from None
-        return ReportingGapCapture(
-            source=source,
-            source_range_complete=view.source_range_complete,
-            saved=saved,
-            already_saved=len(records) - saved,
-        )
+                return ReportingGapScan(
+                    source=source,
+                    first_seq=first_seq,
+                    through_seq=page.next_after_seq if (reports or previous is not None) else None,
+                    archive_head=head,
+                    state={"range_end": "caught_up", "page_end": "more", "gap": "missing"}[
+                        page.state
+                    ],
+                    missing_seq=page.missing_seq,
+                    saved=saved,
+                    already_saved=len(records) - saved,
+                    uncertain_clock_pairs=uncertain,
+                )
+        except DBAPIError as error:
+            raise self._failure(error) from None
 
     def latest(
         self,

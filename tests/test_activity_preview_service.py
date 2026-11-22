@@ -10,7 +10,10 @@ from aris.core.access.models import RolePermission
 from aris.core.commands.schemas import ActorContext
 from aris.core.contracts import DomainError
 from aris.modules.lyra.activity_preview_service import ActivityPreviewService
-from aris.modules.lyra.reporting_gap_history_models import ReportingGapHistoryRow
+from aris.modules.lyra.reporting_gap_history_models import (
+    ReportingGapHistoryRow,
+    ReportingGapScanRow,
+)
 from aris.modules.lyra.reporting_gap_history_repo import ReportingGapHistoryRepository
 from aris.modules.lyra.reporting_gap_history_service import ReportingGapHistoryService
 from aris.modules.vega.models import AgentMessage
@@ -189,6 +192,97 @@ def test_reporting_gap_history_only_keeps_proved_abnormal_pairs(preview_source, 
     with pytest.raises(DomainError) as refused:
         history.latest(ActorContext(actor_id=other, request_id="history-check"), SOURCE)
     assert refused.value.code == "PERMISSION_DENIED"
+
+
+def test_reporting_gap_scan_resumes_across_batches_and_rolls_back_position(
+    preview_source, monkeypatch
+):
+    preview, source, actor, readings = preview_source
+    start = readings[0][2][2][5]["now"] - timedelta(minutes=20)
+    for seq, elapsed in ((8, 0), (9, 15), (10, 198), (12, 228)):
+        observed = start + timedelta(seconds=elapsed)
+        assert (
+            beat(
+                readings[0][4],
+                heartbeat(seq=seq, observed_at=observed.isoformat(), sent_at=observed.isoformat()),
+            ).status_code
+            == 200
+        )
+
+    def scan(first_seq=8, max_messages=2):
+        history = ReportingGapHistoryService(preview)
+        return history.scan_next(actor, SOURCE, first_seq=first_seq, max_messages=max_messages)
+
+    initial = scan()
+    assert (initial.state, initial.through_seq, initial.saved) == ("more", 9, 0)
+    with source.sessions.begin() as session:
+        session.execute(delete(AgentMessage).where(AgentMessage.seq == 9))
+
+    def fail(*args):
+        raise DomainError("RETRYABLE_DATABASE_ERROR", "Injected reporting history failure", 503)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ReportingGapHistoryRepository, "save", fail)
+        with pytest.raises(DomainError, match="Injected reporting history failure"):
+            scan()
+    with source.sessions() as session:
+        assert session.get(ReportingGapScanRow, ("node-a", "agent-a")).through_seq == 9
+
+    resumed = scan()
+    assert (resumed.state, resumed.through_seq, resumed.saved, resumed.missing_seq) == (
+        "missing",
+        10,
+        1,
+        11,
+    )
+    assert scan().through_seq == 10
+    (record,) = ReportingGapHistoryService(preview).latest(actor, SOURCE)
+    assert (record.gap.previous_report.seq, record.gap.next_report.seq) == ("9", "10")
+    assert record.gap.large_observed_interval
+    with pytest.raises(DomainError) as wrong_start:
+        scan(first_seq=10)
+    assert wrong_start.value.code == "CONFLICT"
+
+    observed = start + timedelta(seconds=213)
+    assert (
+        beat(
+            readings[0][4],
+            heartbeat(seq=11, observed_at=observed.isoformat(), sent_at=observed.isoformat()),
+        ).status_code
+        == 200
+    )
+    continued = scan()
+    assert (continued.state, continued.through_seq, continued.saved) == ("caught_up", 12, 0)
+    assert scan() == continued
+    with source.sessions() as session:
+        assert len(tuple(session.scalars(select(ReportingGapScanRow)))) == 1
+
+
+def test_postgresql_reporting_gap_scan_compare_and_set_does_not_double_advance(
+    preview_source, monkeypatch
+):
+    preview, source, actor, _ = preview_source
+    if source.sessions.kw["bind"].dialect.name != "postgresql":
+        pytest.skip("requires concurrent PostgreSQL reports and cursor comparators")
+    ready = Barrier(2, timeout=8)
+    advance = ReportingGapHistoryRepository.advance
+
+    def race(repo, *args):
+        ready.wait()
+        return advance(repo, *args)
+
+    history = ReportingGapHistoryService(preview)
+    with monkeypatch.context() as patch, ThreadPoolExecutor(max_workers=2) as workers:
+        patch.setattr(ReportingGapHistoryRepository, "advance", race)
+        pending = [workers.submit(history.scan_next, actor, SOURCE, first_seq=1) for _ in range(2)]
+        successful = []
+        for task in pending:
+            try:
+                successful.append(task.result(timeout=12))
+            except DomainError as error:
+                assert error.code == "RETRYABLE_DATABASE_ERROR"
+    assert len(successful) == 1 and successful[0].state == "caught_up"
+    assert history.scan_next(actor, SOURCE, first_seq=1) == successful[0]
 
 
 def test_postgresql_activity_preview_fixed_snapshot_ignores_later_gap_fill_and_recovers_after_lock(

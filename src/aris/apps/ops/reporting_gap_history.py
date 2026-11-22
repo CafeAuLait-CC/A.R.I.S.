@@ -36,18 +36,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", required=True, type=Path)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--capture-through", type=int, metavar="SEQ")
+    mode.add_argument("--scan-next", action="store_true")
     mode.add_argument("--list", action="store_true")
+    parser.add_argument("--first-seq", type=int)
     parser.add_argument("--max-messages", type=int)
     parser.add_argument("--before-seq", type=int)
     parser.add_argument("--limit", type=int)
     args = parser.parse_args(argv)
     if args.list and args.max_messages is not None:
-        parser.error("--max-messages requires --capture-through")
-    if args.capture_through is not None and (args.before_seq is not None or args.limit is not None):
+        parser.error("--max-messages requires --capture-through or --scan-next")
+    if not args.list and (args.before_seq is not None or args.limit is not None):
         parser.error("--before-seq and --limit require --list")
+    if args.scan_next != (args.first_seq is not None):
+        parser.error("--first-seq is required for --scan-next")
+    if args.first_seq is not None and not 1 <= args.first_seq <= MAX_ARCHIVE_SEQ:
+        parser.error("--first-seq must be a valid sequence")
     if args.capture_through is not None and not 1 <= args.capture_through <= MAX_ARCHIVE_SEQ:
         parser.error("--capture-through requires a valid committed sequence")
-    if args.max_messages is not None and not 1 <= args.max_messages <= MAX_PREVIEW_MESSAGES:
+    maximum = MAX_SAVED_GAPS if args.scan_next else MAX_PREVIEW_MESSAGES
+    if args.max_messages is not None and not 1 <= args.max_messages <= maximum:
         parser.error("--max-messages must be within the archive preview range")
     if args.limit is not None and not 1 <= args.limit <= MAX_SAVED_GAPS:
         parser.error("--limit must be within the history read range")
@@ -66,7 +73,16 @@ def main(argv: list[str] | None = None) -> int:
             ActivityPreviewService(sessions, VegaUsageArchive(sessions))
         )
         actor = ActorContext(actor_id=config.actor_id, request_id="reporting-gap-history")
-        if args.capture_through is not None:
+        if args.scan_next:
+            print(
+                history.scan_next(
+                    actor,
+                    config.source,
+                    first_seq=args.first_seq,
+                    max_messages=args.max_messages or MAX_SAVED_GAPS,
+                ).model_dump_json()
+            )
+        elif args.capture_through is not None:
             print(
                 history.capture(
                     actor,
