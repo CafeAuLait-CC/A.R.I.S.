@@ -177,6 +177,11 @@ def test_selected_older_window_is_stable_when_new_packets_arrive_and_gaps_are_no
     reader.hardware_source = VegaGpuHardwareObservations(source.sessions)
     combined = reader.recent_with_hardware(actor, SOURCE, RULE, max_messages=3, through_seq=5)
     assert combined.preview.groups == old.groups and combined.hardware.telemetry_frames == 2
+    assert combined.sampling_incidents is None
+    diagnosed = reader.recent_with_hardware(
+        actor, SOURCE, RULE, max_messages=3, through_seq=5, include_incidents=True
+    )
+    assert diagnosed.sampling_incidents == ()
     gap = reader.recent(actor, SOURCE, RULE, max_messages=3, through_seq=2)
     assert gap.missing_seq == 1 and gap.source_packets == 0 and not gap.range_complete
     for end in (0, True, 9, 9223372036854775808):

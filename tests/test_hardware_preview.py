@@ -6,7 +6,7 @@ from sqlalchemy import text, update
 from aris.core.contracts import DomainError
 from aris.interfaces.usage.activity_service import hardware_view
 from aris.modules.lyra.activity_preview import group_compute_observations
-from aris.modules.lyra.hardware_preview import summarize_gpu_samples
+from aris.modules.lyra.hardware_preview import sampling_incidents, summarize_gpu_samples
 from aris.modules.vega.gpu_hardware_schemas import (
     GpuHardwareBatch,
     GpuHardwareBatchQuery,
@@ -96,6 +96,35 @@ def inputs(specifications):
 
 def summary(specifications):
     return summarize_gpu_samples(*inputs(specifications))
+
+
+def test_sampling_incidents_keep_confirmed_recovery_separate_from_missing_visibility():
+    preview, _, batches = inputs(
+        [
+            {},
+            {"quality": "error"},
+            {"quality": "error", "gpu_seconds": 15},
+            {"quality": "error"},
+            {},
+            {"quality": "error"},
+            {"seconds": 200},
+            {"seconds": 215, "quality": "error"},
+        ]
+    )
+    first, second, third = sampling_incidents(preview, batches)
+    assert first.outcome == "recovered" and first.recovery.source_seq == "5"
+    assert first.first_error.source_seq == "2" and first.last_error.source_seq == "4"
+    assert first.independent_errors == 2
+    assert second.outcome == "observation_gap" and second.recovery is None
+    assert second.first_error.source_seq == second.last_error.source_seq == "6"
+    assert third.outcome == "range_end" and third.recovery is None
+    assert third.first_error.source_seq == "8"
+    assert (
+        sampling_incidents(preview.model_copy(update={"range_complete": False}), batches)[
+            -1
+        ].outcome
+        == "observation_gap"
+    )
 
 
 def test_independent_hardware_samples_exclude_cache_and_keep_missing_temperature_unknown():

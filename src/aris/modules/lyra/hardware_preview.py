@@ -162,9 +162,42 @@ class GpuHardwareSummary(IntervalContract):
         return self
 
 
+class SamplingIncidentPoint(IntervalContract):
+    source_seq: str = Field(pattern=r"^[1-9][0-9]{0,18}$")
+    source_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    sampled_at: AwareDatetime
+
+
+class GpuSamplingIncident(IntervalContract):
+    problem: Literal["gpu_sampling_error"] = "gpu_sampling_error"
+    first_error: SamplingIncidentPoint
+    last_error: SamplingIncidentPoint
+    independent_errors: int = Field(ge=1, le=1024)
+    outcome: Literal["recovered", "observation_gap", "range_end"]
+    recovery: SamplingIncidentPoint | None = None
+
+    @model_validator(mode="after")
+    def observed_boundaries(self) -> "GpuSamplingIncident":
+        if (
+            self.first_error.sampled_at > self.last_error.sampled_at
+            or int(self.first_error.source_seq) > int(self.last_error.source_seq)
+            or (self.outcome == "recovered") != (self.recovery is not None)
+            or (
+                self.recovery is not None
+                and (
+                    self.recovery.sampled_at <= self.last_error.sampled_at
+                    or int(self.recovery.source_seq) <= int(self.last_error.source_seq)
+                )
+            )
+        ):
+            raise ValueError("Incident does not match its observed error and recovery bounds")
+        return self
+
+
 class ActivityHardwarePreview(IntervalContract):
     preview: ActivityPreview
     hardware: GpuHardwareSummary
+    sampling_incidents: tuple[GpuSamplingIncident, ...] | None = None
 
     @model_validator(mode="after")
     def same_source(self) -> "ActivityHardwarePreview":
@@ -245,6 +278,59 @@ def _classify(values: tuple[GpuHardwareObservation, ...], gap: timedelta) -> lis
         if high_envelope is None or envelope > high_envelope:
             high_envelope = envelope
     return states
+
+
+def sampling_incidents(
+    preview: ActivityPreview, batches: tuple[GpuHardwareBatch, ...]
+) -> tuple[GpuSamplingIncident, ...]:
+    """Use verified hardware batches already selected by the hardware preview."""
+    values = tuple(value for batch in batches for value in batch.observations)
+    gap = timedelta(seconds=preview.rule.max_gap_seconds)
+    incidents: list[GpuSamplingIncident] = []
+    errors: list[SamplingIncidentPoint] = []
+    last_time = None
+
+    def finish(
+        outcome: Literal["recovered", "observation_gap", "range_end"],
+        recovery: SamplingIncidentPoint | None = None,
+    ) -> None:
+        if errors:
+            incidents.append(
+                GpuSamplingIncident(
+                    first_error=errors[0],
+                    last_error=errors[-1],
+                    independent_errors=len(errors),
+                    outcome=outcome,
+                    recovery=recovery,
+                )
+            )
+            errors.clear()
+
+    for value, state in zip(values, _classify(values, gap), strict=True):
+        bad = state == "GPU_COMPONENT_UNAVAILABLE" and value.gpu_quality == "error"
+        if state == "cached":
+            continue
+        if not bad and state != "independent":
+            finish("observation_gap")
+            last_time = None
+            continue
+        sample_time = value.gpu_observed_at
+        if sample_time == last_time:
+            continue
+        if last_time is not None and sample_time - last_time > gap:
+            finish("observation_gap")
+        last_time = sample_time
+        point = SamplingIncidentPoint(
+            source_seq=str(value.reference.seq),
+            source_fingerprint=value.reference.fingerprint,
+            sampled_at=sample_time,
+        )
+        if bad:
+            errors.append(point)
+        else:
+            finish("recovered", point)
+    finish("range_end" if preview.range_complete else "observation_gap")
+    return tuple(incidents)
 
 
 def _stat(values: list[int]) -> SampleStatistic:

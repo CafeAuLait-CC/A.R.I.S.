@@ -13,7 +13,11 @@ from aris.core.commands.schemas import ActorContext
 from aris.core.contracts import DomainError
 from aris.modules.lyra.activity_preview import ActivityPreview, ActivityPreviewRule, ActivityState
 from aris.modules.lyra.activity_preview_service import ActivityPreviewService
-from aris.modules.lyra.hardware_preview import GpuHardwareSummary, SampleStatistic
+from aris.modules.lyra.hardware_preview import (
+    GpuHardwareSummary,
+    GpuSamplingIncident,
+    SampleStatistic,
+)
 from aris.modules.vega.usage_archive_schemas import ArchivedUsageReference, UsageArchiveHeadQuery
 
 if TYPE_CHECKING:
@@ -47,6 +51,7 @@ class ActivityPreviewInput(AccessContract):
     node_id: str = Field(min_length=1, max_length=128, pattern=r"^\S+$")
     max_messages: int = Field(default=128, ge=1, le=1024, strict=True)
     through_seq: str | None = Field(default=None, pattern=r"^[1-9][0-9]{0,18}$")
+    include_health: bool = Field(default=False, strict=True)
 
     @model_validator(mode="after")
     def bounded_end(self) -> "ActivityPreviewInput":
@@ -183,6 +188,7 @@ class ActivityPreviewView(AccessContract):
     read_at: AwareDatetime
     source_result_fingerprint: str
     hardware: GpuHardwareSummaryView | None = None
+    sampling_incidents: tuple[GpuSamplingIncident, ...] | None = None
 
 
 def statistic_view(value: SampleStatistic) -> SampleStatisticView:
@@ -322,6 +328,8 @@ def activity_usage(
         source = next(item for item in access.config.sources if item.node_id == query.node_id)
         actor = ActorContext(actor_id=user, request_id=request_id)
         through_seq = int(query.through_seq) if query.through_seq is not None else None
+        if query.include_health and not access.config.hardware_metrics:
+            raise DomainError("USAGE_NOT_CONFIGURED", "GPU health preview is not enabled", 503)
         if access.config.hardware_metrics:
             combined = access.reader.recent_with_hardware(
                 actor,
@@ -329,9 +337,13 @@ def activity_usage(
                 access.config.rule,
                 max_messages=query.max_messages,
                 through_seq=through_seq,
+                include_incidents=query.include_health,
             )
             result = activity_view(combined.preview).model_copy(
-                update={"hardware": hardware_view(combined.hardware)}
+                update={
+                    "hardware": hardware_view(combined.hardware),
+                    "sampling_incidents": combined.sampling_incidents,
+                }
             )
         else:
             result = activity_view(

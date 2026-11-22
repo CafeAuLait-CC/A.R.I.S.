@@ -18,7 +18,11 @@ from aris.modules.lyra.activity_preview import (
     ActivityPreviewRule,
     group_compute_observations,
 )
-from aris.modules.lyra.hardware_preview import ActivityHardwarePreview, summarize_gpu_samples
+from aris.modules.lyra.hardware_preview import (
+    ActivityHardwarePreview,
+    sampling_incidents,
+    summarize_gpu_samples,
+)
 from aris.modules.vega.gpu_hardware_schemas import GpuHardwareBatch, GpuHardwareBatchQuery
 from aris.modules.vega.gpu_hardware_service import VegaGpuHardwareObservations
 from aris.modules.vega.usage_archive_schemas import (
@@ -72,9 +76,16 @@ class ActivityPreviewService:
         *,
         max_messages: int,
         through_seq: int | None = None,
+        include_incidents: bool = False,
     ) -> ActivityHardwarePreview:
         value = self._recent(
-            actor, source, rule, max_messages=max_messages, hardware=True, through_seq=through_seq
+            actor,
+            source,
+            rule,
+            max_messages=max_messages,
+            hardware=True,
+            through_seq=through_seq,
+            include_incidents=include_incidents,
         )
         assert isinstance(value, ActivityHardwarePreview)
         return value
@@ -95,6 +106,7 @@ class ActivityPreviewService:
         max_messages: int,
         hardware: bool,
         through_seq: int | None,
+        include_incidents: bool = False,
     ) -> ActivityPreview | ActivityHardwarePreview:
         if hardware and self.hardware_source is None:
             raise DomainError("USAGE_NOT_CONFIGURED", "GPU hardware preview is not configured", 503)
@@ -176,6 +188,9 @@ class ActivityPreviewService:
                         hardware=summarize_gpu_samples(
                             preview, tuple(pages), tuple(hardware_batches)
                         ),
+                        sampling_incidents=sampling_incidents(preview, tuple(hardware_batches))
+                        if include_incidents
+                        else None,
                     )
                     if hardware
                     else preview
