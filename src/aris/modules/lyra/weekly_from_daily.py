@@ -5,24 +5,29 @@ from datetime import date, timedelta
 from time import monotonic
 from typing import Literal
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from pydantic import AwareDatetime, Field, field_validator
 from sqlalchemy.exc import DBAPIError
+from sqlalchemy.orm import Session
 
 from aris.core.access.schemas import UserPrincipal
 from aris.core.commands.budgets import database_failure, transaction_budget
 from aris.core.commands.schemas import ActorContext
 from aris.core.contracts import DomainError
+from aris.core.db import commit_owned_transaction
 from aris.modules.lyra.coverage_rollup import (
     CoverageDuration,
     CoverageState,
     SavedCoverageRollup,
     roll_up_saved_coverage,
 )
+from aris.modules.lyra.daily_rollup_repo import DailyUsageRollupRepository
 from aris.modules.lyra.trace_consumer_schemas import canonical_trace, trace_fingerprint
 from aris.modules.lyra.usage_history import calendar_boundaries
 from aris.modules.lyra.usage_intervals import IntervalContract
 from aris.modules.lyra.window_reader import UsageWindowReader
+from aris.modules.lyra.window_schemas import UsageWindowQuery
 
 
 class WeeklyFromDailyQuery(IntervalContract):
@@ -167,6 +172,70 @@ class WeeklyFromDailyReader:
     def __init__(self, daily_windows: UsageWindowReader) -> None:
         self.daily_windows = daily_windows
 
+    def _begin(self, db: Session, actor: ActorContext, node_id: str) -> None:
+        timeout_ms = self.daily_windows.timeout_ms
+        transaction_budget(db, 100, min(1000, timeout_ms), timeout_ms)
+        self.daily_windows.require_in_transaction(db, actor, node_id, None, "node")
+
+    @staticmethod
+    def _failure(error: DBAPIError) -> DomainError:
+        code = database_failure(error)
+        return DomainError(
+            code if code == "RETRYABLE_DATABASE_ERROR" else "DEPENDENCY_UNAVAILABLE",
+            "Daily statistics database is unavailable",
+            503,
+        )
+
+    def stored_references(
+        self, actor: ActorContext, node_id: str, ids: tuple[UUID, ...]
+    ) -> dict[UUID, str]:
+        if not 1 <= len(ids) <= 7 or len(set(ids)) != len(ids):
+            raise ValueError("Expected up to seven distinct day rollups")
+        reader = self.daily_windows
+        try:
+            with reader.sessions() as db, db.no_autoflush:
+                self._begin(db, actor, node_id)
+                values = DailyUsageRollupRepository(db).fingerprints(node_id, ids)
+                reader.require_in_transaction(db, actor, node_id, None, "node")
+                return values
+        except DBAPIError as error:
+            raise self._failure(error) from None
+
+    def save_day(
+        self, actor: ActorContext, query: UsageWindowQuery, source: DailyWindowReference
+    ) -> SavedCoverageRollup:
+        day = query.start_at.astimezone(ZoneInfo(query.timezone)).date()
+        if query.owner_id is not None or (query.start_at, query.end_at) != calendar_boundaries(
+            day, day, query.timezone
+        ):
+            raise DomainError("VALIDATION_ERROR", "Daily rollup requires a full node day", 422)
+        reader = self.daily_windows
+        deadline = monotonic() + reader.timeout_ms / 1000
+        try:
+            with reader.sessions() as db, db.no_autoflush:
+                self._begin(db, actor, query.node_id)
+                repo = DailyUsageRollupRepository(db)
+                saved = repo.get(query.node_id, (source.snapshot_id,)).get(source.snapshot_id)
+                if saved is None:
+                    value = reader.read_in_transaction(
+                        db, actor, source.snapshot_id, node_id=query.node_id, mode="node"
+                    )
+                    saved = roll_up_saved_coverage(value, "day")
+                    repo.insert(saved)
+                if (
+                    saved.snapshot_fingerprint != source.snapshot_fingerprint
+                    or saved.query != query
+                ):
+                    raise DomainError("CONFLICT", "Daily rollup snapshot or scope differs", 409)
+                reader.require_in_transaction(db, actor, query.node_id, None, "node")
+                reader._deadline(deadline)
+                commit_owned_transaction(db)
+                return saved
+        except ValueError:
+            raise DomainError("CONFLICT", "Daily interval snapshot is inconsistent", 409) from None
+        except DBAPIError as error:
+            raise self._failure(error) from None
+
     def read(
         self,
         actor: ActorContext,
@@ -179,35 +248,27 @@ class WeeklyFromDailyReader:
         deadline = monotonic() + reader.timeout_ms / 1000
         try:
             with reader.sessions() as db, db.no_autoflush:
-                transaction_budget(
-                    db, min(100, reader.timeout_ms), min(1000, reader.timeout_ms), reader.timeout_ms
+                self._begin(db, actor, query.node_id)
+                saved = DailyUsageRollupRepository(db).get(
+                    query.node_id, tuple(source.snapshot_id for source in sources)
                 )
-                reader.require_in_transaction(db, actor, query.node_id, None, "node")
                 days = []
                 for source in sources:
-                    value = reader.read_in_transaction(
-                        db, actor, source.snapshot_id, node_id=query.node_id, mode="node"
-                    )
+                    value = saved.get(source.snapshot_id)
+                    if value is None:
+                        raise DomainError("NOT_FOUND", "Daily usage rollup is missing", 404)
                     if value.snapshot_fingerprint != source.snapshot_fingerprint:
                         raise DomainError(
                             "CONFLICT", "Daily snapshot differs from its reference", 409
                         )
-                    days.append(roll_up_saved_coverage(value, "day"))
+                    days.append(value)
                 result = weekly_from_daily(query, tuple(days))
                 reader.require_in_transaction(db, actor, query.node_id, None, "node")
-                if monotonic() >= deadline:
-                    raise DomainError(
-                        "RETRYABLE_DATABASE_ERROR", "Weekly consolidation timed out", 503
-                    )
+                reader._deadline(deadline)
                 return result
         except ValueError:
             raise DomainError(
                 "CONFLICT", "Daily statistics cannot form the requested week", 409
             ) from None
         except DBAPIError as error:
-            code = database_failure(error)
-            raise DomainError(
-                code if code == "RETRYABLE_DATABASE_ERROR" else "DEPENDENCY_UNAVAILABLE",
-                "Daily statistics database is unavailable",
-                503,
-            ) from None
+            raise self._failure(error) from None

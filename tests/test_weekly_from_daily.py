@@ -2,10 +2,12 @@ from datetime import UTC, datetime, time, timedelta
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import delete, event
+from sqlalchemy import delete, event, update
+from sqlalchemy.exc import DBAPIError
 
 from aris.core.access.models import RolePermission
 from aris.core.contracts import DomainError
+from aris.modules.lyra.daily_rollup_models import DailyUsageRollupRow
 from aris.modules.lyra.weekly_from_daily import (
     DailyWindowReference,
     WeeklyFromDailyQuery,
@@ -48,8 +50,11 @@ def test_week_builds_from_saved_local_days_without_source_messages(saved_ui, mon
     monkeypatch.setattr(state.service, "clock", lambda: captured_at)
     monkeypatch.setattr(state.service.identities, "clock", lambda: captured_at)
     query = WeeklyFromDailyQuery(node_id="node-a", week=week, timezone="UTC")
+    reader = WeeklyFromDailyReader(state.service.reader)
     references = []
     proofs = []
+    day_queries = []
+    daily = []
     for date in dates:
         start = datetime.combine(date, time.min, UTC)
         window = original.query.model_copy(
@@ -57,19 +62,30 @@ def test_week_builds_from_saved_local_days_without_source_messages(saved_ui, mon
         )
         request = original.model_copy(update={"id": uuid4(), "query": window})
         snapshot = state.service.capture(CONTEXT, request).snapshot
-        references.append(
-            DailyWindowReference(snapshot_id=request.id, snapshot_fingerprint=snapshot.fingerprint)
+        reference = DailyWindowReference(
+            snapshot_id=request.id, snapshot_fingerprint=snapshot.fingerprint
         )
+        daily.append(reader.save_day(actor, window, reference))
+        references.append(reference)
+        day_queries.append(window)
         proofs.append(snapshot.window)
 
-    def no_samples(conn, cursor, sql, *args):
+    def only_consolidated(conn, cursor, sql, *args):
         assert "agent_messages" not in sql.lower()
+        assert "usage_window_snapshots" not in sql.lower()
 
+    with pytest.raises(DBAPIError), state.service.sessions.begin() as db:
+        db.execute(
+            update(DailyUsageRollupRow)
+            .where(DailyUsageRollupRow.snapshot_id == str(references[0].snapshot_id))
+            .values(canonical_rollup="{}")
+        )
     before = counts(state.service)
     engine = state.service.sessions.kw["bind"]
-    event.listen(engine, "before_cursor_execute", no_samples)
+    event.listen(engine, "before_cursor_execute", only_consolidated)
     try:
         reader = WeeklyFromDailyReader(state.service.reader)
+        assert reader.save_day(actor, day_queries[0], references[0]) == daily[0]
         full = reader.read(actor, query, tuple(references))
         reversed_order = reader.read(actor, query, tuple(reversed(references)))
         assert full == reversed_order
@@ -87,11 +103,11 @@ def test_week_builds_from_saved_local_days_without_source_messages(saved_ui, mon
                 actor, query, (references[0].model_copy(update={"snapshot_fingerprint": "0" * 64}),)
             )
         assert mismatch.value.code == "CONFLICT"
-        assert counts(state.service) == before
         with state.service.sessions.begin() as db:
             db.execute(delete(RolePermission).where(RolePermission.permission_id == ids["all"]))
         with pytest.raises(DomainError) as denied:
             reader.read(actor, query, tuple(references))
         assert denied.value.code == "PERMISSION_DENIED"
     finally:
-        event.remove(engine, "before_cursor_execute", no_samples)
+        event.remove(engine, "before_cursor_execute", only_consolidated)
+    assert counts(state.service) == before

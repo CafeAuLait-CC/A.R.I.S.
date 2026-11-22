@@ -37,7 +37,8 @@ def daily_coverage_step(
     calendar = definition.calendar
     actor = ActorContext(actor_id=calendar.owner_id, request_id="daily-coverage-check")
     reader = UsageWindowReader(sessions)
-    known = reader.node_snapshot_fingerprints(
+    reports = WeeklyFromDailyReader(reader)
+    known = reports.stored_references(
         actor, calendar.scope.id, tuple(target.snapshot_id for target in targets)
     )
     pending = tuple(target for target in targets if target.snapshot_id not in known)
@@ -49,7 +50,7 @@ def daily_coverage_step(
         "expected_days": len(targets),
     }
     if not pending:
-        value = WeeklyFromDailyReader(reader).read(
+        value = reports.read(
             actor,
             WeeklyFromDailyQuery(node_id=calendar.scope.id, week=week, timezone=calendar.timezone),
             tuple(
@@ -75,9 +76,20 @@ def daily_coverage_step(
         clock=clock,
     )
     step = graph.run_once()
-    completed = reader.node_snapshot_fingerprints(actor, calendar.scope.id, (current.snapshot_id,))
-    if step["state"] == "finished" and current.snapshot_id not in completed:
-        raise DomainError("DEPENDENCY_UNAVAILABLE", "Finished day has no saved snapshot", 503)
+    if step["state"] == "finished":
+        completed = reader.node_snapshot_fingerprints(
+            actor, calendar.scope.id, (current.snapshot_id,)
+        )
+        fingerprint = completed.get(current.snapshot_id)
+        if fingerprint is None:
+            raise DomainError("DEPENDENCY_UNAVAILABLE", "Finished day has no saved snapshot", 503)
+        reports.save_day(
+            actor,
+            current.query,
+            DailyWindowReference(snapshot_id=current.snapshot_id, snapshot_fingerprint=fingerprint),
+        )
+    else:
+        reports.stored_references(actor, calendar.scope.id, (current.snapshot_id,))
     return {
         **report,
         "state": "day_saved" if step["state"] == "finished" else step["state"],

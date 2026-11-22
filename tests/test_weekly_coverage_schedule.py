@@ -478,15 +478,15 @@ def test_postgres_duplicate_completion_is_one_result_and_public_evidence_is_read
         assert db.scalar(select(CoverageScheduleRow.revision)) == 2
 
 
-def test_empty_schedule_migration_roundtrip_and_metadata_drift(database_url, monkeypatch):
+def test_empty_report_migrations_roundtrip_and_metadata_drift(database_url, monkeypatch):
     monkeypatch.setenv("ARIS_DATABASE_URL", database_url)
     monkeypatch.setenv("ARIS_ENVIRONMENT", "test")
     cfg = Config("alembic.ini")
     command.upgrade(cfg, "0042")
-    command.upgrade(cfg, "0043")
+    command.upgrade(cfg, "head")
     command.check(cfg)
     command.downgrade(cfg, "0042")
-    command.upgrade(cfg, "0043")
+    command.upgrade(cfg, "head")
     command.check(cfg)
 
 
