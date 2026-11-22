@@ -16,7 +16,8 @@ from aris.core.contracts import Contract, DomainError
 from aris.modules.lyra.coverage_build_schemas import completed_coverage_window_id
 from aris.modules.lyra.retention_repo import RetentionRepository
 from aris.modules.lyra.source_prefix_repo import SourcePrefixRepository
-from aris.modules.lyra.trace_consumer_schemas import UsageTraceConfiguration
+from aris.modules.lyra.trace_consumer_repo import UsageTraceRepository
+from aris.modules.lyra.trace_consumer_schemas import UsageTraceConfiguration, UsageTracePosition
 from aris.modules.lyra.window_schemas import UsageWindowQuery
 from aris.modules.lyra.window_snapshot_repo import UsageWindowRepository
 from aris.modules.vega.usage_archive_schemas import UsageArchiveFreeze, UsageArchiveHeadQuery
@@ -62,6 +63,8 @@ class TraceRetentionBoundary(Contract):
     consumer_id: str
     processed_through_seq: int
     checkpoint_through_seq: int | None
+    active_protected_seq: int | None
+    checkpoint_protected_seq: int | None
     earliest_protected_seq: int | None
 
 
@@ -121,6 +124,7 @@ def trace_retention_boundaries_in_transaction(
     if count > MAX_CONSUMERS:
         raise DomainError("DEPENDENCY_UNAVAILABLE", "Retention exceeds consumer limit", 503)
     checkpoints = SourcePrefixRepository(session)
+    traces = UsageTraceRepository(session)
     boundaries = []
     for position in repo.positions(count):
         config = position.configuration
@@ -129,20 +133,44 @@ def trace_retention_boundaries_in_transaction(
         if config.consumer_id == configuration.consumer_id and config != configuration:
             raise DomainError("CONFLICT", "Retention trace configuration differs", 409)
         prefix = checkpoints.eligible(config, before, position.revision)
-        anchors = (
-            [run.first.seq for run in position.residency.open_runs] if position.residency else []
-        )
-        if position.trace is not None:
-            anchors.append(position.trace.anchor.reference.seq)
+        active_anchor = _earliest_replay_source(position)
+        checkpoint_anchor = None
+        checkpoint_seq = None
+        if prefix is not None:
+            tail = prefix.proofs[-1]
+            record = traces.get(tail.request.record_id)
+            if record is None or record.fingerprint != tail.request.expected_record_fingerprint:
+                raise DomainError("CONFLICT", "Retention checkpoint has no matching trace", 409)
+            sealed = record.position
+            if (sealed.configuration, sealed.revision, sealed.after_seq) != (
+                config,
+                tail.revision,
+                tail.last_seq,
+            ):
+                raise DomainError("CONFLICT", "Retention checkpoint trace differs", 409)
+            checkpoint_anchor = _earliest_replay_source(sealed)
+            checkpoint_seq = tail.last_seq
         boundaries.append(
             TraceRetentionBoundary(
                 consumer_id=config.consumer_id,
                 processed_through_seq=position.after_seq,
-                checkpoint_through_seq=prefix.reference().last_seq if prefix else None,
-                earliest_protected_seq=min(anchors, default=None),
+                checkpoint_through_seq=checkpoint_seq,
+                active_protected_seq=active_anchor,
+                checkpoint_protected_seq=checkpoint_anchor,
+                earliest_protected_seq=min(
+                    (seq for seq in (active_anchor, checkpoint_anchor) if seq is not None),
+                    default=None,
+                ),
             )
         )
     return tuple(boundaries)
+
+
+def _earliest_replay_source(position: UsageTracePosition) -> int | None:
+    anchors = [run.first.seq for run in position.residency.open_runs] if position.residency else []
+    if position.trace is not None:
+        anchors.append(position.trace.anchor.reference.seq)
+    return min(anchors, default=None)
 
 
 def inspect_retention_dependencies(sessions: sessionmaker[Session]) -> LyraRetentionInventory:

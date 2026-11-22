@@ -178,11 +178,17 @@ def preview_week_retention(
                 ):
                     blockers.append("week_overlaps_required_source")
                 if any(
-                    consumer.earliest_protected_seq is not None
-                    and last >= consumer.earliest_protected_seq
+                    consumer.active_protected_seq is not None
+                    and last >= consumer.active_protected_seq
                     for consumer in consumers
                 ):
                     blockers.append("active_trace_or_open_run")
+                if any(
+                    consumer.checkpoint_protected_seq is not None
+                    and last >= consumer.checkpoint_protected_seq
+                    for consumer in consumers
+                ):
+                    blockers.append("checkpoint_replay_anchor")
             if monotonic() >= deadline:
                 raise DomainError("RETRYABLE_DATABASE_ERROR", "Retention preview timed out", 503)
             return captured.model_copy(
