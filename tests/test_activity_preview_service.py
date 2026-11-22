@@ -282,7 +282,11 @@ def test_postgresql_reporting_gap_scan_compare_and_set_does_not_double_advance(
             except DomainError as error:
                 assert error.code == "RETRYABLE_DATABASE_ERROR"
     assert len(successful) == 1 and successful[0].state == "caught_up"
-    assert history.scan_next(actor, SOURCE, first_seq=3) == successful[0]
+    retry = history.scan_next(actor, SOURCE, first_seq=3)
+    assert retry.through_seq == successful[0].through_seq
+    assert retry.uncertain_clock_pairs == successful[0].uncertain_clock_pairs
+    assert retry.state == "caught_up" and retry.saved == retry.already_saved == 0
+    assert len(history.latest(actor, SOURCE)) == successful[0].saved
 
 
 def test_postgresql_activity_preview_fixed_snapshot_ignores_later_gap_fill_and_recovers_after_lock(
