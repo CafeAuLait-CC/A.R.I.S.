@@ -13,6 +13,7 @@ from aris.core.scheduler import models as scheduler_models  # noqa: F401
 from aris.interfaces.slack import models as slack_models  # noqa: F401
 from aris.modules.lyra import (
     daily_rollup_models,  # noqa: F401
+    reporting_gap_history_models,  # noqa: F401
     weekly_report_models,  # noqa: F401
 )
 from aris.modules.lyra import models as lyra_models  # noqa: F401

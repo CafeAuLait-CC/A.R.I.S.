@@ -23,7 +23,7 @@ from aris.modules.lyra.hardware_preview import (
     sampling_incidents,
     summarize_gpu_samples,
 )
-from aris.modules.lyra.reporting_gaps import archived_reporting_gaps
+from aris.modules.lyra.reporting_gaps import ReportingGapPreview, archived_reporting_gaps
 from aris.modules.vega.gpu_hardware_schemas import GpuHardwareBatch, GpuHardwareBatchQuery
 from aris.modules.vega.gpu_hardware_service import VegaGpuHardwareObservations
 from aris.modules.vega.usage_archive_schemas import (
@@ -91,6 +91,27 @@ class ActivityPreviewService:
         assert isinstance(value, ActivityHardwarePreview)
         return value
 
+    def recent_reporting_gaps(
+        self,
+        actor: ActorContext,
+        source: UsageArchiveHeadQuery,
+        rule: ActivityPreviewRule,
+        *,
+        max_messages: int,
+        through_seq: int | None = None,
+    ) -> ReportingGapPreview:
+        value = self._recent(
+            actor,
+            source,
+            rule,
+            max_messages=max_messages,
+            hardware=False,
+            through_seq=through_seq,
+            include_incidents=True,
+        )
+        assert isinstance(value, ReportingGapPreview)
+        return value
+
     def _current(self, request: AccessRequest) -> None:
         with self.sessions() as session, session.no_autoflush:
             if session.get_bind().dialect.name == "postgresql":
@@ -108,7 +129,7 @@ class ActivityPreviewService:
         hardware: bool,
         through_seq: int | None,
         include_incidents: bool = False,
-    ) -> ActivityPreview | ActivityHardwarePreview:
+    ) -> ActivityPreview | ActivityHardwarePreview | ReportingGapPreview:
         if hardware and self.hardware_source is None:
             raise DomainError("USAGE_NOT_CONFIGURED", "GPU hardware preview is not configured", 503)
         actor = ActorContext.model_validate(actor.model_dump(mode="json"))
@@ -183,8 +204,9 @@ class ActivityPreviewService:
                 preview = group_compute_observations(
                     ceiling, tuple(pages), rule, max_messages=max_messages, through_seq=through_seq
                 )
-                result: ActivityPreview | ActivityHardwarePreview = (
-                    ActivityHardwarePreview(
+                result: ActivityPreview | ActivityHardwarePreview | ReportingGapPreview
+                if hardware:
+                    result = ActivityHardwarePreview(
                         preview=preview,
                         hardware=summarize_gpu_samples(
                             preview, tuple(pages), tuple(hardware_batches)
@@ -196,9 +218,10 @@ class ActivityPreviewService:
                         if include_incidents
                         else None,
                     )
-                    if hardware
-                    else preview
-                )
+                elif include_incidents:
+                    result = archived_reporting_gaps(preview, tuple(pages))
+                else:
+                    result = preview
             # Source repeatability is independent of current authorization.
             # This fresh transaction observes revocation after the source snapshot.
             self._current(request)
