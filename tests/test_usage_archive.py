@@ -16,6 +16,7 @@ from aris.modules.vega.schemas import Heartbeat
 from aris.modules.vega.usage_archive_schemas import (
     ArchivedUsageItem,
     ArchivedUsageReference,
+    UsageArchiveFreeze,
     UsageArchiveHeadQuery,
     UsageArchivePage,
     UsageArchiveQuery,
@@ -35,6 +36,32 @@ def query(**changes):
 
 def archive(client):
     return VegaUsageArchive(sessionmaker(client.app.state.engine, expire_on_commit=False))
+
+
+def test_late_arrivals_include_compute_observed_inside_the_freeze(client):
+    end = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=1)
+    start = end - timedelta(minutes=15)
+    envelope = end + timedelta(seconds=20)
+    for seq, observed in enumerate(
+        (start - timedelta(microseconds=1), start, end - timedelta(microseconds=1), end),
+        start=1,
+    ):
+        body = resource_batch(seq=seq, observed_at=envelope)
+        body["resources"]["compute"]["observed_at"] = observed.isoformat()
+        assert put(client, body).status_code == 200
+    assert beat(client, heartbeat(seq=5, observed_at=start.isoformat())).status_code == 200
+
+    source = archive(client)
+    freeze = UsageArchiveFreeze(
+        source=UsageArchiveHeadQuery(agent_id="agent-a", node_id="node-a"),
+        start_at=start,
+        end_at=end,
+        read_at=datetime.now(UTC),
+        through_seq=0,
+    )
+    trimmed = freeze.model_copy(update={"through_seq": 2})
+    with source.sessions() as session:
+        assert source.arrivals_outside_freezes_in_transaction(session, (freeze, trimmed)) == (3, 2)
 
 
 def seed(client):
