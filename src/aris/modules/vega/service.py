@@ -113,6 +113,11 @@ class VegaService:
                     message_kind=kind,
                     fingerprint=fingerprint,
                     observed_at=utc(batch.observed_at),
+                    compute_observed_at=(
+                        batch.resources.compute.observed_at
+                        if isinstance(batch, ResourceTelemetryBatch)
+                        else None
+                    ),
                     received_at=now,
                     applied_to_current=applied,
                     payload=payload,

@@ -51,6 +51,11 @@ class UsageArchiveFreeze(UsageFactContract):
     read_at: AwareDatetime
     through_seq: int = Field(ge=0, le=MAX_ARCHIVE_SEQ, strict=True)
 
+    @field_validator("start_at", "end_at", "read_at")
+    @classmethod
+    def utc_times(cls, value: datetime) -> datetime:
+        return value.astimezone(UTC)
+
     @model_validator(mode="after")
     def closed_interval(self) -> "UsageArchiveFreeze":
         if not self.start_at < self.end_at <= self.read_at:

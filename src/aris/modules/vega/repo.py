@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
 
-from sqlalchemy import String, and_, case, cast, func, or_, select
+from sqlalchemy import String, and_, case, cast, func, literal, or_, select, union_all
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
@@ -339,52 +339,32 @@ class VegaRepository:
         if not freezes:
             return ()
         row = AgentMessage
-        compute = row.payload["resources"]["compute"]["observed_at"].as_string()
-        # Ingest serializes every component in UTC, omitting zero fractional
-        # seconds. Pad that case so string comparisons preserve microseconds.
-        whole_second = and_(func.length(compute) == 20, func.substr(compute, 20, 1) == "Z")
-        fractional = and_(
-            func.length(compute) == 27,
-            func.substr(compute, 20, 1) == ".",
-            func.substr(compute, 27, 1) == "Z",
-        )
-        exact_compute = case(
-            (whole_second, func.substr(compute, 1, 19) + ".000000Z"), else_=compute
-        )
-        unknown_compute = or_(compute.is_(None), ~(whole_second | fractional))
-        counts = []
-        for freeze in freezes:
-            start, end = (
-                utc(value).isoformat(timespec="microseconds").replace("+00:00", "Z")
-                for value in (freeze.start_at, freeze.end_at)
-            )
-            counts.append(
-                func.count().filter(
+        counts = union_all(
+            *(
+                select(literal(index).label("day_ordinal"), func.count().label("arrivals")).where(
+                    row.agent_id == freeze.source.agent_id,
+                    row.node_id == freeze.source.node_id,
+                    row.observed_at >= freeze.start_at,
                     or_(row.received_at > freeze.read_at, row.seq > freeze.through_seq),
                     or_(
-                        and_(row.observed_at >= freeze.start_at, row.observed_at < freeze.end_at),
+                        row.observed_at < freeze.end_at,
                         and_(
                             row.message_kind == "telemetry",
-                            row.observed_at >= freeze.end_at,
-                            or_(unknown_compute, and_(exact_compute >= start, exact_compute < end)),
+                            or_(
+                                row.compute_observed_at.is_(None),
+                                and_(
+                                    row.compute_observed_at >= freeze.start_at,
+                                    row.compute_observed_at < freeze.end_at,
+                                ),
+                            ),
                         ),
                     ),
                 )
+                for index, freeze in enumerate(freezes)
             )
-        source = freezes[0].source
-        return tuple(
-            self.session.execute(
-                select(*counts).where(
-                    row.agent_id == source.agent_id,
-                    row.node_id == source.node_id,
-                    row.observed_at >= min(freeze.start_at for freeze in freezes),
-                    or_(
-                        row.received_at > min(freeze.read_at for freeze in freezes),
-                        row.seq > min(freeze.through_seq for freeze in freezes),
-                    ),
-                )
-            ).one()
         )
+        observed = {index: arrivals for index, arrivals in self.session.execute(counts)}
+        return tuple(observed[index] for index in range(len(freezes)))
 
     def message_storage(self, cutoff: datetime | None) -> list[MessageStorage]:
         before = (

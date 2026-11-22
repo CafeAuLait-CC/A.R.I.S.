@@ -77,6 +77,7 @@ class AgentMessage(Base):
     message_kind: Mapped[str] = mapped_column(String(16), server_default="telemetry")
     fingerprint: Mapped[str] = mapped_column(String(64))
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    compute_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     applied_to_current: Mapped[bool] = mapped_column(Boolean)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON)
