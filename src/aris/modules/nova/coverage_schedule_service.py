@@ -3,7 +3,7 @@
 from collections.abc import Callable
 from datetime import UTC, date, datetime
 from typing import Literal
-from uuid import uuid4
+from uuid import uuid4, uuid5
 
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, sessionmaker
@@ -18,12 +18,16 @@ from aris.core.db import commit_owned_transaction
 from aris.core.events import DomainEvent, OutboxEntry
 from aris.core.scheduler.schemas import SchedulerContext
 from aris.modules.lyra.coverage_build_service import CoverageBuildService
+from aris.modules.lyra.weekly_from_daily import WeeklyFromDailyQuery, WeeklyFromDailyReader
+from aris.modules.lyra.window_reader import UsageWindowReader
 from aris.modules.nova.coverage_schedule_repo import CoverageScheduleRepository
 from aris.modules.nova.coverage_schedule_schemas import (
     CoveragePeriodResult,
     CoverageScheduleDefinition,
     CoverageScheduleStatus,
+    DailyCoveragePeriodResult,
 )
+from aris.modules.nova.daily_coverage_calendar import daily_coverage_targets
 from aris.modules.nova.report_calendar import weekly_report_period
 from aris.modules.nova.weekly_coverage import weekly_coverage_target
 
@@ -126,6 +130,8 @@ class CoverageScheduleService:
         self._active()
         definition = CoverageScheduleDefinition.model_validate(definition.model_dump(mode="json"))
         context = SchedulerContext.model_validate(context.model_dump(mode="json"))
+        if definition.daily_rollups:
+            raise DomainError("VALIDATION_ERROR", "Coverage schedule requires daily rollups", 422)
         if self.sessions.kw.get("bind") is not builds.sessions.kw.get("bind"):
             raise ValueError("coverage coordinator and evidence require the same engine")
         now = self._now()
@@ -207,6 +213,80 @@ class CoverageScheduleService:
         except DBAPIError as error:
             raise self._failure(error) from None
 
+    def complete_daily(
+        self, context: SchedulerContext, definition: CoverageScheduleDefinition, week: date
+    ) -> DailyCoveragePeriodResult:
+        self._active()
+        definition = CoverageScheduleDefinition.model_validate(definition.model_dump(mode="json"))
+        context = SchedulerContext.model_validate(context.model_dump(mode="json"))
+        if not definition.daily_rollups:
+            raise DomainError("VALIDATION_ERROR", "Daily reporting is not configured", 422)
+        calendar = definition.calendar
+        period = weekly_report_period(calendar, week)
+        now = self._now()
+        if period.scheduled_for > now:
+            raise DomainError("COVERAGE_BUILD_PENDING", "Weekly report is not due", 409)
+        id = uuid5(definition.id, week.isoformat())
+        try:
+            with self.sessions() as db:
+                transaction_budget(db, 100, 1000, 3000)
+                repo = CoverageScheduleRepository(db)
+                repo.lock(definition.id)
+                self._require(db, definition)
+                status = repo.get(definition.id, lock=True)
+                if status is None:
+                    raise DomainError("NOT_FOUND", "Coverage schedule is not registered", 404)
+                if status.definition != definition:
+                    raise DomainError("CONFLICT", "Coverage schedule has different input", 409)
+                prior = repo.daily_result(id)
+                if prior is not None:
+                    if (
+                        prior.definition_fingerprint != definition.fingerprint
+                        or prior.week != week
+                        or prior.schedule_id != definition.id
+                        or status.next_week <= week
+                    ):
+                        raise DomainError(
+                            "CONFLICT", "Weekly report differs from schedule progress", 409
+                        )
+                    self._require(db, definition)
+                    return prior
+                if status.next_week != week:
+                    raise DomainError("CONFLICT", "Coverage schedule cannot skip a week", 409)
+                targets = daily_coverage_targets(definition, week)
+                actor = ActorContext(actor_id=calendar.owner_id, request_id=context.request_id)
+                report = WeeklyFromDailyReader(
+                    UsageWindowReader(self.sessions)
+                ).build_in_transaction(
+                    db,
+                    actor,
+                    WeeklyFromDailyQuery(
+                        node_id=calendar.scope.id, timezone=calendar.timezone, week=week
+                    ),
+                    tuple(target.snapshot_id for target in targets),
+                )
+                draft = DailyCoveragePeriodResult.model_construct(
+                    id=id,
+                    schedule_id=definition.id,
+                    definition_fingerprint=definition.fingerprint,
+                    week=week,
+                    report=report,
+                    created_at=now,
+                    event_id=uuid4(),
+                    fingerprint="0" * 64,
+                )
+                result = DailyCoveragePeriodResult.model_validate(
+                    {**draft.model_dump(mode="json"), "fingerprint": draft.content_fingerprint()}
+                )
+                self._event(db, context, status, "daily_report_saved", now, result=result)
+                repo.complete_daily(status, result)
+                self._require(db, definition)
+                self._active()
+                commit_owned_transaction(db)
+                return result
+        except DBAPIError as error:
+            raise self._failure(error) from None
+
     @staticmethod
     def _event(
         session: Session,
@@ -215,13 +295,19 @@ class CoverageScheduleService:
         action: str,
         now: datetime,
         *,
-        result: CoveragePeriodResult | None = None,
+        result: CoveragePeriodResult | DailyCoveragePeriodResult | None = None,
     ) -> None:
         id = str(status.definition.id)
         event_id = str(result.event_id if result else uuid4())
         name = "weekly_coverage." + action
         payload = {"schedule_id": id, "definition_fingerprint": status.definition.fingerprint}
-        if result is not None:
+        if isinstance(result, DailyCoveragePeriodResult):
+            payload.update(
+                result_id=str(result.id),
+                report_fingerprint=result.report.fingerprint,
+                coverage=result.report.coverage,
+            )
+        elif result is not None:
             payload.update(
                 result_id=str(result.id),
                 snapshot_id=str(result.snapshot_id),

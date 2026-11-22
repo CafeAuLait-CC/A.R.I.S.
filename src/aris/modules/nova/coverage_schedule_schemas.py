@@ -2,14 +2,21 @@
 
 import hashlib
 from datetime import date
-from typing import Literal
+from typing import Any, Literal, cast
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from pydantic import AwareDatetime, Field, model_validator
+from pydantic import (
+    AwareDatetime,
+    Field,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+    model_validator,
+)
 
 from aris.core.access.schemas import AccessContract
 from aris.core.scheduler.schemas import canonical
 from aris.modules.lyra.coverage_schemas import ProcessingCoverageConfiguration
+from aris.modules.lyra.weekly_from_daily import WeeklyFromDaily
 from aris.modules.nova.report_calendar import WeeklyReportPlan, weekly_report_period
 from aris.modules.nova.weekly_coverage import weekly_coverage_target
 from aris.modules.nova.weekly_plan_schemas import plan_key
@@ -26,16 +33,27 @@ def schedule_fingerprint(kind: str, raw: str) -> str:
 class CoverageScheduleDefinition(AccessContract):
     calendar: WeeklyReportPlan
     configuration: ProcessingCoverageConfiguration
+    daily_rollups: Literal[True] | None = None
 
     @model_validator(mode="after")
     def one_explicit_source(self) -> "CoverageScheduleDefinition":
         first = weekly_report_period(self.calendar, self.calendar.first_week)
         weekly_coverage_target(self.calendar, first, self.configuration, now=first.scheduled_for)
+        if self.daily_rollups and self.calendar.report_type != "usage.node":
+            raise ValueError("Daily rollups require a node-wide coverage definition")
         return self
+
+    @model_serializer(mode="wrap")
+    def serialize_source(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        values = cast(dict[str, Any], handler(self))
+        if self.daily_rollups is None:
+            values.pop("daily_rollups", None)
+        return values
 
     @property
     def id(self) -> UUID:
-        return uuid5(NAMESPACE_URL, "aris.nova.weekly-coverage/" + plan_key(self.calendar))
+        method = "weekly-from-daily/" if self.daily_rollups else "weekly-coverage/"
+        return uuid5(NAMESPACE_URL, "aris.nova." + method + plan_key(self.calendar))
 
     @property
     def fingerprint(self) -> str:
@@ -92,4 +110,34 @@ class CoveragePeriodResult(AccessContract):
     def content_fingerprint(self) -> str:
         return schedule_fingerprint(
             "weekly_coverage_result", schedule_canonical(self, exclude={"fingerprint"})
+        )
+
+
+class DailyCoveragePeriodResult(AccessContract):
+    id: UUID
+    schedule_id: UUID
+    definition_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    week: date
+    report: WeeklyFromDaily
+    created_at: AwareDatetime
+    event_id: UUID
+    fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    current_quota_authorization: Literal[False] = False
+
+    @model_validator(mode="after")
+    def exact_report(self) -> "DailyCoveragePeriodResult":
+        if (
+            self.id != uuid5(self.schedule_id, self.week.isoformat())
+            or self.week != self.report.query.week
+            or self.report.end_at > self.created_at
+            or self.report.missing_days
+            or self.report.fingerprint != self.report.content_fingerprint()
+            or self.fingerprint != self.content_fingerprint()
+        ):
+            raise ValueError("Weekly result requires the exact closed daily report")
+        return self
+
+    def content_fingerprint(self) -> str:
+        return schedule_fingerprint(
+            "weekly_daily_coverage_result", schedule_canonical(self, exclude={"fingerprint"})
         )

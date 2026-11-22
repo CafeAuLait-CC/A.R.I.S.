@@ -99,6 +99,24 @@ def run_tick(
                 items.append({"schedule_id": str(definition.id), "state": "not_registered"})
                 continue
             period = weekly_report_period(definition.calendar, progress.next_week)
+            if definition.daily_rollups:
+                step = daily_coverage_step(
+                    schedules.sessions,
+                    definition,
+                    period.week,
+                    clock=clock or schedules.clock,
+                    status_only=status_only,
+                    prefix_proofs_per_tick=config.prefix_proofs_per_tick,
+                    transaction_timeout_ms=config.transaction_timeout_ms,
+                    include_weekly=False,
+                )
+                if step["state"] == "report_ready" and not status_only:
+                    saved_daily = schedules.complete_daily(context, definition, period.week)
+                    step.update(
+                        state="daily_report_saved", result=saved_daily.model_dump(mode="json")
+                    )
+                items.append(step)
+                continue
             if status_only or period.scheduled_for > now:
                 items.append(
                     {
@@ -158,7 +176,14 @@ def run_tick(
         "made_progress": any(
             isinstance(item, dict)
             and item.get("state")
-            in {"prefix_prepared", "admitted", "source_built", "snapshot_saved", "day_saved"}
+            in {
+                "prefix_prepared",
+                "admitted",
+                "source_built",
+                "snapshot_saved",
+                "day_saved",
+                "daily_report_saved",
+            }
             for item in items
         ),
         "current_quota_authorization": False,

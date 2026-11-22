@@ -1,5 +1,5 @@
 import hashlib
-from datetime import timedelta
+from datetime import date, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import select, text, update
@@ -7,11 +7,16 @@ from sqlalchemy.orm import Session
 
 from aris.core.contracts import DomainError
 from aris.core.time import utc
-from aris.modules.nova.coverage_schedule_models import CoveragePeriodResultRow, CoverageScheduleRow
+from aris.modules.nova.coverage_schedule_models import (
+    CoveragePeriodResultRow,
+    CoverageScheduleRow,
+    DailyCoveragePeriodResultRow,
+)
 from aris.modules.nova.coverage_schedule_schemas import (
     CoveragePeriodResult,
     CoverageScheduleDefinition,
     CoverageScheduleStatus,
+    DailyCoveragePeriodResult,
     schedule_canonical,
 )
 
@@ -63,7 +68,7 @@ class CoverageScheduleRepository:
                 last_result_id=row["last_result_id"],
             )
             if value.last_result_id is not None:
-                prior = self.result(value.last_result_id)
+                prior = self.last_result(value)
                 if (
                     prior is None
                     or prior.schedule_id != definition.id
@@ -74,6 +79,14 @@ class CoverageScheduleRepository:
             return value
         except (ValueError, TypeError, KeyError, RecursionError):
             raise inconsistent() from None
+
+    def last_result(
+        self, status: CoverageScheduleStatus
+    ) -> CoveragePeriodResult | DailyCoveragePeriodResult | None:
+        id = status.last_result_id
+        if id is None:
+            return None
+        return self.daily_result(id) if status.definition.daily_rollups else self.result(id)
 
     def result(self, id: UUID) -> CoveragePeriodResult | None:
         row = (
@@ -112,6 +125,27 @@ class CoverageScheduleRepository:
         except (ValueError, TypeError, KeyError, RecursionError):
             raise inconsistent() from None
 
+    def daily_result(self, id: UUID) -> DailyCoveragePeriodResult | None:
+        row = self.session.get(DailyCoveragePeriodResultRow, str(id))
+        if row is None:
+            return None
+        try:
+            raw = row.canonical_result
+            if len(raw.encode()) > 262144:
+                raise ValueError("oversized result")
+            value = DailyCoveragePeriodResult.model_validate_json(raw)
+            if schedule_canonical(value) != raw or (
+                str(value.id),
+                str(value.schedule_id),
+                value.week,
+                str(value.event_id),
+                value.fingerprint,
+            ) != (row.id, row.schedule_id, row.week, row.event_id, row.fingerprint):
+                raise ValueError("daily report metadata differs")
+            return value
+        except (ValueError, TypeError, KeyError, RecursionError):
+            raise inconsistent() from None
+
     def append(self, value: CoverageScheduleStatus) -> None:
         self.session.add(
             CoverageScheduleRow(
@@ -139,13 +173,34 @@ class CoverageScheduleRepository:
                 canonical_result=schedule_canonical(result),
             )
         )
+        self._advance(status, result.id, result.week, result.created_at)
+
+    def complete_daily(
+        self, status: CoverageScheduleStatus, result: DailyCoveragePeriodResult
+    ) -> None:
+        raw = schedule_canonical(result)
+        if len(raw.encode()) > 262144:
+            raise DomainError("USAGE_REPORT_TOO_LARGE", "Weekly coverage result is too large", 503)
+        self.session.add(
+            DailyCoveragePeriodResultRow(
+                id=str(result.id),
+                schedule_id=str(result.schedule_id),
+                week=result.week,
+                event_id=str(result.event_id),
+                fingerprint=result.fingerprint,
+                canonical_result=raw,
+            )
+        )
+        self._advance(status, result.id, result.week, result.created_at)
+
+    def _advance(self, status: CoverageScheduleStatus, id: UUID, week: date, at: datetime) -> None:
         self.session.execute(
             update(CoverageScheduleRow)
             .where(CoverageScheduleRow.id == str(status.definition.id))
             .values(
-                next_week=result.week + timedelta(days=7),
+                next_week=week + timedelta(days=7),
                 revision=status.revision + 1,
-                updated_at=result.created_at,
-                last_result_id=str(result.id),
+                updated_at=at,
+                last_result_id=str(id),
             )
         )

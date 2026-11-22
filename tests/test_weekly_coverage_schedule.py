@@ -28,7 +28,11 @@ from aris.core.contracts import DomainError
 from aris.core.scheduler.schemas import SchedulerContext
 from aris.modules.lyra.coverage_schemas import ProcessingCoverageConfiguration
 from aris.modules.lyra.ledger_repo import UsageLedgerRepository
-from aris.modules.nova.coverage_schedule_models import CoveragePeriodResultRow, CoverageScheduleRow
+from aris.modules.nova.coverage_schedule_models import (
+    CoveragePeriodResultRow,
+    CoverageScheduleRow,
+    DailyCoveragePeriodResultRow,
+)
 from aris.modules.nova.coverage_schedule_reader import CoverageScheduleReader
 from aris.modules.nova.coverage_schedule_repo import CoverageScheduleRepository
 from aris.modules.nova.coverage_schedule_schemas import CoverageScheduleDefinition
@@ -293,25 +297,33 @@ def test_restart_resumes_original_steps_and_saved_snapshot_cursor_without_promot
 
 
 def test_closed_days_survive_restart_and_feed_weekly_report_without_raw_samples(
-    partition_recording, settings
+    partition_recording, settings, monkeypatch
 ):
-    schedules, config, definition, _, _ = setup(partition_recording, settings)
+    schedules, config, legacy, _, _ = setup(partition_recording, settings)
+    definition = CoverageScheduleDefinition.model_validate(
+        {**legacy.model_dump(mode="json"), "daily_rollups": True}
+    )
+    assert definition.id != legacy.id and "daily_rollups" not in legacy.model_dump()
+    config = config.model_copy(update={"plans": (definition,)})
     week = definition.calendar.first_week
     targets = daily_coverage_targets(definition, week)
     assert [target.day for target in targets] == [
         week + timedelta(days=offset) for offset in range(7)
     ]
+    initial = schedules.select(CONTEXT, definition)
     before_due = run_tick(
         config,
         schedules,
-        from_daily_week=week,
         status_only=True,
         clock=lambda: targets[0].scheduled_for - timedelta(seconds=1),
     )["plans"][0]
     assert before_due["state"] == "future_day" and before_due["saved_days"] == 0
+    with pytest.raises(DomainError) as missing:
+        schedules.complete_daily(CONTEXT, definition, week)
+    assert missing.value.code == "COVERAGE_BUILD_PENDING"
     saved = []
     for _ in range(64):
-        tick = run_tick(config, schedules, from_daily_week=week, clock=schedules.clock)
+        tick = run_tick(config, schedules, clock=schedules.clock)
         assert not tick["needs_attention"], tick
         progress = tick["plans"][0]
         if progress["state"] == "day_saved":
@@ -319,12 +331,42 @@ def test_closed_days_survive_restart_and_feed_weekly_report_without_raw_samples(
             schedules = CoverageScheduleService(
                 schedules.sessions, enabled=True, clock=schedules.clock
             )
-        elif progress["state"] == "report_ready":
+        if len(saved) == len(targets):
             break
     else:
         pytest.fail("Daily coverage did not converge")
     assert saved == [target.day.isoformat() for target in targets]
-    report = progress["report"]
+    assert schedules.select(CONTEXT, definition, status_only=True) == initial
+
+    complete = CoverageScheduleRepository.complete_daily
+
+    def fail_after_link(self, *args):
+        complete(self, *args)
+        self.session.flush()
+        raise DomainError("DEPENDENCY_UNAVAILABLE", "Injected failure after saving report", 503)
+
+    def require_saved_data(conn, cursor, statement, parameters, context, executemany):
+        sql = statement.lower()
+        assert "agent_messages" not in sql and "usage_window_snapshots" not in sql
+
+    engine = schedules.sessions.kw["bind"]
+    event.listen(engine, "before_cursor_execute", require_saved_data)
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(CoverageScheduleRepository, "complete_daily", fail_after_link)
+            failed = run_tick(config, schedules, clock=schedules.clock)
+            assert failed["needs_attention"]
+        assert schedules.select(CONTEXT, definition, status_only=True) == initial
+        with schedules.sessions() as db:
+            assert db.scalar(select(func.count()).select_from(DailyCoveragePeriodResultRow)) == 0
+        step = run_tick(config, schedules, clock=schedules.clock)["plans"][0]
+        assert step["state"] == "daily_report_saved"
+        output = step["result"]
+        assert schedules.complete_daily(CONTEXT, definition, week).model_dump(mode="json") == output
+    finally:
+        event.remove(engine, "before_cursor_execute", require_saved_data)
+
+    report = output["report"]
     assert [source["snapshot_id"] for source in report["days"]] == [
         str(target.snapshot_id) for target in targets
     ]
@@ -333,18 +375,20 @@ def test_closed_days_survive_restart_and_feed_weekly_report_without_raw_samples(
     assert report["total_usage_microseconds"] is None
     assert not report["missing_days"]
 
-    def require_saved_data(conn, cursor, statement, parameters, context, executemany):
-        assert "agent_messages" not in statement.lower()
-        assert not statement.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE"))
-
-    engine = schedules.sessions.kw["bind"]
-    event.listen(engine, "before_cursor_execute", require_saved_data)
-    try:
-        repeat = run_tick(config, schedules, from_daily_week=week, status_only=True)
-    finally:
-        event.remove(engine, "before_cursor_execute", require_saved_data)
-    assert repeat["plans"][0] == progress
-    assert schedules.select(CONTEXT, definition, status_only=True) is None
+    final = schedules.select(CONTEXT, definition, status_only=True)
+    assert final.revision == 2 and final.next_week == week + timedelta(days=7)
+    assert str(final.last_result_id) == output["id"]
+    actor = ActorContext(actor_id=definition.calendar.owner_id, request_id="closed-week")
+    with schedules.sessions() as db:
+        assert db.scalar(select(func.count()).select_from(DailyCoveragePeriodResultRow)) == 1
+        assert db.scalar(select(func.count()).select_from(CoveragePeriodResultRow)) == 0
+        plan = (
+            CoverageScheduleReader(schedules.sessions, (definition.id,), clock=schedules.clock)
+            .read_in_transaction(db, actor, node_id="node-a", mode="node")
+            .items[0]
+        )
+        assert str(plan.last_result.report_id) == output["id"]
+        assert plan.last_result.snapshot_id is None
 
 
 def test_snapshot_saved_before_cursor_failure_is_recovered_atomically_and_retained(

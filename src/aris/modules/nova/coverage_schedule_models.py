@@ -56,3 +56,21 @@ class CoveragePeriodResultRow(Base):
     event_id: Mapped[str] = mapped_column(ForeignKey("domain_events.event_id"), unique=True)
     fingerprint: Mapped[str] = mapped_column(String(64))
     canonical_result: Mapped[str] = mapped_column(Text)
+
+
+class DailyCoveragePeriodResultRow(Base):
+    __tablename__ = "weekly_daily_coverage_results"
+    __table_args__ = (
+        UniqueConstraint("schedule_id", "week", name="uq_weekly_daily_result_period"),
+        CheckConstraint(
+            "length(fingerprint)=64 AND length(canonical_result)>0 "
+            "AND length(canonical_result)<=262144",
+            name="ck_weekly_daily_result_size",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    schedule_id: Mapped[str] = mapped_column(ForeignKey("weekly_coverage_schedules.id"))
+    week: Mapped[date] = mapped_column(Date)
+    event_id: Mapped[str] = mapped_column(ForeignKey("domain_events.event_id"), unique=True)
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    canonical_result: Mapped[str] = mapped_column(Text)

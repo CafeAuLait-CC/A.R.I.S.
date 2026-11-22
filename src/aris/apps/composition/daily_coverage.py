@@ -32,6 +32,7 @@ def daily_coverage_step(
     status_only: bool,
     prefix_proofs_per_tick: int,
     transaction_timeout_ms: int,
+    include_weekly: bool = True,
 ) -> dict[str, JsonValue]:
     targets = daily_coverage_targets(definition, week)
     calendar = definition.calendar
@@ -50,15 +51,20 @@ def daily_coverage_step(
         "expected_days": len(targets),
     }
     if not pending:
-        value = reports.read(
-            actor,
-            WeeklyFromDailyQuery(node_id=calendar.scope.id, week=week, timezone=calendar.timezone),
-            tuple(
-                DailyWindowReference(snapshot_id=id, snapshot_fingerprint=fp)
-                for id, fp in known.items()
-            ),
-        )
-        return {**report, "state": "report_ready", "report": value.model_dump(mode="json")}
+        report["state"] = "report_ready"
+        if include_weekly:
+            value = reports.read(
+                actor,
+                WeeklyFromDailyQuery(
+                    node_id=calendar.scope.id, week=week, timezone=calendar.timezone
+                ),
+                tuple(
+                    DailyWindowReference(snapshot_id=id, snapshot_fingerprint=fp)
+                    for id, fp in known.items()
+                ),
+            )
+            report["report"] = value.model_dump(mode="json")
+        return report
     current = pending[0]
     report.update(day=current.day.isoformat(), due_at=current.scheduled_for.isoformat())
     if current.scheduled_for > now or status_only:

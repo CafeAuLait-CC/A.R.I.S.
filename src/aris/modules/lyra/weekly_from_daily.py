@@ -74,6 +74,11 @@ class WeeklyFromDaily(IntervalContract):
     durations: tuple[CoverageDuration, ...]
     fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
 
+    def content_fingerprint(self) -> str:
+        return trace_fingerprint(
+            "weekly_from_daily_coverage", canonical_trace(self, exclude={"fingerprint"})
+        )
+
 
 def weekly_from_daily(
     query: WeeklyFromDailyQuery, days: tuple[SavedCoverageRollup, ...]
@@ -159,13 +164,7 @@ def weekly_from_daily(
         ),
         fingerprint="0" * 64,
     )
-    return result.model_copy(
-        update={
-            "fingerprint": trace_fingerprint(
-                "weekly_from_daily_coverage", canonical_trace(result, exclude={"fingerprint"})
-            )
-        }
-    )
+    return result.model_copy(update={"fingerprint": result.content_fingerprint()})
 
 
 class WeeklyFromDailyReader:
@@ -242,12 +241,25 @@ class WeeklyFromDailyReader:
         query: WeeklyFromDailyQuery,
         sources: tuple[DailyWindowReference, ...],
     ) -> WeeklyFromDaily:
+        try:
+            with self.daily_windows.sessions() as db:
+                return self.read_in_transaction(db, actor, query, sources)
+        except DBAPIError as error:
+            raise self._failure(error) from None
+
+    def read_in_transaction(
+        self,
+        db: Session,
+        actor: ActorContext,
+        query: WeeklyFromDailyQuery,
+        sources: tuple[DailyWindowReference, ...],
+    ) -> WeeklyFromDaily:
         if len(sources) > 7 or len({source.snapshot_id for source in sources}) != len(sources):
             raise DomainError("VALIDATION_ERROR", "Daily snapshot selection is invalid", 422)
         reader = self.daily_windows
         deadline = monotonic() + reader.timeout_ms / 1000
         try:
-            with reader.sessions() as db, db.no_autoflush:
+            with db.no_autoflush:
                 self._begin(db, actor, query.node_id)
                 saved = DailyUsageRollupRepository(db).get(
                     query.node_id, tuple(source.snapshot_id for source in sources)
@@ -272,3 +284,28 @@ class WeeklyFromDailyReader:
             ) from None
         except DBAPIError as error:
             raise self._failure(error) from None
+
+    def build_in_transaction(
+        self,
+        db: Session,
+        actor: ActorContext,
+        query: WeeklyFromDailyQuery,
+        ids: tuple[UUID, ...],
+    ) -> WeeklyFromDaily:
+        if not 1 <= len(ids) <= 7 or len(set(ids)) != len(ids):
+            raise ValueError("Expected up to seven distinct day rollups")
+        self._begin(db, actor, query.node_id)
+        selected = DailyUsageRollupRepository(db).fingerprints(query.node_id, ids)
+        if len(selected) != len(ids):
+            raise DomainError(
+                "COVERAGE_BUILD_PENDING", "Daily usage rollups are still pending", 409
+            )
+        return self.read_in_transaction(
+            db,
+            actor,
+            query,
+            tuple(
+                DailyWindowReference(snapshot_id=id, snapshot_fingerprint=selected[id])
+                for id in ids
+            ),
+        )

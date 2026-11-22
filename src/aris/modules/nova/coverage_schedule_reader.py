@@ -16,12 +16,14 @@ from aris.core.commands.budgets import transaction_budget
 from aris.core.commands.schemas import ActorContext
 from aris.core.contracts import DomainError
 from aris.modules.nova.coverage_schedule_repo import CoverageScheduleRepository
+from aris.modules.nova.coverage_schedule_schemas import DailyCoveragePeriodResult
 from aris.modules.nova.report_calendar import weekly_report_period
 
 
 class CoveragePlanResultView(AccessContract):
     week: date
-    snapshot_id: UUID
+    snapshot_id: UUID | None
+    report_id: UUID | None = None
     coverage: Literal["complete", "partial", "unknown"]
     saved_at: AwareDatetime
 
@@ -97,7 +99,23 @@ class CoverageScheduleReader:
                 if mode == "mine" and not (own or (self.include_node_for_personal and node)):
                     continue
                 due = weekly_report_period(plan, status.next_week).scheduled_for
-                prior = repo.result(status.last_result_id) if status.last_result_id else None
+                prior = repo.last_result(status)
+                last_result = None
+                if isinstance(prior, DailyCoveragePeriodResult):
+                    last_result = CoveragePlanResultView(
+                        week=prior.week,
+                        snapshot_id=None,
+                        report_id=prior.id,
+                        coverage=prior.report.coverage,
+                        saved_at=prior.created_at,
+                    )
+                elif prior is not None:
+                    last_result = CoveragePlanResultView(
+                        week=prior.week,
+                        snapshot_id=prior.snapshot_id,
+                        coverage=prior.coverage,
+                        saved_at=prior.created_at,
+                    )
                 items.append(
                     CoveragePlanView(
                         id=id,
@@ -110,14 +128,7 @@ class CoverageScheduleReader:
                         else "pending"
                         if now >= due
                         else "scheduled",
-                        last_result=CoveragePlanResultView(
-                            week=prior.week,
-                            snapshot_id=prior.snapshot_id,
-                            coverage=prior.coverage,
-                            saved_at=prior.created_at,
-                        )
-                        if prior is not None
-                        else None,
+                        last_result=last_result,
                     )
                 )
                 if monotonic() >= deadline:
