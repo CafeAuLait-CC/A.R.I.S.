@@ -210,9 +210,23 @@ def main(argv: list[str] | None = None) -> int:
         metavar="YYYY-MM-DD",
         help="Recheck a published report day against its retained original evidence",
     )
+    mode.add_argument(
+        "--review-week",
+        type=date.fromisoformat,
+        metavar="YYYY-MM-DD",
+        help="Show the saved evidence checks of one Monday week",
+    )
+    parser.add_argument(
+        "--record-verification",
+        action="store_true",
+        help="Save the successful check of --verify-day",
+    )
     args = parser.parse_args(argv)
-    if args.verify_day is not None and args.from_daily_week is not None:
-        parser.error("--verify-day chooses the report's natural week")
+    review = args.verify_day is not None or args.review_week is not None
+    if review and args.from_daily_week is not None:
+        parser.error("Choose the natural week with --verify-day or --review-week")
+    if args.record_verification and args.verify_day is None:
+        parser.error("--record-verification requires --verify-day")
     engine = None
     stop_requested = False
 
@@ -226,11 +240,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.from_daily_week is not None:
             for plan in config.plans:
                 daily_coverage_targets(plan, args.from_daily_week)
-        if args.verify_day is not None and (
-            not config.plans or any(not plan.daily_rollups for plan in config.plans)
-        ):
+        if review and (not config.plans or any(not plan.daily_rollups for plan in config.plans)):
             raise ValueError("Verification requires configured daily coverage plans")
-        if args.validate or (not config.enabled and not args.status and args.verify_day is None):
+        if args.record_verification and not config.enabled:
+            raise DomainError(
+                "WEEKLY_COVERAGE_NOT_CONFIGURED", "Saving coverage evidence is paused", 503
+            )
+        if args.validate or (not config.enabled and not args.status and not review):
             print(
                 json.dumps(
                     {
@@ -260,7 +276,27 @@ def main(argv: list[str] | None = None) -> int:
                                 plan,
                                 args.verify_day,
                                 transaction_timeout_ms=config.transaction_timeout_ms,
+                                record=args.record_verification,
                             )
+                            for plan in config.plans
+                        ],
+                        "deletion_enabled": False,
+                    }
+                )
+            )
+            return 0
+        if args.review_week is not None:
+            print(
+                json.dumps(
+                    {
+                        "state": "evidence_review",
+                        "plans": [
+                            {
+                                "schedule_id": str(plan.id),
+                                **schedules.evidence_review(plan, args.review_week).model_dump(
+                                    mode="json"
+                                ),
+                            }
                             for plan in config.plans
                         ],
                         "deletion_enabled": False,

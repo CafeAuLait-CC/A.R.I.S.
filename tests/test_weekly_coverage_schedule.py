@@ -47,7 +47,10 @@ from aris.modules.nova.coverage_schedule_models import (
 )
 from aris.modules.nova.coverage_schedule_reader import CoverageScheduleReader
 from aris.modules.nova.coverage_schedule_repo import CoverageScheduleRepository
-from aris.modules.nova.coverage_schedule_schemas import CoverageScheduleDefinition
+from aris.modules.nova.coverage_schedule_schemas import (
+    CoverageScheduleDefinition,
+    DailyCoverageEvidence,
+)
 from aris.modules.nova.coverage_schedule_service import CoverageScheduleService
 from aris.modules.nova.daily_coverage_calendar import daily_coverage_targets
 from aris.modules.nova.report_calendar import WeeklyReportPlan, weekly_report_period
@@ -437,11 +440,29 @@ def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
     inspected = verify_daily_coverage(schedules, definition, day, transaction_timeout_ms=30000)
     assert inspected["original_evidence_reverified"] and not inspected["deletion_enabled"]
     assert inspected["report_fingerprint"] == result["fingerprint"]
+    week = definition.calendar.first_week
+    assert len(schedules.evidence_review(definition, week).pending_days) == 7
+    assert inspected["checked_at"] is None
+    checked = verify_daily_coverage(
+        schedules, definition, day, transaction_timeout_ms=30000, record=True
+    )
+    review = schedules.evidence_review(definition, week)
+    assert len(review.pending_days) == 6 and not review.deletion_enabled
+    (check,) = review.checked_days
+    assert check.day == day and check.checked_at.isoformat() == checked["checked_at"]
+    evidence = DailyCoverageEvidence(**check.model_dump(exclude={"checked_at"}))
+    assert schedules.save_evidence_check(definition, evidence) == check
+    with pytest.raises(DomainError) as error:
+        schedules.save_evidence_check(
+            definition, evidence.model_copy(update={"snapshot_fingerprint": "0" * 64})
+        )
+    assert error.value.code == "CONFLICT"
     # Simulate expired evidence in this test database only.
     with schedules.sessions.begin() as db:
         db.execute(delete(AgentMessage).where(AgentMessage.id == observation))
     with pytest.raises(DomainError):
-        verify_daily_coverage(schedules, definition, day, transaction_timeout_ms=30000)
+        verify_daily_coverage(schedules, definition, day, transaction_timeout_ms=30000, record=True)
+    assert schedules.evidence_review(definition, week) == review
 
     owner = str(definition.calendar.owner_id)
     member = str(partition_recording[2][2][2][4][1])

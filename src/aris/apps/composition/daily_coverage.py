@@ -21,7 +21,10 @@ from aris.modules.lyra.weekly_from_daily import (
     WeeklyFromDailyReader,
 )
 from aris.modules.lyra.window_reader import UsageWindowReader
-from aris.modules.nova.coverage_schedule_schemas import CoverageScheduleDefinition
+from aris.modules.nova.coverage_schedule_schemas import (
+    CoverageScheduleDefinition,
+    DailyCoverageEvidence,
+)
 from aris.modules.nova.coverage_schedule_service import CoverageScheduleService
 from aris.modules.nova.daily_coverage_calendar import daily_coverage_targets
 
@@ -112,6 +115,7 @@ def verify_daily_coverage(
     day: date,
     *,
     transaction_timeout_ms: int,
+    record: bool = False,
 ) -> dict[str, JsonValue]:
     """Reverify the original evidence for one day of a published weekly result."""
     week = day - timedelta(days=day.weekday())
@@ -147,16 +151,21 @@ def verify_daily_coverage(
     ):
         raise DomainError("CONFLICT", "Published daily rollup differs from original evidence", 409)
     schedules.verify_daily_week(context, definition, week)
+    evidence = DailyCoverageEvidence(
+        report_id=report.id,
+        report_fingerprint=report.fingerprint,
+        day=day,
+        snapshot_fingerprint=snapshot.fingerprint,
+        rollup_fingerprint=rollup.fingerprint,
+    )
+    saved = schedules.save_evidence_check(definition, evidence) if record else None
     return {
         "schedule_id": str(definition.id),
         "node_id": calendar.scope.id,
         "week": week.isoformat(),
-        "day": day.isoformat(),
-        "report_id": str(report.id),
-        "report_fingerprint": report.fingerprint,
-        "snapshot_fingerprint": snapshot.fingerprint,
-        "rollup_fingerprint": rollup.fingerprint,
+        **evidence.model_dump(mode="json"),
         "coverage": rollup.coverage,
         "original_evidence_reverified": True,
         "deletion_enabled": False,
+        "checked_at": saved.checked_at.isoformat() if saved else None,
     }

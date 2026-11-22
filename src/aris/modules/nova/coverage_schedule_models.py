@@ -74,3 +74,23 @@ class DailyCoveragePeriodResultRow(Base):
     event_id: Mapped[str] = mapped_column(ForeignKey("domain_events.event_id"), unique=True)
     fingerprint: Mapped[str] = mapped_column(String(64))
     canonical_result: Mapped[str] = mapped_column(Text)
+
+
+class DailyCoverageEvidenceCheckRow(Base):
+    __tablename__ = "weekly_daily_evidence_checks"
+    __table_args__ = (
+        CheckConstraint(
+            "length(report_fingerprint)=64 AND length(snapshot_fingerprint)=64 "
+            "AND length(rollup_fingerprint)=64",
+            name="ck_weekly_evidence_check_fingerprints",
+        ),
+    )
+
+    report_id: Mapped[str] = mapped_column(
+        ForeignKey("weekly_daily_coverage_results.id"), primary_key=True
+    )
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    report_fingerprint: Mapped[str] = mapped_column(String(64))
+    snapshot_fingerprint: Mapped[str] = mapped_column(String(64))
+    rollup_fingerprint: Mapped[str] = mapped_column(String(64))
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

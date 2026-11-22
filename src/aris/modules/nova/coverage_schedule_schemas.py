@@ -141,3 +141,24 @@ class DailyCoveragePeriodResult(AccessContract):
         return schedule_fingerprint(
             "weekly_daily_coverage_result", schedule_canonical(self, exclude={"fingerprint"})
         )
+
+
+class DailyCoverageEvidence(AccessContract):
+    report_id: UUID
+    report_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    day: date
+    snapshot_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    rollup_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class DailyCoverageEvidenceCheck(DailyCoverageEvidence):
+    checked_at: AwareDatetime
+
+
+class WeeklyEvidenceReview(AccessContract):
+    report_id: UUID
+    report_fingerprint: str
+    week: date
+    checked_days: tuple[DailyCoverageEvidenceCheck, ...] = Field(max_length=7)
+    pending_days: tuple[date, ...] = Field(max_length=7)
+    deletion_enabled: Literal[False] = False

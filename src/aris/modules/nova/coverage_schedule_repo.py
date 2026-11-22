@@ -3,6 +3,8 @@ from datetime import date, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import select, text, update
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from aris.core.contracts import DomainError
@@ -10,12 +12,14 @@ from aris.core.time import utc
 from aris.modules.nova.coverage_schedule_models import (
     CoveragePeriodResultRow,
     CoverageScheduleRow,
+    DailyCoverageEvidenceCheckRow,
     DailyCoveragePeriodResultRow,
 )
 from aris.modules.nova.coverage_schedule_schemas import (
     CoveragePeriodResult,
     CoverageScheduleDefinition,
     CoverageScheduleStatus,
+    DailyCoverageEvidenceCheck,
     DailyCoveragePeriodResult,
     schedule_canonical,
 )
@@ -145,6 +149,42 @@ class CoverageScheduleRepository:
             return value
         except (ValueError, TypeError, KeyError, RecursionError):
             raise inconsistent() from None
+
+    def evidence_checks(self, report_id: UUID) -> tuple[DailyCoverageEvidenceCheck, ...]:
+        row = DailyCoverageEvidenceCheckRow
+        rows = self.session.scalars(
+            select(row).where(row.report_id == str(report_id)).order_by(row.day).limit(8)
+        )
+        try:
+            return tuple(
+                DailyCoverageEvidenceCheck(
+                    report_id=report_id,
+                    day=value.day,
+                    report_fingerprint=value.report_fingerprint,
+                    snapshot_fingerprint=value.snapshot_fingerprint,
+                    rollup_fingerprint=value.rollup_fingerprint,
+                    checked_at=utc(value.checked_at),
+                )
+                for value in rows
+            )
+        except (ValueError, TypeError):
+            raise inconsistent() from None
+
+    def add_evidence_check(self, value: DailyCoverageEvidenceCheck) -> None:
+        row = DailyCoverageEvidenceCheckRow
+        insert = (
+            postgres_insert
+            if self.session.get_bind().dialect.name == "postgresql"
+            else sqlite_insert
+        )
+        self.session.execute(
+            insert(row)
+            .values(
+                **value.model_dump(exclude={"report_id"}),
+                report_id=str(value.report_id),
+            )
+            .on_conflict_do_nothing(index_elements=[row.report_id, row.day])
+        )
 
     def append(self, value: CoverageScheduleStatus) -> None:
         self.session.add(

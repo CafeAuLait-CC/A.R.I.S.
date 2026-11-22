@@ -1,7 +1,7 @@
 """Short coordinator transactions; the long Lyra build runs outside this service."""
 
 from collections.abc import Callable
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 from uuid import uuid4, uuid5
 
@@ -26,7 +26,10 @@ from aris.modules.nova.coverage_schedule_schemas import (
     CoveragePeriodResult,
     CoverageScheduleDefinition,
     CoverageScheduleStatus,
+    DailyCoverageEvidence,
+    DailyCoverageEvidenceCheck,
     DailyCoveragePeriodResult,
+    WeeklyEvidenceReview,
 )
 from aris.modules.nova.daily_coverage_calendar import daily_coverage_targets
 from aris.modules.nova.report_calendar import weekly_report_period
@@ -304,18 +307,7 @@ class CoverageScheduleService:
                 transaction_budget(db, 100, 1000, 3000)
                 self._require(db, definition)
                 repo = CoverageScheduleRepository(db)
-                status = repo.get(definition.id)
-                result = repo.daily_result(uuid5(definition.id, week.isoformat()))
-                if status is None or result is None:
-                    raise DomainError("NOT_FOUND", "Weekly coverage report not found", 404)
-                if (
-                    status.definition != definition
-                    or result.schedule_id != definition.id
-                    or result.definition_fingerprint != definition.fingerprint
-                    or result.week != week
-                    or status.next_week <= week
-                ):
-                    raise DomainError("CONFLICT", "Weekly report schedule differs", 409)
+                result = self._published_daily_week(repo, definition, week)
                 actor = ActorContext(actor_id=calendar.owner_id, request_id=context.request_id)
                 recomposed = WeeklyFromDailyReader(
                     UsageWindowReader(self.sessions)
@@ -331,6 +323,111 @@ class CoverageScheduleService:
                     raise DomainError("CONFLICT", "Weekly report differs from daily rollups", 409)
                 self._require(db, definition)
                 return result
+        except DBAPIError as error:
+            raise self._failure(error) from None
+
+    @staticmethod
+    def _published_daily_week(
+        repo: CoverageScheduleRepository, definition: CoverageScheduleDefinition, week: date
+    ) -> DailyCoveragePeriodResult:
+        weekly_report_period(definition.calendar, week)
+        status = repo.get(definition.id)
+        result = repo.daily_result(uuid5(definition.id, week.isoformat()))
+        if status is None or result is None:
+            raise DomainError("NOT_FOUND", "Weekly coverage report not found", 404)
+        if (
+            not definition.daily_rollups
+            or status.definition != definition
+            or result.schedule_id != definition.id
+            or result.definition_fingerprint != definition.fingerprint
+            or result.week != week
+            or status.next_week <= week
+        ):
+            raise DomainError("CONFLICT", "Weekly report schedule differs", 409)
+        return result
+
+    @staticmethod
+    def _evidence_matches(
+        report: DailyCoveragePeriodResult, evidence: DailyCoverageEvidence
+    ) -> bool:
+        return (evidence.report_id, evidence.report_fingerprint) == (
+            report.id,
+            report.fingerprint,
+        ) and any(
+            (day.day, day.snapshot_fingerprint, day.rollup_fingerprint)
+            == (evidence.day, evidence.snapshot_fingerprint, evidence.rollup_fingerprint)
+            for day in report.report.days
+        )
+
+    def save_evidence_check(
+        self, definition: CoverageScheduleDefinition, evidence: DailyCoverageEvidence
+    ) -> DailyCoverageEvidenceCheck:
+        self._active()
+        definition = CoverageScheduleDefinition.model_validate(definition.model_dump(mode="json"))
+        evidence = DailyCoverageEvidence.model_validate(evidence.model_dump(mode="json"))
+        week = evidence.day - timedelta(days=evidence.day.weekday())
+        try:
+            with self.sessions() as db:
+                transaction_budget(db, 100, 1000, 3000)
+                repo = CoverageScheduleRepository(db)
+                self._require(db, definition)
+                report = self._published_daily_week(repo, definition, week)
+                now = self._now()
+                if not self._evidence_matches(report, evidence) or now < report.created_at:
+                    raise DomainError("CONFLICT", "Evidence check differs from the report", 409)
+                check = DailyCoverageEvidenceCheck(**evidence.model_dump(), checked_at=now)
+                repo.add_evidence_check(check)
+                saved = next(
+                    (
+                        value
+                        for value in repo.evidence_checks(report.id)
+                        if value.day == evidence.day
+                    ),
+                    None,
+                )
+                if (
+                    saved is None
+                    or not self._evidence_matches(report, saved)
+                    or saved.checked_at < report.created_at
+                ):
+                    raise DomainError("CONFLICT", "Saved evidence check is inconsistent", 409)
+                self._require(db, definition)
+                self._active()
+                commit_owned_transaction(db)
+                return saved
+        except DBAPIError as error:
+            raise self._failure(error) from None
+
+    def evidence_review(
+        self, definition: CoverageScheduleDefinition, week: date
+    ) -> WeeklyEvidenceReview:
+        definition = CoverageScheduleDefinition.model_validate(definition.model_dump(mode="json"))
+        try:
+            with self.sessions() as db, db.no_autoflush:
+                if db.get_bind().dialect.name == "postgresql":
+                    db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
+                transaction_budget(db, 100, 1000, 3000)
+                self._require(db, definition)
+                repo = CoverageScheduleRepository(db)
+                report = self._published_daily_week(repo, definition, week)
+                checks = repo.evidence_checks(report.id)
+                if any(
+                    not self._evidence_matches(report, check)
+                    or check.checked_at < report.created_at
+                    for check in checks
+                ):
+                    raise DomainError("CONFLICT", "Saved evidence checks are inconsistent", 409)
+                checked = {check.day for check in checks}
+                self._require(db, definition)
+                return WeeklyEvidenceReview(
+                    report_id=report.id,
+                    report_fingerprint=report.fingerprint,
+                    week=week,
+                    checked_days=checks,
+                    pending_days=tuple(
+                        day.day for day in report.report.days if day.day not in checked
+                    ),
+                )
         except DBAPIError as error:
             raise self._failure(error) from None
 
