@@ -30,6 +30,17 @@ class UsageWindowRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
 
+    def node_fingerprints(self, node_id: str, ids: tuple[UUID, ...]) -> dict[UUID, str]:
+        row = UsageWindowSnapshotRow
+        selected = self.session.execute(
+            select(row.id, row.fingerprint).where(
+                row.node_id == node_id,
+                row.owner_id.is_(None),
+                row.id.in_(tuple(str(id) for id in ids)),
+            )
+        )
+        return {UUID(id): fingerprint for id, fingerprint in selected}
+
     def quota_selections(self, query: QuotaEvidenceListQuery) -> tuple[QuotaEvidenceWindow, ...]:
         """Own-target metadata, including node snapshots projectable to that owner."""
         row = UsageWindowSnapshotRow

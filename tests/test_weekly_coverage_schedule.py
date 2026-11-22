@@ -12,7 +12,7 @@ from uuid import UUID, uuid4
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import delete, event, func, select, text, update
 from sqlalchemy.exc import DBAPIError
 
 from aris.apps.composition.lyra import build_lyra_components
@@ -33,6 +33,7 @@ from aris.modules.nova.coverage_schedule_reader import CoverageScheduleReader
 from aris.modules.nova.coverage_schedule_repo import CoverageScheduleRepository
 from aris.modules.nova.coverage_schedule_schemas import CoverageScheduleDefinition
 from aris.modules.nova.coverage_schedule_service import CoverageScheduleService
+from aris.modules.nova.daily_coverage_calendar import daily_coverage_targets
 from aris.modules.nova.report_calendar import WeeklyReportPlan, weekly_report_period
 from aris.modules.nova.weekly_coverage import weekly_coverage_target
 from tests.test_heartbeat import beat, heartbeat
@@ -289,6 +290,61 @@ def test_restart_resumes_original_steps_and_saved_snapshot_cursor_without_promot
     assert schedules.select(CONTEXT, definition, status_only=True).next_week == date(2026, 11, 30)
     with schedules.sessions() as db:
         assert db.scalar(select(func.count()).select_from(CoveragePeriodResultRow)) == 2
+
+
+def test_closed_days_survive_restart_and_feed_weekly_report_without_raw_samples(
+    partition_recording, settings
+):
+    schedules, config, definition, _, _ = setup(partition_recording, settings)
+    week = definition.calendar.first_week
+    targets = daily_coverage_targets(definition, week)
+    assert [target.day for target in targets] == [
+        week + timedelta(days=offset) for offset in range(7)
+    ]
+    before_due = run_tick(
+        config,
+        schedules,
+        from_daily_week=week,
+        status_only=True,
+        clock=lambda: targets[0].scheduled_for - timedelta(seconds=1),
+    )["plans"][0]
+    assert before_due["state"] == "future_day" and before_due["saved_days"] == 0
+    saved = []
+    for _ in range(64):
+        tick = run_tick(config, schedules, from_daily_week=week, clock=schedules.clock)
+        assert not tick["needs_attention"], tick
+        progress = tick["plans"][0]
+        if progress["state"] == "day_saved":
+            saved.append(progress["day"])
+            schedules = CoverageScheduleService(
+                schedules.sessions, enabled=True, clock=schedules.clock
+            )
+        elif progress["state"] == "report_ready":
+            break
+    else:
+        pytest.fail("Daily coverage did not converge")
+    assert saved == [target.day.isoformat() for target in targets]
+    report = progress["report"]
+    assert [source["snapshot_id"] for source in report["days"]] == [
+        str(target.snapshot_id) for target in targets
+    ]
+    assert report["coverage"] == "partial"
+    assert report["recorded_microseconds"] == 135000000
+    assert report["total_usage_microseconds"] is None
+    assert not report["missing_days"]
+
+    def require_saved_data(conn, cursor, statement, parameters, context, executemany):
+        assert "agent_messages" not in statement.lower()
+        assert not statement.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE"))
+
+    engine = schedules.sessions.kw["bind"]
+    event.listen(engine, "before_cursor_execute", require_saved_data)
+    try:
+        repeat = run_tick(config, schedules, from_daily_week=week, status_only=True)
+    finally:
+        event.remove(engine, "before_cursor_execute", require_saved_data)
+    assert repeat["plans"][0] == progress
+    assert schedules.select(CONTEXT, definition, status_only=True) is None
 
 
 def test_snapshot_saved_before_cursor_failure_is_recovered_atomically_and_retained(

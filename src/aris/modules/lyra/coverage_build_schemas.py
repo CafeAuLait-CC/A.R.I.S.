@@ -18,6 +18,10 @@ MAX_BUILD_PLAN_BYTES = 65536
 MAX_BUILD_STEP_BYTES = 16384
 
 
+def completed_coverage_window_id(plan_id: UUID) -> UUID:
+    return uuid5(plan_id, "completed-coverage-window")
+
+
 class CreateCoverageBuild(SourcePrefixSelection):
     id: UUID
     query: UsageWindowQuery
@@ -55,7 +59,7 @@ class StoredCoverageBuild(IntervalContract):
 
     @property
     def window_id(self) -> UUID:
-        return uuid5(self.request.id, "completed-coverage-window")
+        return completed_coverage_window_id(self.request.id)
 
     def manifest_id(self, revision: int) -> UUID:
         return uuid5(self.request.id, "coverage-source:" + str(revision))

@@ -88,6 +88,21 @@ class UsageWindowReader:
         access, _ = self._request(actor, node_id, owner_id, mode)
         self.access.require_in_transaction(session, access)
 
+    def node_snapshot_fingerprints(
+        self, actor: ActorContext, node_id: str, ids: tuple[UUID, ...]
+    ) -> dict[UUID, str]:
+        if not 1 <= len(ids) <= 7 or len(set(ids)) != len(ids):
+            raise ValueError("Expected up to seven distinct day snapshots")
+        try:
+            with self.sessions() as session, session.no_autoflush:
+                transaction_budget(session, 100, 1000, self.timeout_ms)
+                self.require_in_transaction(session, actor, node_id, None, "node")
+                values = UsageWindowRepository(session).node_fingerprints(node_id, ids)
+                self.require_in_transaction(session, actor, node_id, None, "node")
+                return values
+        except DBAPIError as error:
+            raise self._failure(error) from None
+
     def read_in_transaction(
         self,
         session: Session,

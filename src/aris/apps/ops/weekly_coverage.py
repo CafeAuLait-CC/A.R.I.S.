@@ -5,7 +5,7 @@ import json
 import signal
 import sys
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from time import monotonic, sleep
 from uuid import uuid4
@@ -14,6 +14,7 @@ from pydantic import Field, JsonValue, SecretStr, model_validator
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError, SQLAlchemyError
 
+from aris.apps.composition.daily_coverage import daily_coverage_step
 from aris.apps.composition.lyra_coverage import (
     CoverageBuildTarget,
     LyraCoverageRuntimeConfig,
@@ -26,6 +27,7 @@ from aris.core.db import build_engine, check_database, session_factory
 from aris.core.scheduler.schemas import SchedulerContext
 from aris.modules.nova.coverage_schedule_schemas import CoverageScheduleDefinition
 from aris.modules.nova.coverage_schedule_service import CoverageScheduleService
+from aris.modules.nova.daily_coverage_calendar import daily_coverage_targets
 from aris.modules.nova.report_calendar import weekly_report_period
 from aris.modules.nova.weekly_coverage import weekly_coverage_target
 
@@ -64,6 +66,7 @@ def run_tick(
     *,
     status_only: bool = False,
     clock: Callable[[], datetime] | None = None,
+    from_daily_week: date | None = None,
 ) -> dict[str, JsonValue]:
     if not config.enabled and not status_only:
         return {
@@ -78,6 +81,19 @@ def run_tick(
     attention = False
     for definition in config.plans:
         try:
+            if from_daily_week is not None:
+                items.append(
+                    daily_coverage_step(
+                        schedules.sessions,
+                        definition,
+                        from_daily_week,
+                        clock=clock or (lambda: datetime.now(UTC)),
+                        status_only=status_only,
+                        prefix_proofs_per_tick=config.prefix_proofs_per_tick,
+                        transaction_timeout_ms=config.transaction_timeout_ms,
+                    )
+                )
+                continue
             progress = schedules.select(context, definition, status_only=status_only)
             if progress is None:
                 items.append({"schedule_id": str(definition.id), "state": "not_registered"})
@@ -142,7 +158,7 @@ def run_tick(
         "made_progress": any(
             isinstance(item, dict)
             and item.get("state")
-            in {"prefix_prepared", "admitted", "source_built", "snapshot_saved"}
+            in {"prefix_prepared", "admitted", "source_built", "snapshot_saved", "day_saved"}
             for item in items
         ),
         "current_quota_authorization": False,
@@ -154,6 +170,12 @@ def run_tick(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument(
+        "--from-daily-week",
+        type=date.fromisoformat,
+        metavar="YYYY-MM-DD",
+        help="Prepare each local day of one explicit Monday week and preview its report",
+    )
     mode = parser.add_mutually_exclusive_group(required=True)
     for flag in ("validate", "status", "once", "run"):
         mode.add_argument("--" + flag, action="store_true")
@@ -168,6 +190,9 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         config = read_private(args.config, WeeklyCoverageConfig)
+        if args.from_daily_week is not None:
+            for plan in config.plans:
+                daily_coverage_targets(plan, args.from_daily_week)
         if args.validate or (not config.enabled and not args.status):
             print(
                 json.dumps(
@@ -191,10 +216,23 @@ def main(argv: list[str] | None = None) -> int:
             for value in (signal.SIGINT, signal.SIGTERM):
                 signal.signal(value, request_stop)
         while True:
-            result = run_tick(config, schedules, status_only=args.status)
+            result = run_tick(
+                config, schedules, status_only=args.status, from_daily_week=args.from_daily_week
+            )
             print(json.dumps(result), flush=True)
             if args.once or args.status:
                 return 1 if result.get("needs_attention") else 0
+            if args.from_daily_week is not None:
+                plans = result["plans"]
+                if (
+                    isinstance(plans, list)
+                    and plans
+                    and all(
+                        isinstance(plan, dict) and plan.get("state") == "report_ready"
+                        for plan in plans
+                    )
+                ):
+                    return 0
             delay = (
                 config.poll_seconds
                 if result.get("needs_attention") or not result.get("made_progress")
