@@ -269,6 +269,14 @@ class CoverageScheduleService:
                     ),
                     tuple(target.snapshot_id for target in targets),
                 )
+                if (
+                    definition.session_occupancy
+                    and (
+                        report.session_evidence is None
+                        or report.session_evidence.assessed_days != len(targets)
+                    )
+                ) or (not definition.session_occupancy and report.session_evidence is not None):
+                    raise DomainError("CONFLICT", "Weekly session evidence differs from plan", 409)
                 draft = DailyCoveragePeriodResult.model_construct(
                     id=id,
                     schedule_id=definition.id,

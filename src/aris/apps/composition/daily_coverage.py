@@ -11,10 +11,13 @@ from aris.apps.composition.lyra_coverage import (
     LyraCoverageRuntimeConfig,
     build_lyra_coverage_components,
 )
+from aris.core.access.history_service import NodeUserHistoryService
 from aris.core.commands.schemas import ActorContext
 from aris.core.contracts import DomainError
 from aris.core.scheduler.schemas import SchedulerContext
-from aris.modules.lyra.coverage_rollup import roll_up_saved_coverage
+from aris.modules.lyra.daily_session_occupancy_service import DailySessionOccupancyService
+from aris.modules.lyra.indexed_usage_service import IndexedUsageHistoryService
+from aris.modules.lyra.session_occupancy_service import SessionOccupancyService
 from aris.modules.lyra.weekly_from_daily import (
     DailyWindowReference,
     WeeklyFromDailyQuery,
@@ -27,6 +30,25 @@ from aris.modules.nova.coverage_schedule_schemas import (
 )
 from aris.modules.nova.coverage_schedule_service import CoverageScheduleService
 from aris.modules.nova.daily_coverage_calendar import daily_coverage_targets
+from aris.modules.vega.usage_span import VegaUsageSpans
+
+
+def _daily_report_reader(
+    sessions: sessionmaker[Session],
+    definition: CoverageScheduleDefinition,
+    clock: Callable[[], datetime],
+) -> WeeklyFromDailyReader:
+    if not definition.session_occupancy:
+        return WeeklyFromDailyReader(UsageWindowReader(sessions, clock=clock))
+    return WeeklyFromDailyReader(
+        UsageWindowReader(sessions, clock=clock, timeout_ms=6000),
+        DailySessionOccupancyService(
+            IndexedUsageHistoryService(sessions, clock=clock, timeout_ms=6000),
+            SessionOccupancyService(
+                VegaUsageSpans(), NodeUserHistoryService(sessions, clock=clock)
+            ),
+        ),
+    )
 
 
 def daily_coverage_step(
@@ -43,8 +65,7 @@ def daily_coverage_step(
     targets = daily_coverage_targets(definition, week)
     calendar = definition.calendar
     actor = ActorContext(actor_id=calendar.owner_id, request_id="daily-coverage-check")
-    reader = UsageWindowReader(sessions)
-    reports = WeeklyFromDailyReader(reader)
+    reports = _daily_report_reader(sessions, definition, clock)
     known = reports.stored_references(
         actor, calendar.scope.id, tuple(target.snapshot_id for target in targets)
     )
@@ -89,7 +110,7 @@ def daily_coverage_step(
     )
     step = graph.run_once()
     if step["state"] == "finished":
-        completed = reader.node_snapshot_fingerprints(
+        completed = reports.daily_windows.node_snapshot_fingerprints(
             actor, calendar.scope.id, (current.snapshot_id,)
         )
         fingerprint = completed.get(current.snapshot_id)
@@ -143,7 +164,8 @@ def verify_daily_coverage(
     snapshot = windows.reverify(source.snapshot_id)
     calendar = definition.calendar
     actor = ActorContext(actor_id=calendar.owner_id, request_id=context.request_id)
-    rollup = roll_up_saved_coverage(windows.reader.read(actor, source.snapshot_id), "day")
+    reports = _daily_report_reader(schedules.sessions, definition, schedules.clock)
+    rollup = reports.project_day(actor, source.snapshot_id, node_id=calendar.scope.id)
     if (
         snapshot.fingerprint != source.snapshot_fingerprint
         or snapshot.request.query != target.query

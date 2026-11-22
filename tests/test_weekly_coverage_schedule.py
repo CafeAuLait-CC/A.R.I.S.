@@ -412,7 +412,7 @@ def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
 ):
     schedules, config, legacy, _, _ = setup(partition_recording, settings)
     definition = CoverageScheduleDefinition.model_validate(
-        {**legacy.model_dump(mode="json"), "daily_rollups": True}
+        {**legacy.model_dump(mode="json"), "daily_rollups": True, "session_occupancy": True}
     )
     config = config.model_copy(update={"plans": (definition,)})
     for _ in range(64):
@@ -424,6 +424,8 @@ def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
     else:
         pytest.fail("Daily weekly result was not saved")
     result = step["result"]
+    sessions = result["report"]["session_evidence"]
+    assert sessions["assessed_days"] == 7 and sessions["retained_microseconds"] == 0
     with schedules.sessions() as db:
         source = db.scalar(
             select(AgentMessage)
@@ -534,11 +536,17 @@ def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
                 assert owner not in hidden.text
                 if route == "read":
                     assert visible.json()["verified_usage_microseconds"] > 0
+                    assert (
+                        visible.json()["verified_session_microseconds"]
+                        == sessions["verified_session_microseconds"]
+                    )
                     assert hidden.json()["durations"] == []
+                    assert hidden.json()["verified_session_microseconds"] == 0
                     assert hidden.json()["total_usage_microseconds"] is None
                     assert len(hidden.json()["days"]) == 7
                 elif route == "report":
                     assert "GPU 用量周报" in visible.text
+                    assert "已核实会话占用" in visible.text
                 else:
                     rows = list(csv.DictReader(io.StringIO(visible.content.decode("utf-8-sig"))))
                     assert any(row["owner_id"] == owner for row in rows)

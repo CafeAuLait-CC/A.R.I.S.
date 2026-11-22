@@ -14,6 +14,7 @@ from aris.apps.api.main import create_app
 from aris.core.contracts import DomainError
 from aris.interfaces.slack.config import SlackSettings
 from aris.modules.lyra.continuous_usage import continuous_usage_history
+from aris.modules.lyra.daily_session_occupancy import clip_session_occupancy
 from aris.modules.lyra.session_occupancy import assess_gap_sources
 from aris.modules.lyra.session_occupancy_service import SessionOccupancyService
 from aris.modules.lyra.usage_history import UsageHistoryQuery
@@ -264,6 +265,14 @@ def test_session_quantity_uses_real_ledger_derivations_and_historical_mapping(re
         assert "linux-user" not in result.model_dump_json() and not result.quota_usage_available
         repeated = service.read_in_transaction(db, view, deadline=monotonic() + 3)
         assert repeated == result
+        midnight = view.gaps[0].before.end_at + timedelta(seconds=15)
+        first = clip_session_occupancy(view, result, view.history.start_at, midnight)
+        second = clip_session_occupancy(view, result, midnight, view.history.end_at)
+        assert first.recorded_microseconds + second.recorded_microseconds == 120000000
+        assert first.retained_microseconds == 15000000
+        assert second.retained_microseconds == 75000000
+        assert first.retained_gaps[-1].end_at == second.retained_gaps[0].start_at == midnight
+        assert not first.adjacent_context_loaded and not second.adjacent_context_loaded
     assert counts(state) == before
     with TestClient(
         create_app(settings, SlackSettings(_env_file=None), usage_history=surface)
@@ -330,3 +339,7 @@ def test_session_quantity_uses_real_ledger_derivations_and_historical_mapping(re
         )
         assert unverified.unverified_microseconds == 30000000
         assert unverified.verified_session_microseconds == 180000000
+        first = clip_session_occupancy(view, unverified, view.history.start_at, midnight)
+        second = clip_session_occupancy(view, unverified, midnight, view.history.end_at)
+        assert first.unverified_gap_microseconds == second.unverified_gap_microseconds == 15000000
+        assert first.retained_microseconds == 0 and second.retained_microseconds == 60000000

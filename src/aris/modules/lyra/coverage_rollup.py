@@ -3,12 +3,19 @@
 from bisect import bisect_right
 from collections import defaultdict
 from datetime import date, datetime, timedelta
-from typing import Literal
+from typing import Any, Literal, cast
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from pydantic import AwareDatetime, Field, model_validator
+from pydantic import (
+    AwareDatetime,
+    Field,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+    model_validator,
+)
 
+from aris.modules.lyra.daily_session_occupancy import DailySessionOccupancy
 from aris.modules.lyra.recorded_usage import MICROSECOND
 from aris.modules.lyra.trace_consumer_schemas import canonical_trace, trace_fingerprint
 from aris.modules.lyra.usage_history import calendar_boundaries
@@ -55,7 +62,28 @@ class SavedCoverageRollup(IntervalContract):
     verified_usage_microseconds: int = Field(ge=0)
     total_usage_microseconds: int | None = Field(ge=0)
     buckets: tuple[CoverageBucket, ...] = Field(min_length=1, max_length=368)
+    daily_session: DailySessionOccupancy | None = None
     fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+    @model_serializer(mode="wrap")
+    def optional_session(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data = cast(dict[str, Any], handler(self))
+        if self.daily_session is None:
+            data.pop("daily_session", None)
+        return data
+
+    @model_validator(mode="after")
+    def session_matches_day(self) -> "SavedCoverageRollup":
+        if self.daily_session is not None and (
+            self.grain != "day"
+            or self.detail_scope != "node"
+            or len(self.buckets) != 1
+            or (self.daily_session.start_at, self.daily_session.end_at)
+            != (self.query.start_at, self.query.end_at)
+            or self.daily_session.recorded_microseconds != self.recorded_microseconds
+        ):
+            raise ValueError("Session evidence differs from the coverage day")
+        return self
 
     def content_fingerprint(self) -> str:
         return trace_fingerprint(

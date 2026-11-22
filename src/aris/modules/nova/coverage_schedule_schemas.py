@@ -34,6 +34,7 @@ class CoverageScheduleDefinition(AccessContract):
     calendar: WeeklyReportPlan
     configuration: ProcessingCoverageConfiguration
     daily_rollups: Literal[True] | None = None
+    session_occupancy: Literal[True] | None = None
 
     @model_validator(mode="after")
     def one_explicit_source(self) -> "CoverageScheduleDefinition":
@@ -41,6 +42,8 @@ class CoverageScheduleDefinition(AccessContract):
         weekly_coverage_target(self.calendar, first, self.configuration, now=first.scheduled_for)
         if self.daily_rollups and self.calendar.report_type != "usage.node":
             raise ValueError("Daily rollups require a node-wide coverage definition")
+        if self.session_occupancy and not self.daily_rollups:
+            raise ValueError("Session occupancy requires daily coverage rollups")
         return self
 
     @model_serializer(mode="wrap")
@@ -48,11 +51,19 @@ class CoverageScheduleDefinition(AccessContract):
         values = cast(dict[str, Any], handler(self))
         if self.daily_rollups is None:
             values.pop("daily_rollups", None)
+        if self.session_occupancy is None:
+            values.pop("session_occupancy", None)
         return values
 
     @property
     def id(self) -> UUID:
-        method = "weekly-from-daily/" if self.daily_rollups else "weekly-coverage/"
+        method = (
+            "weekly-from-session-days/"
+            if self.session_occupancy
+            else "weekly-from-daily/"
+            if self.daily_rollups
+            else "weekly-coverage/"
+        )
         return uuid5(NAMESPACE_URL, "aris.nova." + method + plan_key(self.calendar))
 
     @property

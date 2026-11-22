@@ -33,6 +33,8 @@ def weekly_daily_csv(
             "owner_id",
             "display_name",
             "microseconds",
+            "verified_retained_gap_microseconds",
+            "verified_session_microseconds",
         )
     )
     context = (str(view.id), csv_text(view.node_id), view.scope, view.week, view.timezone)
@@ -50,10 +52,14 @@ def weekly_daily_csv(
             "",
             "",
             "",
+            view.verified_retained_gap_microseconds,
+            view.verified_session_microseconds,
         )
     )
     for day in view.days:
-        writer.writerow(("day", *context, day.coverage, "", "", day.day, "", "", "", "", "", ""))
+        writer.writerow(
+            ("day", *context, day.coverage, "", "", day.day, "", "", "", "", "", "", "", "")
+        )
     for row in view.durations:
         owner = str(row.owner_id or "")
         writer.writerow(
@@ -70,6 +76,8 @@ def weekly_daily_csv(
                 owner,
                 csv_text(labels.get(owner, "Unknown")) if owner else "",
                 row.microseconds,
+                "",
+                "",
             )
         )
     return ("\ufeff" + stream.getvalue()).encode("utf-8")
@@ -94,6 +102,13 @@ def weekly_daily_html(
     total = (
         "未知" if view.total_usage_microseconds is None else hours(view.total_usage_microseconds)
     )
+    session = (
+        f"<p>已核实会话占用 {hours(view.verified_session_microseconds)} GPU 小时，"
+        f"其中短空档 {hours(view.verified_retained_gap_microseconds)} GPU 小时</p>"
+        if view.verified_session_microseconds is not None
+        and view.verified_retained_gap_microseconds is not None
+        else ""
+    )
     return (
         '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
@@ -107,6 +122,7 @@ def weekly_daily_html(
         f"<p>{escape(view.node_id)} · {'本人统计' if view.scope == 'mine' else '节点统计'}</p>"
         f"<p>{view.week.isoformat()} 起 · {escape(view.timezone)} · {COVERAGE[view.coverage]}</p>"
         f"<p>已核实用量 {hours(view.verified_usage_microseconds)} GPU 小时 · 总用量 {total}</p>"
+        f"{session}"
         f"<h2>每日覆盖</h2><ul>{dates}</ul>"
         "<h2>按 GPU 汇总</h2><table><thead><tr>"
         "<th>GPU</th><th>用户</th><th>状态</th><th>GPU 小时</th></tr></thead>"

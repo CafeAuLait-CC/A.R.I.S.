@@ -63,6 +63,8 @@ class WeeklyCoverageReportView(AccessContract):
     days: tuple[WeeklyCoverageDate, ...] = Field(max_length=7)
     verified_usage_microseconds: int = Field(ge=0)
     total_usage_microseconds: int | None = Field(ge=0)
+    verified_retained_gap_microseconds: int | None = Field(default=None, ge=0)
+    verified_session_microseconds: int | None = Field(default=None, ge=0)
     durations: tuple[CoverageDuration, ...]
 
 
@@ -132,6 +134,15 @@ class CoverageScheduleReader:
             row for row in report.durations if mode == "node" or row.owner_id == actor.actor_id
         )
         verified = sum(row.microseconds for row in durations if row.state == "recorded")
+        gaps = (
+            sum(
+                row.microseconds
+                for row in report.session_evidence.retained
+                if mode == "node" or row.owner_id == actor.actor_id
+            )
+            if report.session_evidence is not None
+            else None
+        )
         self.require_report_in_transaction(session, actor, node_id, mode)
         return WeeklyCoverageReportView(
             id=id,
@@ -149,6 +160,8 @@ class CoverageScheduleReader:
             ),
             verified_usage_microseconds=verified,
             total_usage_microseconds=verified if report.coverage == "complete" else None,
+            verified_retained_gap_microseconds=gaps,
+            verified_session_microseconds=verified + gaps if gaps is not None else None,
             durations=durations,
         )
 

@@ -3,11 +3,19 @@
 from collections import defaultdict
 from datetime import date, timedelta
 from time import monotonic
-from typing import Literal
+from typing import Any, Literal, cast
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from pydantic import AwareDatetime, Field, field_validator
+from pydantic import (
+    AwareDatetime,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
+from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
@@ -23,11 +31,13 @@ from aris.modules.lyra.coverage_rollup import (
     roll_up_saved_coverage,
 )
 from aris.modules.lyra.daily_rollup_repo import DailyUsageRollupRepository
+from aris.modules.lyra.daily_session_occupancy_service import DailySessionOccupancyService
 from aris.modules.lyra.trace_consumer_schemas import canonical_trace, trace_fingerprint
 from aris.modules.lyra.usage_history import calendar_boundaries
 from aris.modules.lyra.usage_intervals import IntervalContract
 from aris.modules.lyra.window_reader import UsageWindowReader
 from aris.modules.lyra.window_schemas import UsageWindowQuery
+from aris.modules.lyra.window_snapshot_repo import UsageWindowRepository
 
 
 class WeeklyFromDailyQuery(IntervalContract):
@@ -59,6 +69,31 @@ class WeeklySourceDay(DailyWindowReference):
     coverage: Literal["complete", "partial", "unknown"]
 
 
+class WeeklyRetainedUsage(IntervalContract):
+    gpu_uuid: str
+    owner_id: UUID
+    microseconds: int = Field(gt=0)
+
+
+class WeeklySessionEvidence(IntervalContract):
+    assessed_days: int = Field(ge=1, le=7)
+    adjacent_context_days: int = Field(ge=0, le=7)
+    unverified_gap_microseconds: int = Field(ge=0)
+    retained_microseconds: int = Field(ge=0)
+    verified_session_microseconds: int = Field(ge=0)
+    retained: tuple[WeeklyRetainedUsage, ...] = Field(max_length=448)
+
+    @model_validator(mode="after")
+    def exact_retained_time(self) -> "WeeklySessionEvidence":
+        if (
+            self.adjacent_context_days > self.assessed_days
+            or self.retained_microseconds != sum(item.microseconds for item in self.retained)
+            or len({(item.gpu_uuid, item.owner_id) for item in self.retained}) != len(self.retained)
+        ):
+            raise ValueError("Weekly session summary differs from its verified daily gaps")
+        return self
+
+
 class WeeklyFromDaily(IntervalContract):
     assessment_scope: Literal["weekly_from_daily_coverage"] = "weekly_from_daily_coverage"
     quota_usage_available: Literal[False] = False
@@ -72,7 +107,26 @@ class WeeklyFromDaily(IntervalContract):
     verified_usage_microseconds: int = Field(ge=0)
     total_usage_microseconds: int | None = Field(ge=0)
     durations: tuple[CoverageDuration, ...]
+    session_evidence: WeeklySessionEvidence | None = None
     fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+    @model_serializer(mode="wrap")
+    def optional_sessions(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data = cast(dict[str, Any], handler(self))
+        if self.session_evidence is None:
+            data.pop("session_evidence", None)
+        return data
+
+    @model_validator(mode="after")
+    def exact_session_time(self) -> "WeeklyFromDaily":
+        summary = self.session_evidence
+        if summary is not None and (
+            summary.assessed_days > len(self.days)
+            or summary.verified_session_microseconds
+            != self.verified_usage_microseconds + summary.retained_microseconds
+        ):
+            raise ValueError("Verified session time must be residency plus verified gaps")
+        return self
 
     def content_fingerprint(self) -> str:
         return trace_fingerprint(
@@ -137,6 +191,31 @@ def weekly_from_daily(
     known = any(day.coverage != "unknown" for day in seen.values())
     recorded = sum(day.recorded_microseconds for day in seen.values())
     verified = sum(day.verified_usage_microseconds for day in seen.values())
+    daily_sessions = tuple(
+        day.daily_session for day in seen.values() if day.daily_session is not None
+    )
+    by_gpu_owner: dict[tuple[str, UUID], int] = defaultdict(int)
+    for daily_session in daily_sessions:
+        for gap in daily_session.retained_gaps:
+            by_gpu_owner[(gap.gpu_uuid, gap.owner_id)] += gap.microseconds
+    retained = sum(by_gpu_owner.values())
+    sessions = (
+        WeeklySessionEvidence(
+            assessed_days=len(daily_sessions),
+            adjacent_context_days=sum(day.adjacent_context_loaded for day in daily_sessions),
+            unverified_gap_microseconds=sum(
+                day.unverified_gap_microseconds for day in daily_sessions
+            ),
+            retained_microseconds=retained,
+            verified_session_microseconds=verified + retained,
+            retained=tuple(
+                WeeklyRetainedUsage(gpu_uuid=gpu, owner_id=owner, microseconds=amount)
+                for (gpu, owner), amount in sorted(by_gpu_owner.items())
+            ),
+        )
+        if daily_sessions
+        else None
+    )
     result = WeeklyFromDaily(
         query=query,
         start_at=boundaries[0],
@@ -162,14 +241,20 @@ def weekly_from_daily(
                 totals.items(), key=lambda value: (value[0][0], value[0][1], str(value[0][2]))
             )
         ),
+        session_evidence=sessions,
         fingerprint="0" * 64,
     )
     return result.model_copy(update={"fingerprint": result.content_fingerprint()})
 
 
 class WeeklyFromDailyReader:
-    def __init__(self, daily_windows: UsageWindowReader) -> None:
+    def __init__(
+        self,
+        daily_windows: UsageWindowReader,
+        session_occupancy: DailySessionOccupancyService | None = None,
+    ) -> None:
         self.daily_windows = daily_windows
+        self.session_occupancy = session_occupancy
 
     def _begin(self, db: Session, actor: ActorContext, node_id: str) -> None:
         timeout_ms = self.daily_windows.timeout_ms
@@ -216,14 +301,14 @@ class WeeklyFromDailyReader:
                 repo = DailyUsageRollupRepository(db)
                 saved = repo.get(query.node_id, (source.snapshot_id,)).get(source.snapshot_id)
                 if saved is None:
-                    value = reader.read_in_transaction(
-                        db, actor, source.snapshot_id, node_id=query.node_id, mode="node"
+                    saved = self._project_day_in_transaction(
+                        db, actor, source.snapshot_id, node_id=query.node_id
                     )
-                    saved = roll_up_saved_coverage(value, "day")
                     repo.insert(saved)
                 if (
                     saved.snapshot_fingerprint != source.snapshot_fingerprint
                     or saved.query != query
+                    or (saved.daily_session is None) != (self.session_occupancy is None)
                 ):
                     raise DomainError("CONFLICT", "Daily rollup snapshot or scope differs", 409)
                 reader.require_in_transaction(db, actor, query.node_id, None, "node")
@@ -234,6 +319,46 @@ class WeeklyFromDailyReader:
             raise DomainError("CONFLICT", "Daily interval snapshot is inconsistent", 409) from None
         except DBAPIError as error:
             raise self._failure(error) from None
+
+    def project_day(
+        self, actor: ActorContext, snapshot_id: UUID, *, node_id: str
+    ) -> SavedCoverageRollup:
+        reader = self.daily_windows
+        deadline = monotonic() + reader.timeout_ms / 1000
+        try:
+            with reader.sessions() as db, db.no_autoflush:
+                if db.get_bind().dialect.name == "postgresql":
+                    db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
+                self._begin(db, actor, node_id)
+                result = self._project_day_in_transaction(db, actor, snapshot_id, node_id=node_id)
+                reader.require_in_transaction(db, actor, node_id, None, "node")
+                reader._deadline(deadline)
+                return result
+        except DBAPIError as error:
+            raise self._failure(error) from None
+
+    def _project_day_in_transaction(
+        self, db: Session, actor: ActorContext, snapshot_id: UUID, *, node_id: str
+    ) -> SavedCoverageRollup:
+        view = self.daily_windows.read_in_transaction(
+            db, actor, snapshot_id, node_id=node_id, mode="node"
+        )
+        rollup = roll_up_saved_coverage(view, "day")
+        if self.session_occupancy is None:
+            return rollup
+        original = UsageWindowRepository(db).get(snapshot_id)
+        if original is None or original.fingerprint != view.snapshot_fingerprint:
+            raise DomainError("CONFLICT", "Daily session snapshot differs", 409)
+        occupancy = self.session_occupancy.read_in_transaction(db, actor, original)
+        try:
+            loaded = SavedCoverageRollup.model_validate(
+                {**rollup.model_dump(), "daily_session": occupancy}
+            )
+        except ValueError:
+            raise DomainError(
+                "CONFLICT", "Daily session totals differ from the snapshot", 409
+            ) from None
+        return loaded.model_copy(update={"fingerprint": loaded.content_fingerprint()})
 
     def read(
         self,
