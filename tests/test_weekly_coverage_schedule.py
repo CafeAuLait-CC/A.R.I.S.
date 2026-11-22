@@ -36,11 +36,13 @@ from aris.core.contracts import DomainError
 from aris.core.scheduler.schemas import SchedulerContext
 from aris.interfaces.commands.auth import BoundSubjectTokens, UserTokenBinding
 from aris.interfaces.slack.config import SlackSettings
+from aris.interfaces.usage.combined_week_export import combined_week_csv, combined_week_html
 from aris.interfaces.usage.service import UsageHistorySurface
 from aris.modules.lyra.coverage_schemas import ProcessingCoverageConfiguration
 from aris.modules.lyra.ledger_repo import UsageLedgerRepository
 from aris.modules.lyra.usage_history_service import UsageHistoryService
 from aris.modules.lyra.window_reader import UsageWindowReader
+from aris.modules.nova.combined_coverage_week import combine_coverage_week
 from aris.modules.nova.coverage_schedule_models import (
     CoveragePeriodResultRow,
     CoverageScheduleRow,
@@ -51,6 +53,7 @@ from aris.modules.nova.coverage_schedule_repo import CoverageScheduleRepository
 from aris.modules.nova.coverage_schedule_schemas import (
     CoverageScheduleDefinition,
     DailyCoverageEvidence,
+    DailyCoveragePeriodResult,
 )
 from aris.modules.nova.coverage_schedule_service import CoverageScheduleService
 from aris.modules.nova.daily_coverage_calendar import daily_coverage_targets
@@ -520,6 +523,28 @@ def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
         verify_daily_coverage(schedules, definition, day, transaction_timeout_ms=30000, record=True)
     assert schedules.evidence_review(definition, week) == review
 
+    def no_reconstruction(conn, cursor, statement, parameters, context, executemany):
+        assert not any(
+            table in statement.lower()
+            for table in ("agent_messages", "usage_ledger_entries", "usage_coverage_manifests")
+        )
+
+    timeline_engine = schedules.sessions.kw["bind"]
+    event.listen(timeline_engine, "before_cursor_execute", no_reconstruction)
+    try:
+        timeline = schedules.saved_day_timeline(definition, day)
+    finally:
+        event.remove(timeline_engine, "before_cursor_execute", no_reconstruction)
+    assert timeline.reference.day == day
+    assert timeline.reference.rollup_fingerprint == check.rollup_fingerprint
+    assert timeline.reference.snapshot_fingerprint == check.snapshot_fingerprint
+    assert timeline.verified_short_gaps == ()
+    assert (
+        sum(cell.microseconds for cell in timeline.intervals if cell.state == "recorded")
+        == timeline.verified_usage_microseconds
+    )
+    assert any(cell.state in {"unknown", "uncovered"} for cell in timeline.intervals)
+
     owner = str(definition.calendar.owner_id)
     member = str(partition_recording[2][2][2][4][1])
     role = str(uuid4())
@@ -576,6 +601,36 @@ def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
     event.listen(engine, "before_cursor_execute", only_report)
     payload = {"id": result["id"], "source": "daily_rollups", "node_id": "node-a"}
     try:
+        combined = schedules.combined_week((definition,), week)
+        assert (
+            combined.verified_usage_microseconds == result["report"]["verified_usage_microseconds"]
+        )
+        original = DailyCoveragePeriodResult.model_validate(result)
+        partial = combine_coverage_week(
+            week, definition.calendar.timezone, {"node-b": None, "node-a": original}
+        )
+        assert partial.verified_usage_microseconds == combined.verified_usage_microseconds
+        assert partial.total_usage_microseconds is None
+        assert partial.nodes[-1].coverage == "missing"
+        assert partial.nodes[-1].verified_usage_microseconds is None
+        assert partial == combine_coverage_week(
+            week, definition.calendar.timezone, {"node-a": original, "node-b": None}
+        )
+        combined_rows = list(
+            csv.DictReader(io.StringIO(combined_week_csv(partial).lstrip("\ufeff")))
+        )
+        assert len(combined_rows) == 3
+        assert combined_rows[0]["scope"] == "lab"
+        assert combined_rows[0]["total_usage_microseconds"] == ""
+        assert combined_rows[1]["node_report_fingerprint"] == original.fingerprint
+        assert combined_rows[2]["coverage"] == "missing"
+        assert combined_rows[2]["verified_usage_microseconds"] == ""
+        assert all(row["combined_fingerprint"] == partial.fingerprint for row in combined_rows)
+        assert all(None not in row and None not in row.values() for row in combined_rows)
+        combined_html = combined_week_html(partial)
+        assert partial.fingerprint in combined_html
+        assert "缺少周报" in combined_html and "总用量 未知" in combined_html
+        assert owner not in combined_html and "<script" not in combined_html
         with TestClient(app) as client:
             for route in ("read", "report", "csv"):
                 path = "/internal/usage/weekly/" + route
@@ -605,6 +660,20 @@ def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
                     rows = list(csv.DictReader(io.StringIO(visible.content.decode("utf-8-sig"))))
                     assert any(row["owner_id"] == owner for row in rows)
                     assert all(None not in row and None not in row.values() for row in rows)
+        with schedules.sessions.begin() as db:
+            db.execute(
+                delete(RolePermission).where(
+                    RolePermission.permission_id.in_(
+                        select(Permission.id).where(Permission.name == "usage.read_all")
+                    )
+                )
+            )
+        with pytest.raises(DomainError) as refused:
+            schedules.combined_week((definition,), week)
+        assert refused.value.code == "PERMISSION_DENIED"
+        with pytest.raises(DomainError) as refused_timeline:
+            schedules.saved_day_timeline(definition, day)
+        assert refused_timeline.value.code == "PERMISSION_DENIED"
     finally:
         event.remove(engine, "before_cursor_execute", only_report)
 

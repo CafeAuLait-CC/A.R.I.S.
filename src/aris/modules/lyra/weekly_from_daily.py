@@ -31,12 +31,13 @@ from aris.modules.lyra.coverage_rollup import (
     roll_up_saved_coverage,
 )
 from aris.modules.lyra.daily_rollup_repo import DailyUsageRollupRepository
+from aris.modules.lyra.daily_session_occupancy import RetainedSessionGap
 from aris.modules.lyra.daily_session_occupancy_service import DailySessionOccupancyService
 from aris.modules.lyra.trace_consumer_schemas import canonical_trace, trace_fingerprint
 from aris.modules.lyra.usage_history import calendar_boundaries
 from aris.modules.lyra.usage_intervals import IntervalContract
 from aris.modules.lyra.window_reader import UsageWindowReader
-from aris.modules.lyra.window_schemas import UsageWindowQuery
+from aris.modules.lyra.window_schemas import MAX_WINDOW_CELLS, UsageWindowQuery, WindowCoverageCell
 from aris.modules.lyra.window_snapshot_repo import UsageWindowRepository
 
 
@@ -67,6 +68,17 @@ class WeeklySourceDay(DailyWindowReference):
     day: date
     rollup_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
     coverage: Literal["complete", "partial", "unknown"]
+
+
+class SavedDailyTimeline(IntervalContract):
+    reference: WeeklySourceDay
+    query: UsageWindowQuery
+    recorded_microseconds: int = Field(ge=0)
+    verified_usage_microseconds: int = Field(ge=0)
+    total_usage_microseconds: int | None = Field(ge=0)
+    intervals: tuple[WindowCoverageCell, ...] = Field(max_length=MAX_WINDOW_CELLS)
+    verified_short_gaps: tuple[RetainedSessionGap, ...] | None = Field(default=None, max_length=64)
+    quota_usage_available: Literal[False] = False
 
 
 class WeeklyRetainedUsage(IntervalContract):
@@ -284,6 +296,46 @@ class WeeklyFromDailyReader:
                 return values
         except DBAPIError as error:
             raise self._failure(error) from None
+
+    def timeline_in_transaction(
+        self,
+        db: Session,
+        actor: ActorContext,
+        query: UsageWindowQuery,
+        source: WeeklySourceDay,
+    ) -> SavedDailyTimeline:
+        self._begin(db, actor, query.node_id)
+        value = (
+            DailyUsageRollupRepository(db)
+            .get(query.node_id, (source.snapshot_id,))
+            .get(source.snapshot_id)
+        )
+        if value is None:
+            raise DomainError("NOT_FOUND", "Daily rollup has expired", 404)
+        if (
+            value.query != query
+            or value.snapshot_fingerprint != source.snapshot_fingerprint
+            or value.fingerprint != source.rollup_fingerprint
+            or value.coverage != source.coverage
+        ):
+            raise DomainError("CONFLICT", "Daily timeline differs from the report", 409)
+        intervals = self.daily_windows.read_in_transaction(
+            db, actor, source.snapshot_id, node_id=query.node_id, mode="node"
+        )
+        if (
+            intervals.query != query
+            or intervals.snapshot_fingerprint != source.snapshot_fingerprint
+        ):
+            raise DomainError("CONFLICT", "Daily interval snapshot differs from the report", 409)
+        return SavedDailyTimeline(
+            reference=source,
+            query=query,
+            recorded_microseconds=value.recorded_microseconds,
+            verified_usage_microseconds=value.verified_usage_microseconds,
+            total_usage_microseconds=value.total_usage_microseconds,
+            intervals=intervals.cells,
+            verified_short_gaps=value.daily_session.retained_gaps if value.daily_session else None,
+        )
 
     def save_day(
         self, actor: ActorContext, query: UsageWindowQuery, source: DailyWindowReference

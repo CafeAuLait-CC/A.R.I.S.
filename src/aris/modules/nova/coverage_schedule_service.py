@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
+from time import monotonic
 from typing import Literal
 from uuid import uuid4, uuid5
 
@@ -19,8 +20,13 @@ from aris.core.db import commit_owned_transaction
 from aris.core.events import DomainEvent, OutboxEntry
 from aris.core.scheduler.schemas import SchedulerContext
 from aris.modules.lyra.coverage_build_service import CoverageBuildService
-from aris.modules.lyra.weekly_from_daily import WeeklyFromDailyQuery, WeeklyFromDailyReader
+from aris.modules.lyra.weekly_from_daily import (
+    SavedDailyTimeline,
+    WeeklyFromDailyQuery,
+    WeeklyFromDailyReader,
+)
 from aris.modules.lyra.window_reader import UsageWindowReader
+from aris.modules.nova.combined_coverage_week import CombinedCoverageWeek, combine_coverage_week
 from aris.modules.nova.coverage_schedule_repo import CoverageScheduleRepository
 from aris.modules.nova.coverage_schedule_schemas import (
     CoveragePeriodResult,
@@ -442,6 +448,105 @@ class CoverageScheduleService:
             pending_days=tuple(day.day for day in report.report.days if day.day not in checked),
         )
         return review, report
+
+    def combined_week(
+        self, definitions: tuple[CoverageScheduleDefinition, ...], week: date
+    ) -> CombinedCoverageWeek:
+        definitions = tuple(
+            CoverageScheduleDefinition.model_validate(value.model_dump(mode="json"))
+            for value in definitions
+        )
+        if (
+            not 1 <= len(definitions) <= 8
+            or week.weekday() != 0
+            or any(not value.daily_rollups for value in definitions)
+            or len({value.calendar.scope.id for value in definitions}) != len(definitions)
+            or len({value.calendar.owner_id for value in definitions}) != 1
+            or len({value.calendar.timezone for value in definitions}) != 1
+        ):
+            raise DomainError(
+                "VALIDATION_ERROR",
+                "Combined weekly report requires one daily plan per node and a shared calendar",
+                422,
+            )
+        deadline = monotonic() + 3
+        try:
+            with self.sessions() as db, db.no_autoflush:
+                if db.get_bind().dialect.name == "postgresql":
+                    db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
+                elif db.get_bind().dialect.name == "sqlite":
+                    db.execute(text("BEGIN"))
+                transaction_budget(db, 100, 1000, 3000)
+                repo = CoverageScheduleRepository(db)
+                reports: dict[str, DailyCoveragePeriodResult | None] = {}
+                for definition in definitions:
+                    self._require(db, definition)
+                    read = None
+                    if week >= definition.calendar.first_week:
+                        try:
+                            read = self._published_daily_week(repo, definition, week)
+                        except DomainError as error:
+                            if error.code != "NOT_FOUND":
+                                raise
+                    reports[definition.calendar.scope.id] = read
+                report = combine_coverage_week(week, definitions[0].calendar.timezone, reports)
+            with self.sessions() as db, db.no_autoflush:
+                if db.get_bind().dialect.name == "postgresql":
+                    db.execute(text("SET TRANSACTION READ ONLY"))
+                transaction_budget(db, 100, 1000, 3000)
+                for definition in definitions:
+                    self._require(db, definition)
+            if monotonic() >= deadline:
+                raise DomainError("RETRYABLE_DATABASE_ERROR", "Combined report timed out", 503)
+            return report
+        except ValueError:
+            raise DomainError(
+                "CONFLICT", "Saved node reports differ from the calendar", 409
+            ) from None
+        except DBAPIError as error:
+            raise self._failure(error) from None
+
+    def saved_day_timeline(
+        self, definition: CoverageScheduleDefinition, day: date
+    ) -> SavedDailyTimeline:
+        definition = CoverageScheduleDefinition.model_validate(definition.model_dump(mode="json"))
+        week = day - timedelta(days=day.weekday())
+        target = next(
+            (target for target in daily_coverage_targets(definition, week) if target.day == day),
+            None,
+        )
+        if target is None:
+            raise DomainError("NOT_FOUND", "Report has no timeline for this day", 404)
+        try:
+            with self.sessions() as db, db.no_autoflush:
+                if db.get_bind().dialect.name == "postgresql":
+                    db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
+                elif db.get_bind().dialect.name == "sqlite":
+                    db.execute(text("BEGIN"))
+                transaction_budget(db, 100, 1000, 3000)
+                self._require(db, definition)
+                report = self._published_daily_week(
+                    CoverageScheduleRepository(db), definition, week
+                )
+                source = next((source for source in report.report.days if source.day == day), None)
+                if source is None or source.snapshot_id != target.snapshot_id:
+                    raise DomainError(
+                        "CONFLICT", "Report and daily timeline references differ", 409
+                    )
+                actor = ActorContext(
+                    actor_id=definition.calendar.owner_id, request_id="saved-day-timeline"
+                )
+                timeline = WeeklyFromDailyReader(
+                    UsageWindowReader(self.sessions)
+                ).timeline_in_transaction(db, actor, target.query, source)
+            with self.sessions() as db, db.no_autoflush:
+                if db.get_bind().dialect.name == "postgresql":
+                    db.execute(text("SET TRANSACTION READ ONLY"))
+                transaction_budget(db, 100, 1000, 1500)
+                self._require(db, definition)
+            return timeline
+        except DBAPIError as error:
+            raise self._failure(error) from None
 
     @staticmethod
     def _event(
