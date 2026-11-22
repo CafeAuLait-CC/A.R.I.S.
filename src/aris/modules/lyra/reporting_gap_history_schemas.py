@@ -33,7 +33,6 @@ class StoredReportingGap(IntervalContract):
         if (
             int(following.seq) != int(previous.seq) + 1
             or int(following.seq) > MAX_ARCHIVE_SEQ
-            or min(observed, received) < timedelta(0)
             or max(observed, received) < threshold
             or self.gap.large_observed_interval != (observed >= threshold)
             or self.gap.large_received_interval != (received >= threshold)

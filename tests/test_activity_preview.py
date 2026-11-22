@@ -150,7 +150,7 @@ def grouped(items, *, rule=RULE, **changes):
 def test_reporting_gaps_separate_clock_order_and_preserve_missing_source_boundary():
     items = []
     for seq in range(1, 132):
-        observed = seq + (180 if seq >= 130 else 0)
+        observed = seq + (180 if seq >= 130 else 0) + (180 if seq == 131 else 0)
         received = seq + (179 if seq >= 129 else 0) - (2 if seq == 131 else 0)
         item = heart(seq, observed)
         items.append(
@@ -168,12 +168,14 @@ def test_reporting_gaps_separate_clock_order_and_preserve_missing_source_boundar
     assert preview.missing_seq == 132 and not result.source_range_complete
     assert result.source_preview_fingerprint == preview.fingerprint
     assert result.pairs_with_uncertain_clock_order == 1
-    delivery, observation = result.gaps
+    delivery, observation, reordered = result.gaps
     assert delivery.previous_report.seq == "128" and delivery.next_report.seq == "129"
     assert delivery.large_received_interval and not delivery.large_observed_interval
     assert observation.previous_report.seq == "129" and observation.next_report.seq == "130"
     assert observation.large_observed_interval and not observation.large_received_interval
-    assert observation.cause == delivery.cause == "unknown"
+    assert reordered.previous_report.seq == "130" and reordered.next_report.seq == "131"
+    assert reordered.large_observed_interval and not reordered.large_received_interval
+    assert observation.cause == delivery.cause == reordered.cause == "unknown"
 
 
 def test_long_fixed_page_chain_groups_samples_without_usage_authority_or_raw_owners():

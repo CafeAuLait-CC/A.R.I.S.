@@ -75,9 +75,11 @@ def reporting_gaps(
     for previous, following in pairwise(reports):
         observed = following.observed_at - previous.observed_at
         received = following.received_at - previous.received_at
-        if int(following.seq) != int(previous.seq) + 1 or min(observed, received) < timedelta(0):
+        if int(following.seq) != int(previous.seq) + 1:
             uncertain += 1
             continue
+        if min(observed, received) < timedelta(0):
+            uncertain += 1
         if observed >= threshold or received >= threshold:
             gaps.append(
                 ReportingGap(

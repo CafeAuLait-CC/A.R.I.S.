@@ -216,6 +216,12 @@ def test_reporting_gap_scan_resumes_across_batches_and_rolls_back_position(
     initial = scan()
     assert (initial.state, initial.through_seq, initial.saved) == ("more", 9, 0)
     with source.sessions.begin() as session:
+        anchor_time = session.scalar(select(AgentMessage.received_at).where(AgentMessage.seq == 9))
+        session.execute(
+            update(AgentMessage)
+            .where(AgentMessage.seq == 10)
+            .values(received_at=anchor_time - timedelta(seconds=1))
+        )
         session.execute(delete(AgentMessage).where(AgentMessage.seq == 9))
 
     def fail(*args):
@@ -238,7 +244,8 @@ def test_reporting_gap_scan_resumes_across_batches_and_rolls_back_position(
     assert scan().through_seq == 10
     (record,) = ReportingGapHistoryService(preview).latest(actor, SOURCE)
     assert (record.gap.previous_report.seq, record.gap.next_report.seq) == ("9", "10")
-    assert record.gap.large_observed_interval
+    assert record.gap.large_observed_interval and not record.gap.large_received_interval
+    assert resumed.uncertain_clock_pairs == 1
     with pytest.raises(DomainError) as wrong_start:
         scan(first_seq=10)
     assert wrong_start.value.code == "CONFLICT"

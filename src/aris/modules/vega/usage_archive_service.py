@@ -68,8 +68,20 @@ def _archived_reporting_reference(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     kind = payload.get("type")
-    if kind is None and row.message_kind == "telemetry" and isinstance(payload.get("gpus"), list):
+    legacy_telemetry = (
+        payload.get("schema_version") == "aris.agent/v1" and isinstance(payload.get("gpus"), list)
+    ) or (
+        payload.get("schema_version") == "aris.telemetry/v2"
+        and isinstance(payload.get("resources"), dict)
+    )
+    if kind is None and row.message_kind == "telemetry" and legacy_telemetry:
         kind = "telemetry"
+    if (
+        kind is None
+        and row.message_kind == "heartbeat"
+        and (payload.get("schema_version") == "aris.heartbeat/v1")
+    ):
+        kind = "heartbeat"
     reference = ArchivedUsageReference(
         agent_id=payload["agent_id"],
         node_id=payload["node_id"],

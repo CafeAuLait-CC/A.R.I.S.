@@ -64,7 +64,8 @@ def test_late_arrivals_include_compute_observed_inside_the_freeze(client):
         assert source.arrivals_outside_freezes_in_transaction(session, (freeze, trimmed)) == (3, 2)
 
 
-def test_reporting_timing_verifies_early_envelopes_without_inferring_usage(client):
+@pytest.mark.parametrize("legacy", ["aris.agent/v1", "aris.telemetry/v2"])
+def test_reporting_timing_verifies_early_envelopes_without_inferring_usage(client, legacy):
     assert put(client, resource_batch()).status_code == 200
     assert beat(client, heartbeat(seq=2)).status_code == 200
     source = archive(client)
@@ -72,14 +73,23 @@ def test_reporting_timing_verifies_early_envelopes_without_inferring_usage(clien
         row = session.scalar(select(AgentMessage).where(AgentMessage.seq == 1))
         payload = dict(row.payload)
         payload.pop("type")
-        resources = payload.pop("resources")
-        payload["gpus"] = resources["gpu"]["gpus"]
-        payload["schema_version"] = "aris.agent/v1"
+        if legacy == "aris.agent/v1":
+            resources = payload.pop("resources")
+            payload["gpus"] = resources["gpu"]["gpus"]
+        payload["schema_version"] = legacy
         row.fingerprint = hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
         row.payload = payload
         row.compute_observed_at = None
+        heartbeat_row = session.scalar(select(AgentMessage).where(AgentMessage.seq == 2))
+        heartbeat_payload = dict(heartbeat_row.payload)
+        heartbeat_payload.pop("type")
+        heartbeat_payload["schema_version"] = "aris.heartbeat/v1"
+        heartbeat_row.fingerprint = hashlib.sha256(
+            json.dumps(heartbeat_payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        heartbeat_row.payload = heartbeat_payload
 
     selected = query(through_seq=2)
     with source.sessions() as session:
