@@ -223,6 +223,12 @@ def main(argv: list[str] | None = None) -> int:
         metavar="YYYY-MM-DD",
         help="Combine saved node reports for one Monday week",
     )
+    mode.add_argument(
+        "--day-timeline",
+        type=date.fromisoformat,
+        metavar="YYYY-MM-DD",
+        help="Read consolidated intervals for a day referenced by a saved weekly report",
+    )
     parser.add_argument(
         "--format",
         choices=("json", "html", "csv"),
@@ -239,7 +245,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     review = any(
-        value is not None for value in (args.verify_day, args.review_week, args.combine_week)
+        value is not None
+        for value in (args.verify_day, args.review_week, args.combine_week, args.day_timeline)
     )
     if review and args.from_daily_week is not None:
         parser.error("Choose one operation on a saved natural week")
@@ -287,6 +294,13 @@ def main(argv: list[str] | None = None) -> int:
         engine = build_engine(config.database_url.get_secret_value())
         check_database(engine)
         schedules = CoverageScheduleService(session_factory(engine), enabled=config.enabled)
+        if args.day_timeline is not None:
+            timelines = [
+                schedules.saved_day_timeline(plan, args.day_timeline).model_dump(mode="json")
+                for plan in config.plans
+            ]
+            print(json.dumps({"state": "saved_day_timelines", "plans": timelines}))
+            return 0
         if args.combine_week is not None:
             report = schedules.combined_week(config.plans, args.combine_week)
             if (

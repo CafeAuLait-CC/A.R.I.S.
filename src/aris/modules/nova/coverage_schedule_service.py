@@ -20,7 +20,11 @@ from aris.core.db import commit_owned_transaction
 from aris.core.events import DomainEvent, OutboxEntry
 from aris.core.scheduler.schemas import SchedulerContext
 from aris.modules.lyra.coverage_build_service import CoverageBuildService
-from aris.modules.lyra.weekly_from_daily import WeeklyFromDailyQuery, WeeklyFromDailyReader
+from aris.modules.lyra.weekly_from_daily import (
+    SavedDailyTimeline,
+    WeeklyFromDailyQuery,
+    WeeklyFromDailyReader,
+)
 from aris.modules.lyra.window_reader import UsageWindowReader
 from aris.modules.nova.combined_coverage_week import CombinedCoverageWeek, combine_coverage_week
 from aris.modules.nova.coverage_schedule_repo import CoverageScheduleRepository
@@ -495,6 +499,48 @@ class CoverageScheduleService:
             raise DomainError(
                 "CONFLICT", "Saved node reports differ from the calendar", 409
             ) from None
+        except DBAPIError as error:
+            raise self._failure(error) from None
+
+    def saved_day_timeline(
+        self, definition: CoverageScheduleDefinition, day: date
+    ) -> SavedDailyTimeline:
+        definition = CoverageScheduleDefinition.model_validate(definition.model_dump(mode="json"))
+        week = day - timedelta(days=day.weekday())
+        target = next(
+            (target for target in daily_coverage_targets(definition, week) if target.day == day),
+            None,
+        )
+        if target is None:
+            raise DomainError("NOT_FOUND", "Report has no timeline for this day", 404)
+        try:
+            with self.sessions() as db, db.no_autoflush:
+                if db.get_bind().dialect.name == "postgresql":
+                    db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
+                elif db.get_bind().dialect.name == "sqlite":
+                    db.execute(text("BEGIN"))
+                transaction_budget(db, 100, 1000, 3000)
+                self._require(db, definition)
+                report = self._published_daily_week(
+                    CoverageScheduleRepository(db), definition, week
+                )
+                source = next((source for source in report.report.days if source.day == day), None)
+                if source is None or source.snapshot_id != target.snapshot_id:
+                    raise DomainError(
+                        "CONFLICT", "Report and daily timeline references differ", 409
+                    )
+                actor = ActorContext(
+                    actor_id=definition.calendar.owner_id, request_id="saved-day-timeline"
+                )
+                timeline = WeeklyFromDailyReader(
+                    UsageWindowReader(self.sessions)
+                ).timeline_in_transaction(db, actor, target.query, source)
+            with self.sessions() as db, db.no_autoflush:
+                if db.get_bind().dialect.name == "postgresql":
+                    db.execute(text("SET TRANSACTION READ ONLY"))
+                transaction_budget(db, 100, 1000, 1500)
+                self._require(db, definition)
+            return timeline
         except DBAPIError as error:
             raise self._failure(error) from None
 

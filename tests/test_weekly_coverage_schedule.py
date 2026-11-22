@@ -469,6 +469,28 @@ def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
         verify_daily_coverage(schedules, definition, day, transaction_timeout_ms=30000, record=True)
     assert schedules.evidence_review(definition, week) == review
 
+    def no_reconstruction(conn, cursor, statement, parameters, context, executemany):
+        assert not any(
+            table in statement.lower()
+            for table in ("agent_messages", "usage_ledger_entries", "usage_coverage_manifests")
+        )
+
+    timeline_engine = schedules.sessions.kw["bind"]
+    event.listen(timeline_engine, "before_cursor_execute", no_reconstruction)
+    try:
+        timeline = schedules.saved_day_timeline(definition, day)
+    finally:
+        event.remove(timeline_engine, "before_cursor_execute", no_reconstruction)
+    assert timeline.reference.day == day
+    assert timeline.reference.rollup_fingerprint == check.rollup_fingerprint
+    assert timeline.reference.snapshot_fingerprint == check.snapshot_fingerprint
+    assert timeline.verified_short_gaps == ()
+    assert (
+        sum(cell.microseconds for cell in timeline.intervals if cell.state == "recorded")
+        == timeline.verified_usage_microseconds
+    )
+    assert any(cell.state in {"unknown", "uncovered"} for cell in timeline.intervals)
+
     owner = str(definition.calendar.owner_id)
     member = str(partition_recording[2][2][2][4][1])
     role = str(uuid4())
@@ -595,6 +617,9 @@ def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
         with pytest.raises(DomainError) as refused:
             schedules.combined_week((definition,), week)
         assert refused.value.code == "PERMISSION_DENIED"
+        with pytest.raises(DomainError) as refused_timeline:
+            schedules.saved_day_timeline(definition, day)
+        assert refused_timeline.value.code == "PERMISSION_DENIED"
     finally:
         event.remove(engine, "before_cursor_execute", only_report)
 
