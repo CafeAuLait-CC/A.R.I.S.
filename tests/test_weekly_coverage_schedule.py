@@ -488,6 +488,9 @@ def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
     for statement in checked_statements:
         assert statement.lstrip().split(maxsplit=1)[0].upper() in ("BEGIN", "SELECT", "SET")
         assert "agent_messages.payload" not in statement.lower()
+    statements_by_day = [sql.lower() for sql in checked_statements if "day_ordinal" in sql.lower()]
+    assert len(statements_by_day) == 1
+    assert statements_by_day[0].count("union all") == 6
     assert retirement.coverage_builds is not None
     assert retirement.coverage_builds.builds_without_saved_windows == 0
     assert not retirement.coverage_builds.truncated

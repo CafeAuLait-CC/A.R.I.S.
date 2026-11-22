@@ -77,11 +77,17 @@ class VegaUsageArchive:
             raise DomainError("CONFLICT", "Archived usage source binding differs", 409)
         return repo.observed_window_storage(query.agent_id, query.node_id, start, end)
 
-    def arrivals_outside_freeze_in_transaction(
-        self, session: Session, freeze: UsageArchiveFreeze
-    ) -> int:
-        freeze = UsageArchiveFreeze.model_validate(freeze.model_dump(mode="json"))
-        return VegaRepository(session).arrivals_outside_freeze(freeze)
+    def arrivals_outside_freezes_in_transaction(
+        self, session: Session, freezes: tuple[UsageArchiveFreeze, ...]
+    ) -> tuple[int, ...]:
+        if len(freezes) > 7 or any(value.source != freezes[0].source for value in freezes[1:]):
+            raise ValueError("Archive arrivals require up to seven days of one source")
+        return VegaRepository(session).arrivals_outside_freezes(
+            tuple(
+                UsageArchiveFreeze.model_validate(value.model_dump(mode="json"))
+                for value in freezes
+            )
+        )
 
     def head(self, query: UsageArchiveHeadQuery) -> UsageArchiveHead:
         try:

@@ -26,7 +26,7 @@ from aris.modules.nova.coverage_schedule_service import CoverageScheduleService
 from aris.modules.nova.daily_coverage_calendar import daily_coverage_targets
 from aris.modules.nova.report_calendar import weekly_report_period
 from aris.modules.vega.storage_schemas import ObservedWindowStorage
-from aris.modules.vega.usage_archive_schemas import UsageArchiveHeadQuery
+from aris.modules.vega.usage_archive_schemas import UsageArchiveFreeze, UsageArchiveHeadQuery
 from aris.modules.vega.usage_archive_service import VegaUsageArchive
 
 READ_SECONDS = 3
@@ -103,7 +103,7 @@ def preview_week_retention(
             )
             builds = coverage_build_dependencies_in_transaction(db, config.node_id)
             targets = {target.day: target for target in daily_coverage_targets(definition, week)}
-            daily_arrivals = []
+            freezes: dict[date, UsageArchiveFreeze] = {}
             for day in report.report.days:
                 target = targets.get(day.day)
                 if target is None or target.snapshot_id != day.snapshot_id:
@@ -113,20 +113,30 @@ def preview_week_retention(
                 )
                 if freeze is not None and freeze.source != scope:
                     raise DomainError("CONFLICT", "Day archive binding differs", 409)
+                if freeze is not None:
+                    freezes[day.day] = freeze
+                if monotonic() >= deadline:
+                    raise DomainError(
+                        "RETRYABLE_DATABASE_ERROR", "Retention preview timed out", 503
+                    )
+            arrival_counts = dict(
+                zip(
+                    freezes,
+                    archive.arrivals_outside_freezes_in_transaction(db, tuple(freezes.values())),
+                    strict=True,
+                )
+            )
+            daily_arrivals = []
+            for day in report.report.days:
+                freeze = freezes.get(day.day)
                 daily_arrivals.append(
                     DailyArrivalPreview(
                         day=day.day,
                         archive_read_at=freeze.read_at if freeze else None,
                         archive_through_seq=freeze.through_seq if freeze else None,
-                        outside_freeze=archive.arrivals_outside_freeze_in_transaction(db, freeze)
-                        if freeze
-                        else None,
+                        outside_freeze=arrival_counts.get(day.day),
                     )
                 )
-                if monotonic() >= deadline:
-                    raise DomainError(
-                        "RETRYABLE_DATABASE_ERROR", "Retention preview timed out", 503
-                    )
             blockers = []
             if review.pending_days:
                 blockers.append("unsatisfied_daily_evidence_checks")

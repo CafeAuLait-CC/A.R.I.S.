@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
 
-from sqlalchemy import String, case, cast, func, or_, select
+from sqlalchemy import String, case, cast, func, literal, or_, select, union_all
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
@@ -313,17 +313,24 @@ class VegaRepository:
             messages=count, late_arrivals=late, first_seq=first, last_seq=last
         )
 
-    def arrivals_outside_freeze(self, freeze: UsageArchiveFreeze) -> int:
+    def arrivals_outside_freezes(self, freezes: tuple[UsageArchiveFreeze, ...]) -> tuple[int, ...]:
+        if not freezes:
+            return ()
         row = AgentMessage
-        return self.session.execute(
-            select(func.count()).where(
-                row.agent_id == freeze.source.agent_id,
-                row.node_id == freeze.source.node_id,
-                row.observed_at >= freeze.start_at,
-                row.observed_at < freeze.end_at,
-                or_(row.received_at > freeze.read_at, row.seq > freeze.through_seq),
+        counts = union_all(
+            *(
+                select(literal(index).label("day_ordinal"), func.count().label("arrivals")).where(
+                    row.agent_id == freeze.source.agent_id,
+                    row.node_id == freeze.source.node_id,
+                    row.observed_at >= freeze.start_at,
+                    row.observed_at < freeze.end_at,
+                    or_(row.received_at > freeze.read_at, row.seq > freeze.through_seq),
+                )
+                for index, freeze in enumerate(freezes)
             )
-        ).scalar_one()
+        )
+        observed = {index: arrivals for index, arrivals in self.session.execute(counts)}
+        return tuple(observed[index] for index in range(len(freezes)))
 
     def message_storage(self, cutoff: datetime | None) -> list[MessageStorage]:
         before = (
