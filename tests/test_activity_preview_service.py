@@ -1,3 +1,4 @@
+import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from threading import Barrier
@@ -6,6 +7,7 @@ import pytest
 from sqlalchemy import delete, event, select, text, update
 from sqlalchemy.exc import IntegrityError
 
+from aris.apps.ops import reporting_gap_history
 from aris.core.access.models import RolePermission
 from aris.core.commands.schemas import ActorContext
 from aris.core.contracts import DomainError
@@ -29,6 +31,28 @@ from tests.test_usage_ledger import counts, ledger
 
 __all__ = ["admin_state", "history_state", "derivations", "ledger", "readings"]
 SOURCE = UsageArchiveHeadQuery(agent_id="agent-a", node_id="node-a")
+
+
+def test_reporting_worker_paused_config_does_not_open_a_database(tmp_path, monkeypatch, capsys):
+    config = tmp_path / "health-worker.json"
+    config.write_text(
+        json.dumps(
+            {
+                "environment": "test",
+                "database_url": "sqlite+pysqlite:///unused-health-worker.sqlite",
+                "actor_id": "6a57b186-efbf-4a5e-940a-737fea84ac34",
+                "sources": [{"source": SOURCE.model_dump(mode="json"), "first_seq": 1}],
+            }
+        )
+    )
+    config.chmod(0o600)
+
+    def unexpected_connection(*args):
+        raise AssertionError("Paused worker connected to a database")
+
+    monkeypatch.setattr(reporting_gap_history, "build_engine", unexpected_connection)
+    assert reporting_gap_history.main(["--config", str(config), "--run"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"state": "paused", "database_accessed": False}
 
 
 @pytest.fixture

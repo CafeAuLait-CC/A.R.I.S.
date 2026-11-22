@@ -2,12 +2,14 @@
 
 import argparse
 import json
+import signal
 import sys
 from pathlib import Path
+from time import monotonic, sleep
 from typing import Literal
 from uuid import UUID
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, model_validator
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -24,11 +26,81 @@ from aris.modules.vega.usage_archive_schemas import MAX_ARCHIVE_SEQ, UsageArchiv
 from aris.modules.vega.usage_archive_service import VegaUsageArchive
 
 
-class GapHistoryConfig(AccessContract):
+class GapHistoryDatabaseConfig(AccessContract):
     environment: Literal["development", "test"] = "development"
     database_url: SecretStr = Field(min_length=1, repr=False)
     actor_id: UUID
+
+
+class GapHistoryConfig(GapHistoryDatabaseConfig):
     source: UsageArchiveHeadQuery
+
+
+class ReportingScanBinding(AccessContract):
+    source: UsageArchiveHeadQuery
+    first_seq: int = Field(ge=1, le=MAX_ARCHIVE_SEQ, strict=True)
+
+
+class GapHistoryWorkerConfig(GapHistoryDatabaseConfig):
+    enabled: bool = Field(default=False, strict=True)
+    sources: tuple[ReportingScanBinding, ...] = Field(min_length=1, max_length=8)
+    poll_seconds: int = Field(default=60, ge=1, le=300, strict=True)
+
+    @model_validator(mode="after")
+    def distinct_nodes(self) -> "GapHistoryWorkerConfig":
+        if len({binding.source.node_id for binding in self.sources}) != len(self.sources):
+            raise ValueError("Choose one reporting source for each node")
+        return self
+
+
+def _run_scans(
+    history: ReportingGapHistoryService,
+    actor: ActorContext,
+    config: GapHistoryWorkerConfig,
+    maximum: int,
+) -> None:
+    stop_requested = False
+
+    def stop(_signal: int, _frame: object) -> None:
+        nonlocal stop_requested
+        stop_requested = True
+
+    for requested in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(requested, stop)
+    next_scan = dict.fromkeys((binding.source.node_id for binding in config.sources), 0.0)
+    previously: dict[str, tuple[str, int | None]] = {}
+    while not stop_requested:
+        for binding in config.sources:
+            if stop_requested:
+                break
+            source = binding.source
+            node = source.node_id
+            if next_scan[node] > monotonic():
+                continue
+            state: tuple[str, int | None]
+            try:
+                status = history.scan_next(
+                    actor, source, first_seq=binding.first_seq, max_messages=maximum
+                )
+            except DomainError as error:
+                state = (error.code, None)
+                next_scan[node] = monotonic() + config.poll_seconds
+                if previously.get(node) != state:
+                    print(
+                        json.dumps({"node_id": node, "state": "failed", "error_code": error.code}),
+                        flush=True,
+                    )
+            else:
+                state = (status.state, status.missing_seq)
+                next_scan[node] = (
+                    monotonic() if status.state == "more" else monotonic() + config.poll_seconds
+                )
+                if status.saved or previously.get(node) != state:
+                    print(status.model_dump_json(), flush=True)
+            previously[node] = state
+        resume = min(next_scan.values())
+        while not stop_requested and monotonic() < resume:
+            sleep(max(0.0, min(0.1, resume - monotonic())))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -37,6 +109,7 @@ def main(argv: list[str] | None = None) -> int:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--capture-through", type=int, metavar="SEQ")
     mode.add_argument("--scan-next", action="store_true")
+    mode.add_argument("--run", action="store_true")
     mode.add_argument("--list", action="store_true")
     parser.add_argument("--first-seq", type=int)
     parser.add_argument("--max-messages", type=int)
@@ -44,7 +117,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--limit", type=int)
     args = parser.parse_args(argv)
     if args.list and args.max_messages is not None:
-        parser.error("--max-messages requires --capture-through or --scan-next")
+        parser.error("--max-messages requires a scan or capture mode")
     if not args.list and (args.before_seq is not None or args.limit is not None):
         parser.error("--before-seq and --limit require --list")
     if args.scan_next != (args.first_seq is not None):
@@ -53,14 +126,21 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--first-seq must be a valid sequence")
     if args.capture_through is not None and not 1 <= args.capture_through <= MAX_ARCHIVE_SEQ:
         parser.error("--capture-through requires a valid committed sequence")
-    maximum = MAX_SAVED_GAPS if args.scan_next else MAX_PREVIEW_MESSAGES
+    maximum = MAX_SAVED_GAPS if args.scan_next or args.run else MAX_PREVIEW_MESSAGES
     if args.max_messages is not None and not 1 <= args.max_messages <= maximum:
         parser.error("--max-messages must be within the archive preview range")
     if args.limit is not None and not 1 <= args.limit <= MAX_SAVED_GAPS:
         parser.error("--limit must be within the history read range")
     engine = None
     try:
-        config = read_private(args.config, GapHistoryConfig)
+        config = (
+            read_private(args.config, GapHistoryWorkerConfig)
+            if args.run
+            else read_private(args.config, GapHistoryConfig)
+        )
+        if isinstance(config, GapHistoryWorkerConfig) and not config.enabled:
+            print(json.dumps({"state": "paused", "database_accessed": False}))
+            return 0
         url = make_url(config.database_url.get_secret_value())
         if url.get_backend_name() == "sqlite" and not Path(url.database or "").is_file():
             raise DomainError(
@@ -73,7 +153,9 @@ def main(argv: list[str] | None = None) -> int:
             ActivityPreviewService(sessions, VegaUsageArchive(sessions))
         )
         actor = ActorContext(actor_id=config.actor_id, request_id="reporting-gap-history")
-        if args.scan_next:
+        if isinstance(config, GapHistoryWorkerConfig):
+            _run_scans(history, actor, config, args.max_messages or MAX_SAVED_GAPS)
+        elif args.scan_next:
             print(
                 history.scan_next(
                     actor,
