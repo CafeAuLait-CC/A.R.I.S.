@@ -13,6 +13,7 @@ from aris.core.time import utc
 from aris.modules.vega.models import (
     AgentMessage,
     AgentMessageReceipt,
+    ArchivedComputeTime,
     GpuDevice,
     Node,
     NodeResource,
@@ -339,9 +340,13 @@ class VegaRepository:
         if not freezes:
             return ()
         row = AgentMessage
+        compute = ArchivedComputeTime
         counts = union_all(
             *(
-                select(literal(index).label("day_ordinal"), func.count().label("arrivals")).where(
+                select(literal(index).label("day_ordinal"), func.count().label("arrivals"))
+                .select_from(row)
+                .outerjoin(compute, compute.message_row_id == row.id)
+                .where(
                     row.agent_id == freeze.source.agent_id,
                     row.node_id == freeze.source.node_id,
                     row.observed_at >= freeze.start_at,
@@ -351,10 +356,10 @@ class VegaRepository:
                         and_(
                             row.message_kind == "telemetry",
                             or_(
-                                row.compute_observed_at.is_(None),
+                                compute.observed_at.is_(None),
                                 and_(
-                                    row.compute_observed_at >= freeze.start_at,
-                                    row.compute_observed_at < freeze.end_at,
+                                    compute.observed_at >= freeze.start_at,
+                                    compute.observed_at < freeze.end_at,
                                 ),
                             ),
                         ),

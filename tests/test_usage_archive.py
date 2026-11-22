@@ -6,12 +6,12 @@ from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import event, select, text
+from sqlalchemy import delete, event, select, text
 from sqlalchemy.orm import sessionmaker
 
 from aris.core.contracts import DomainError
 from aris.core.time import utc
-from aris.modules.vega.models import AgentMessage, AgentMessageReceipt
+from aris.modules.vega.models import AgentMessage, AgentMessageReceipt, ArchivedComputeTime
 from aris.modules.vega.schemas import Heartbeat
 from aris.modules.vega.usage_archive_schemas import (
     ArchivedUsageItem,
@@ -62,6 +62,13 @@ def test_late_arrivals_include_compute_observed_inside_the_freeze(client):
     trimmed = freeze.model_copy(update={"through_seq": 2})
     with source.sessions() as session:
         assert source.arrivals_outside_freezes_in_transaction(session, (freeze, trimmed)) == (3, 2)
+    with source.sessions.begin() as session:
+        row = session.scalar(select(AgentMessage.id).where(AgentMessage.seq == 3))
+        assert session.get(ArchivedComputeTime, row) is not None
+        session.execute(delete(AgentMessage).where(AgentMessage.id == row))
+    with source.sessions() as session:
+        assert session.get(ArchivedComputeTime, row) is None
+        assert source.arrivals_outside_freezes_in_transaction(session, (freeze, trimmed)) == (2, 1)
 
 
 @pytest.mark.parametrize("legacy", ["aris.agent/v1", "aris.telemetry/v2"])
@@ -81,7 +88,9 @@ def test_reporting_timing_verifies_early_envelopes_without_inferring_usage(clien
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
         row.payload = payload
-        row.compute_observed_at = None
+        session.execute(
+            delete(ArchivedComputeTime).where(ArchivedComputeTime.message_row_id == row.id)
+        )
         heartbeat_row = session.scalar(select(AgentMessage).where(AgentMessage.seq == 2))
         heartbeat_payload = dict(heartbeat_row.payload)
         heartbeat_payload.pop("type")

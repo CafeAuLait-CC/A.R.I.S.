@@ -4,7 +4,7 @@ import json
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from aris.core.db import SCHEMA_REVISION
@@ -46,9 +46,7 @@ def test_projection_cleanup_keeps_original_history_fingerprints_and_current_fact
     command.downgrade(config, "0004")
     engine = client.app.state.engine
     with Session(engine) as db:
-        row = db.execute(
-            select(AgentMessage.message_id, AgentMessage.seq, AgentMessage.payload)
-        ).one()
+        row = db.scalars(select(AgentMessage)).one()
         # Simulate a message already archived by the previous development Collector.
         archived = {**row.payload, "schema_version": "aris.telemetry/v2"}
         archived.pop("type")
@@ -56,16 +54,12 @@ def test_projection_cleanup_keeps_original_history_fingerprints_and_current_fact
             **archived["resources"],
             "schema_version": "aris.resource-observation/v1",
         }
-        fingerprint = hashlib.sha256(
+        row.payload = archived
+        row.fingerprint = hashlib.sha256(
             json.dumps(archived, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
-        db.execute(
-            update(AgentMessage)
-            .where(AgentMessage.message_id == row.message_id)
-            .values(payload=archived, fingerprint=fingerprint)
-        )
         db.commit()
-        before = (row.message_id, row.seq, fingerprint, archived)
+        before = (row.message_id, row.seq, row.fingerprint, row.payload)
         projection = db.scalars(select(NodeResource)).one()
         prior_projection = projection.observation.copy()
         seq = projection.seq

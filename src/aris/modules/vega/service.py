@@ -13,7 +13,13 @@ from aris.core.events import DomainEvent, OutboxEntry
 from aris.core.time import utc
 from aris.modules.vega.disk_schemas import DISK_STALE_AFTER_SECONDS
 from aris.modules.vega.gpu_activity import gpu_activity
-from aris.modules.vega.models import AgentMessage, GpuDevice, Node, NodeResource
+from aris.modules.vega.models import (
+    AgentMessage,
+    ArchivedComputeTime,
+    GpuDevice,
+    Node,
+    NodeResource,
+)
 from aris.modules.vega.repo import VegaRepository
 from aris.modules.vega.reports import AgentReport
 from aris.modules.vega.resource_schemas import (
@@ -113,8 +119,8 @@ class VegaService:
                     message_kind=kind,
                     fingerprint=fingerprint,
                     observed_at=utc(batch.observed_at),
-                    compute_observed_at=(
-                        batch.resources.compute.observed_at
+                    compute_time=(
+                        ArchivedComputeTime(observed_at=batch.resources.compute.observed_at)
                         if isinstance(batch, ResourceTelemetryBatch)
                         else None
                     ),

@@ -7,14 +7,22 @@ revision = "0050"
 down_revision = "0049"
 branch_labels = None
 depends_on = None
-TABLE = "agent_messages"
-COLUMN = "compute_observed_at"
+TABLE = "agent_message_compute_times"
 
 
 def upgrade() -> None:
-    op.add_column(TABLE, sa.Column(COLUMN, sa.DateTime(timezone=True), nullable=True))
+    op.create_table(
+        TABLE,
+        sa.Column(
+            "message_row_id",
+            sa.String(36),
+            sa.ForeignKey("agent_messages.id", ondelete="CASCADE"),
+            primary_key=True,
+        ),
+        sa.Column("observed_at", sa.DateTime(timezone=True), nullable=False),
+    )
     messages = sa.table(
-        TABLE, sa.column("payload", sa.JSON), sa.column("message_kind"), sa.column(COLUMN)
+        "agent_messages", sa.column("id"), sa.column("payload", sa.JSON), sa.column("message_kind")
     )
     timestamp = messages.c.payload["resources"]["compute"]["observed_at"].as_string()
     if op.get_bind().dialect.name == "postgresql":
@@ -34,10 +42,16 @@ def upgrade() -> None:
             ),
             else_=None,
         )
+    times = sa.table(TABLE, sa.column("message_row_id"), sa.column("observed_at"))
     op.execute(
-        messages.update().where(messages.c.message_kind == "telemetry").values({COLUMN: value})
+        times.insert().from_select(
+            ("message_row_id", "observed_at"),
+            sa.select(messages.c.id, value).where(
+                messages.c.message_kind == "telemetry", value.is_not(None)
+            ),
+        )
     )
 
 
 def downgrade() -> None:
-    op.drop_column(TABLE, COLUMN)
+    op.drop_table(TABLE)

@@ -496,15 +496,7 @@ def test_identity_migration_is_additive_empty_and_preserves_existing_facts_at_he
         with engine.connect() as connection:
             return {
                 table: sorted(
-                    json.dumps(
-                        {
-                            key: value
-                            for key, value in row._mapping.items()
-                            if key != "compute_observed_at"
-                        },
-                        sort_keys=True,
-                        default=str,
-                    )
+                    json.dumps(dict(row._mapping), sort_keys=True, default=str)
                     for row in connection.execute(text('SELECT * FROM "' + table + '"'))
                 )
                 for table in legacy
@@ -512,7 +504,9 @@ def test_identity_migration_is_additive_empty_and_preserves_existing_facts_at_he
 
     frozen = facts()
     with engine.connect() as connection:
-        component_time = connection.scalar(text("SELECT compute_observed_at FROM agent_messages"))
+        component_time = connection.scalar(
+            text("SELECT observed_at FROM agent_message_compute_times")
+        )
         assert component_time is not None
         for table in (
             "users",
@@ -533,7 +527,7 @@ def test_identity_migration_is_additive_empty_and_preserves_existing_facts_at_he
     assert client.get("/health/ready").json()["schema_revision"] == SCHEMA_REVISION
     assert facts() == frozen
     with engine.connect() as connection:
-        assert connection.scalar(text("SELECT compute_observed_at FROM agent_messages")) == (
+        assert connection.scalar(text("SELECT observed_at FROM agent_message_compute_times")) == (
             component_time
         )
     assert post(client, original).json()["duplicate"] is True
