@@ -465,7 +465,9 @@ class CoverageScheduleService:
         try:
             with self.sessions() as db, db.no_autoflush:
                 if db.get_bind().dialect.name == "postgresql":
-                    db.execute(text("SET TRANSACTION READ ONLY"))
+                    db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
+                elif db.get_bind().dialect.name == "sqlite":
+                    db.execute(text("BEGIN"))
                 transaction_budget(db, 100, 1000, 3000)
                 repo = CoverageScheduleRepository(db)
                 reports: dict[str, DailyCoveragePeriodResult | None] = {}
@@ -480,11 +482,15 @@ class CoverageScheduleService:
                                 raise
                     reports[definition.calendar.scope.id] = read
                 report = combine_coverage_week(week, definitions[0].calendar.timezone, reports)
+            with self.sessions() as db, db.no_autoflush:
+                if db.get_bind().dialect.name == "postgresql":
+                    db.execute(text("SET TRANSACTION READ ONLY"))
+                transaction_budget(db, 100, 1000, 3000)
                 for definition in definitions:
                     self._require(db, definition)
-                if monotonic() >= deadline:
-                    raise DomainError("RETRYABLE_DATABASE_ERROR", "Combined report timed out", 503)
-                return report
+            if monotonic() >= deadline:
+                raise DomainError("RETRYABLE_DATABASE_ERROR", "Combined report timed out", 503)
+            return report
         except ValueError:
             raise DomainError(
                 "CONFLICT", "Saved node reports differ from the calendar", 409

@@ -25,6 +25,7 @@ from aris.core.access.schemas import AccessContract
 from aris.core.contracts import DomainError
 from aris.core.db import build_engine, check_database, session_factory
 from aris.core.scheduler.schemas import SchedulerContext
+from aris.interfaces.usage.combined_week_export import combined_week_csv, combined_week_html
 from aris.modules.nova.coverage_schedule_schemas import CoverageScheduleDefinition
 from aris.modules.nova.coverage_schedule_service import CoverageScheduleService
 from aris.modules.nova.daily_coverage_calendar import daily_coverage_targets
@@ -223,6 +224,15 @@ def main(argv: list[str] | None = None) -> int:
         help="Combine saved node reports for one Monday week",
     )
     parser.add_argument(
+        "--format",
+        choices=("json", "html", "csv"),
+        help="Output format for --combine-week (default: json)",
+    )
+    parser.add_argument(
+        "--expected-combined-fingerprint",
+        help="Require an exact previously viewed combined report",
+    )
+    parser.add_argument(
         "--record-verification",
         action="store_true",
         help="Save the successful check of --verify-day",
@@ -235,6 +245,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("Choose one operation on a saved natural week")
     if args.record_verification and args.verify_day is None:
         parser.error("--record-verification requires --verify-day")
+    if args.combine_week is None and (
+        args.format is not None or args.expected_combined_fingerprint is not None
+    ):
+        parser.error("--format and --expected-combined-fingerprint require --combine-week")
     engine = None
     stop_requested = False
 
@@ -275,7 +289,17 @@ def main(argv: list[str] | None = None) -> int:
         schedules = CoverageScheduleService(session_factory(engine), enabled=config.enabled)
         if args.combine_week is not None:
             report = schedules.combined_week(config.plans, args.combine_week)
-            print(json.dumps(report.model_dump(mode="json")))
+            if (
+                args.expected_combined_fingerprint is not None
+                and args.expected_combined_fingerprint != report.fingerprint
+            ):
+                raise DomainError("CONFLICT", "Combined weekly report has changed", 409)
+            if args.format == "html":
+                print(combined_week_html(report))
+            elif args.format == "csv":
+                print(combined_week_csv(report), end="")
+            else:
+                print(json.dumps(report.model_dump(mode="json")))
             return 0
         if args.verify_day is not None:
             print(

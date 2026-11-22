@@ -35,6 +35,7 @@ from aris.core.contracts import DomainError
 from aris.core.scheduler.schemas import SchedulerContext
 from aris.interfaces.commands.auth import BoundSubjectTokens, UserTokenBinding
 from aris.interfaces.slack.config import SlackSettings
+from aris.interfaces.usage.combined_week_export import combined_week_csv, combined_week_html
 from aris.interfaces.usage.service import UsageHistorySurface
 from aris.modules.lyra.coverage_schemas import ProcessingCoverageConfiguration
 from aris.modules.lyra.ledger_repo import UsageLedgerRepository
@@ -539,6 +540,21 @@ def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
         assert partial == combine_coverage_week(
             week, definition.calendar.timezone, {"node-a": original, "node-b": None}
         )
+        combined_rows = list(
+            csv.DictReader(io.StringIO(combined_week_csv(partial).lstrip("\ufeff")))
+        )
+        assert len(combined_rows) == 3
+        assert combined_rows[0]["scope"] == "lab"
+        assert combined_rows[0]["total_usage_microseconds"] == ""
+        assert combined_rows[1]["node_report_fingerprint"] == original.fingerprint
+        assert combined_rows[2]["coverage"] == "missing"
+        assert combined_rows[2]["verified_usage_microseconds"] == ""
+        assert all(row["combined_fingerprint"] == partial.fingerprint for row in combined_rows)
+        assert all(None not in row and None not in row.values() for row in combined_rows)
+        combined_html = combined_week_html(partial)
+        assert partial.fingerprint in combined_html
+        assert "缺少周报" in combined_html and "总用量 未知" in combined_html
+        assert owner not in combined_html and "<script" not in combined_html
         with TestClient(app) as client:
             for route in ("read", "report", "csv"):
                 path = "/internal/usage/weekly/" + route
