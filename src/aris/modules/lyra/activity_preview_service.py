@@ -23,6 +23,7 @@ from aris.modules.lyra.hardware_preview import (
     sampling_incidents,
     summarize_gpu_samples,
 )
+from aris.modules.lyra.reporting_gaps import archived_reporting_gaps
 from aris.modules.vega.gpu_hardware_schemas import GpuHardwareBatch, GpuHardwareBatchQuery
 from aris.modules.vega.gpu_hardware_service import VegaGpuHardwareObservations
 from aris.modules.vega.usage_archive_schemas import (
@@ -189,6 +190,9 @@ class ActivityPreviewService:
                             preview, tuple(pages), tuple(hardware_batches)
                         ),
                         sampling_incidents=sampling_incidents(preview, tuple(hardware_batches))
+                        if include_incidents
+                        else None,
+                        reporting=archived_reporting_gaps(preview, tuple(pages))
                         if include_incidents
                         else None,
                     )

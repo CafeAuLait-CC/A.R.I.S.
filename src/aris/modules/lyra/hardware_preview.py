@@ -14,6 +14,7 @@ from aris.modules.lyra.activity_preview import (
     MAX_PREVIEW_GROUPS,
     ActivityPreview,
 )
+from aris.modules.lyra.reporting_gaps import ReportingGapPreview
 from aris.modules.lyra.usage_intervals import IntervalContract
 from aris.modules.vega.gpu_hardware_schemas import GpuHardwareBatch, GpuHardwareObservation
 from aris.modules.vega.schemas import GpuSample
@@ -198,11 +199,17 @@ class ActivityHardwarePreview(IntervalContract):
     preview: ActivityPreview
     hardware: GpuHardwareSummary
     sampling_incidents: tuple[GpuSamplingIncident, ...] | None = None
+    reporting: ReportingGapPreview | None = None
 
     @model_validator(mode="after")
     def same_source(self) -> "ActivityHardwarePreview":
         if self.hardware.source_preview_fingerprint != self.preview.fingerprint:
             raise ValueError("hardware statistics refer to another archive preview")
+        if self.reporting is not None and (
+            self.reporting.source_preview_fingerprint != self.preview.fingerprint
+            or self.reporting.source_range_complete != self.preview.range_complete
+        ):
+            raise ValueError("reporting gaps refer to another archive preview")
         return self
 
 

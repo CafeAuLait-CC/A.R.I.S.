@@ -18,6 +18,7 @@ from aris.modules.lyra.hardware_preview import (
     GpuSamplingIncident,
     SampleStatistic,
 )
+from aris.modules.lyra.reporting_gaps import ReportingGapPreview
 from aris.modules.vega.usage_archive_schemas import ArchivedUsageReference, UsageArchiveHeadQuery
 
 if TYPE_CHECKING:
@@ -189,6 +190,7 @@ class ActivityPreviewView(AccessContract):
     source_result_fingerprint: str
     hardware: GpuHardwareSummaryView | None = None
     sampling_incidents: tuple[GpuSamplingIncident, ...] | None = None
+    reporting: ReportingGapPreview | None = None
 
 
 def statistic_view(value: SampleStatistic) -> SampleStatisticView:
@@ -343,6 +345,7 @@ def activity_usage(
                 update={
                     "hardware": hardware_view(combined.hardware),
                     "sampling_incidents": combined.sampling_incidents,
+                    "reporting": combined.reporting,
                 }
             )
         else:
