@@ -40,6 +40,7 @@ from aris.modules.lyra.coverage_schemas import ProcessingCoverageConfiguration
 from aris.modules.lyra.ledger_repo import UsageLedgerRepository
 from aris.modules.lyra.usage_history_service import UsageHistoryService
 from aris.modules.lyra.window_reader import UsageWindowReader
+from aris.modules.nova.combined_coverage_week import combine_coverage_week
 from aris.modules.nova.coverage_schedule_models import (
     CoveragePeriodResultRow,
     CoverageScheduleRow,
@@ -50,6 +51,7 @@ from aris.modules.nova.coverage_schedule_repo import CoverageScheduleRepository
 from aris.modules.nova.coverage_schedule_schemas import (
     CoverageScheduleDefinition,
     DailyCoverageEvidence,
+    DailyCoveragePeriodResult,
 )
 from aris.modules.nova.coverage_schedule_service import CoverageScheduleService
 from aris.modules.nova.daily_coverage_calendar import daily_coverage_targets
@@ -522,6 +524,21 @@ def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
     event.listen(engine, "before_cursor_execute", only_report)
     payload = {"id": result["id"], "source": "daily_rollups", "node_id": "node-a"}
     try:
+        combined = schedules.combined_week((definition,), week)
+        assert (
+            combined.verified_usage_microseconds == result["report"]["verified_usage_microseconds"]
+        )
+        original = DailyCoveragePeriodResult.model_validate(result)
+        partial = combine_coverage_week(
+            week, definition.calendar.timezone, {"node-b": None, "node-a": original}
+        )
+        assert partial.verified_usage_microseconds == combined.verified_usage_microseconds
+        assert partial.total_usage_microseconds is None
+        assert partial.nodes[-1].coverage == "missing"
+        assert partial.nodes[-1].verified_usage_microseconds is None
+        assert partial == combine_coverage_week(
+            week, definition.calendar.timezone, {"node-a": original, "node-b": None}
+        )
         with TestClient(app) as client:
             for route in ("read", "report", "csv"):
                 path = "/internal/usage/weekly/" + route
@@ -551,6 +568,17 @@ def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
                     rows = list(csv.DictReader(io.StringIO(visible.content.decode("utf-8-sig"))))
                     assert any(row["owner_id"] == owner for row in rows)
                     assert all(None not in row and None not in row.values() for row in rows)
+        with schedules.sessions.begin() as db:
+            db.execute(
+                delete(RolePermission).where(
+                    RolePermission.permission_id.in_(
+                        select(Permission.id).where(Permission.name == "usage.read_all")
+                    )
+                )
+            )
+        with pytest.raises(DomainError) as refused:
+            schedules.combined_week((definition,), week)
+        assert refused.value.code == "PERMISSION_DENIED"
     finally:
         event.remove(engine, "before_cursor_execute", only_report)
 
