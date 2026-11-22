@@ -31,7 +31,7 @@ from aris.apps.composition.lyra_coverage import (
     LyraCoverageRuntimeConfig,
     build_lyra_coverage_components,
 )
-from aris.apps.composition.weekly_retention import preview_week_retention
+from aris.apps.composition.weekly_retention import _health_checked_prefix, preview_week_retention
 from aris.apps.ops.weekly_coverage import WeeklyCoverageConfig, main, run_tick
 from aris.core.access.models import ExternalIdentity, Permission, Role, RoleBinding, RolePermission
 from aris.core.access.schemas import ExternalSubject
@@ -45,6 +45,8 @@ from aris.interfaces.usage.combined_week_export import combined_week_csv, combin
 from aris.interfaces.usage.service import UsageHistorySurface
 from aris.modules.lyra.coverage_schemas import ProcessingCoverageConfiguration
 from aris.modules.lyra.ledger_repo import UsageLedgerRepository
+from aris.modules.lyra.reporting_gap_history_schemas import ReportingGapScanPosition
+from aris.modules.lyra.reporting_gaps import ReportingPoint
 from aris.modules.lyra.usage_history_service import UsageHistoryService
 from aris.modules.lyra.window_reader import UsageWindowReader
 from aris.modules.nova.combined_coverage_week import combine_coverage_week
@@ -65,6 +67,8 @@ from aris.modules.nova.daily_coverage_calendar import daily_coverage_targets
 from aris.modules.nova.report_calendar import WeeklyReportPlan, weekly_report_period
 from aris.modules.nova.weekly_coverage import weekly_coverage_target
 from aris.modules.vega.models import AgentMessage
+from aris.modules.vega.storage_schemas import RetentionPrefixPreview
+from aris.modules.vega.usage_archive_schemas import UsageArchiveHeadQuery
 from tests.test_heartbeat import beat, heartbeat
 from tests.test_historical_usage_facts import owner, ownership
 from tests.test_recorded_usage import reading_service
@@ -254,6 +258,39 @@ def drain(schedules, config):
         if item["state"] == "snapshot_saved":
             return item["result"]
     pytest.fail("finite weekly steps did not finish")
+
+
+def test_reporting_scan_preserves_the_earliest_unverified_health_pair():
+    prefix = RetentionPrefixPreview(
+        first_seq=8, through_seq=12, stop_reason="protected_sequence", stopped_before_seq=13
+    )
+
+    def scanned(first, last):
+        observed = datetime(2026, 1, 1, tzinfo=UTC)
+        draft = ReportingGapScanPosition.model_construct(
+            source=UsageArchiveHeadQuery(agent_id="agent-a", node_id="node-a"),
+            first_seq=first,
+            last_report=ReportingPoint(
+                seq=str(last),
+                kind="heartbeat",
+                fingerprint="1" * 64,
+                observed_at=observed,
+                received_at=observed,
+            ),
+            uncertain_clock_pairs=0,
+            fingerprint="0" * 64,
+        )
+        return ReportingGapScanPosition.model_validate(
+            {**draft.model_dump(), "fingerprint": draft.content_fingerprint()}
+        )
+
+    absent = _health_checked_prefix(prefix, None)
+    assert absent.first_seq is None and absent.stopped_before_seq == 8
+    late = _health_checked_prefix(prefix, scanned(8, 13))
+    assert late == absent
+    partial = _health_checked_prefix(prefix, scanned(7, 10))
+    assert (partial.first_seq, partial.through_seq, partial.stopped_before_seq) == (8, 10, 11)
+    assert _health_checked_prefix(prefix, scanned(1, 12)) == prefix
 
 
 def test_disabled_validate_and_status_do_not_create_plans_or_databases(

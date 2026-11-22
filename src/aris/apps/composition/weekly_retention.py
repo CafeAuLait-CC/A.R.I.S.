@@ -10,10 +10,12 @@ from sqlalchemy.exc import DBAPIError
 
 from aris.core.commands.budgets import database_failure, transaction_budget
 from aris.core.contracts import Contract, DomainError
+from aris.modules.lyra.reporting_gap_history_schemas import ReportingGapScanPosition
 from aris.modules.lyra.retention_service import (
     CoverageBuildDependencies,
     TraceRetentionBoundary,
     coverage_build_dependencies_in_transaction,
+    reporting_history_position_in_transaction,
     retained_day_archive_boundary_in_transaction,
     trace_retention_boundaries_in_transaction,
 )
@@ -51,6 +53,8 @@ class WeeklyRetentionPreview(Contract):
     daily_arrivals: tuple[DailyArrivalPreview, ...] = Field(default=(), max_length=7)
     known_consumers: tuple[TraceRetentionBoundary, ...] = ()
     coverage_builds: CoverageBuildDependencies | None = None
+    reporting_history_start_seq: int | None = None
+    reporting_history_through_seq: int | None = None
     payload_prefix: RetentionPrefixPreview | None = None
     blockers: tuple[str, ...]
     remaining_checks: tuple[str, ...] = (
@@ -59,6 +63,29 @@ class WeeklyRetentionPreview(Contract):
         "other_archive_consumers",
     )
     deletion_enabled: Literal[False] = False
+
+
+def _health_checked_prefix(
+    prefix: RetentionPrefixPreview, history: ReportingGapScanPosition | None
+) -> RetentionPrefixPreview:
+    first, last = prefix.first_seq, prefix.through_seq
+    if first is None or last is None:
+        return prefix
+    # The outgoing pair can still be scanned from the durable final point.
+    # The incoming pair needs its predecessor to have been scanned already.
+    through = (
+        int(history.last_report.seq)
+        if history is not None and history.first_seq <= max(1, first - 1)
+        else first - 1
+    )
+    if through >= last:
+        return prefix
+    return RetentionPrefixPreview(
+        first_seq=first if through >= first else None,
+        through_seq=through if through >= first else None,
+        stop_reason="protected_sequence",
+        stopped_before_seq=max(first, through + 1),
+    )
 
 
 def preview_week_retention(
@@ -104,6 +131,7 @@ def preview_week_retention(
             observations = archive.observed_window_storage_in_transaction(
                 db, scope, period.start_at, period.end_at
             )
+            reporting_history = reporting_history_position_in_transaction(db, scope)
             builds = coverage_build_dependencies_in_transaction(db, config.node_id)
             targets = {target.day: target for target in daily_coverage_targets(definition, week)}
             freezes: dict[date, UsageArchiveFreeze] = {}
@@ -176,6 +204,10 @@ def preview_week_retention(
                 prefix = archive.retention_prefix_in_transaction(
                     db, scope, start=period.start_at, end=boundary, through_seq=through
                 )
+                checked_prefix = _health_checked_prefix(prefix, reporting_history)
+                if checked_prefix != prefix:
+                    blockers.append("reporting_history_not_scanned")
+                    prefix = checked_prefix
             if last is not None:
                 if any(last > consumer.processed_through_seq for consumer in consumers):
                     blockers.append("unprocessed_packets")
@@ -206,6 +238,12 @@ def preview_week_retention(
                     "daily_arrivals": tuple(daily_arrivals),
                     "known_consumers": consumers,
                     "coverage_builds": builds,
+                    "reporting_history_start_seq": (
+                        reporting_history.first_seq if reporting_history else None
+                    ),
+                    "reporting_history_through_seq": (
+                        int(reporting_history.last_report.seq) if reporting_history else None
+                    ),
                     "payload_prefix": prefix,
                     "blockers": tuple(blockers),
                 }
