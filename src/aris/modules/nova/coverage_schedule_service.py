@@ -414,13 +414,14 @@ class CoverageScheduleService:
                 if db.get_bind().dialect.name == "postgresql":
                     db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
                 transaction_budget(db, 100, 1000, 3000)
-                return self.evidence_review_in_transaction(db, definition, week)
+                review, _ = self.evidence_review_in_transaction(db, definition, week)
+                return review
         except DBAPIError as error:
             raise self._failure(error) from None
 
     def evidence_review_in_transaction(
         self, db: Session, definition: CoverageScheduleDefinition, week: date
-    ) -> WeeklyEvidenceReview:
+    ) -> tuple[WeeklyEvidenceReview, DailyCoveragePeriodResult]:
         definition = CoverageScheduleDefinition.model_validate(definition.model_dump(mode="json"))
         self._require(db, definition)
         repo = CoverageScheduleRepository(db)
@@ -433,13 +434,14 @@ class CoverageScheduleService:
             raise DomainError("CONFLICT", "Saved evidence checks are inconsistent", 409)
         checked = {check.day for check in checks}
         self._require(db, definition)
-        return WeeklyEvidenceReview(
+        review = WeeklyEvidenceReview(
             report_id=report.id,
             report_fingerprint=report.fingerprint,
             week=week,
             checked_days=checks,
             pending_days=tuple(day.day for day in report.report.days if day.day not in checked),
         )
+        return review, report
 
     @staticmethod
     def _event(

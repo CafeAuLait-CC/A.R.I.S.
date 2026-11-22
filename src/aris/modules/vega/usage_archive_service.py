@@ -18,6 +18,7 @@ from aris.modules.vega.usage_archive_schemas import (
     MAX_ARCHIVE_SOURCE_CHARACTERS,
     ArchivedUsageItem,
     ArchivedUsageReference,
+    UsageArchiveFreeze,
     UsageArchiveHead,
     UsageArchiveHeadQuery,
     UsageArchivePage,
@@ -75,6 +76,12 @@ class VegaUsageArchive:
         if repo.usage_source_node(query.agent_id) != query.node_id:
             raise DomainError("CONFLICT", "Archived usage source binding differs", 409)
         return repo.observed_window_storage(query.agent_id, query.node_id, start, end)
+
+    def arrivals_outside_freeze_in_transaction(
+        self, session: Session, freeze: UsageArchiveFreeze
+    ) -> int:
+        freeze = UsageArchiveFreeze.model_validate(freeze.model_dump(mode="json"))
+        return VegaRepository(session).arrivals_outside_freeze(freeze)
 
     def head(self, query: UsageArchiveHeadQuery) -> UsageArchiveHead:
         try:

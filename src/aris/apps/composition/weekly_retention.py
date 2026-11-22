@@ -4,7 +4,7 @@ from datetime import date, timedelta
 from time import monotonic
 from typing import Literal
 
-from pydantic import AwareDatetime
+from pydantic import AwareDatetime, Field
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
@@ -12,6 +12,7 @@ from aris.core.commands.budgets import database_failure, transaction_budget
 from aris.core.contracts import Contract, DomainError
 from aris.modules.lyra.retention_service import (
     TraceRetentionBoundary,
+    retained_day_archive_boundary_in_transaction,
     trace_retention_boundaries_in_transaction,
 )
 from aris.modules.lyra.session_occupancy import SessionOccupancyRule
@@ -20,12 +21,20 @@ from aris.modules.nova.coverage_schedule_schemas import (
     WeeklyEvidenceReview,
 )
 from aris.modules.nova.coverage_schedule_service import CoverageScheduleService
+from aris.modules.nova.daily_coverage_calendar import daily_coverage_targets
 from aris.modules.nova.report_calendar import weekly_report_period
 from aris.modules.vega.storage_schemas import ObservedWindowStorage
 from aris.modules.vega.usage_archive_schemas import UsageArchiveHeadQuery
 from aris.modules.vega.usage_archive_service import VegaUsageArchive
 
 READ_SECONDS = 3
+
+
+class DailyArrivalPreview(Contract):
+    day: date
+    archive_read_at: AwareDatetime | None
+    archive_through_seq: int | None
+    outside_freeze: int | None
 
 
 class WeeklyRetentionPreview(Contract):
@@ -35,6 +44,7 @@ class WeeklyRetentionPreview(Contract):
     end_at: AwareDatetime
     reviewed: WeeklyEvidenceReview | None = None
     observations: ObservedWindowStorage | None = None
+    daily_arrivals: tuple[DailyArrivalPreview, ...] = Field(default=(), max_length=7)
     known_consumers: tuple[TraceRetentionBoundary, ...] = ()
     blockers: tuple[str, ...]
     remaining_checks: tuple[str, ...] = (
@@ -74,7 +84,7 @@ def preview_week_retention(
                 db.execute(text("BEGIN"))
             transaction_budget(db, 100, 1000, READ_SECONDS * 1000)
             try:
-                review = schedules.evidence_review_in_transaction(db, definition, week)
+                review, report = schedules.evidence_review_in_transaction(db, definition, week)
             except DomainError as error:
                 if error.code != "NOT_FOUND":
                     raise
@@ -88,6 +98,31 @@ def preview_week_retention(
             observations = archive.observed_window_storage_in_transaction(
                 db, scope, period.start_at, period.end_at
             )
+            targets = {target.day: target for target in daily_coverage_targets(definition, week)}
+            daily_arrivals = []
+            for day in report.report.days:
+                target = targets.get(day.day)
+                if target is None or target.snapshot_id != day.snapshot_id:
+                    raise DomainError("CONFLICT", "Report day differs from its fixed target", 409)
+                freeze = retained_day_archive_boundary_in_transaction(
+                    db, target.query, day.snapshot_id, day.snapshot_fingerprint
+                )
+                if freeze is not None and freeze.source != scope:
+                    raise DomainError("CONFLICT", "Day archive binding differs", 409)
+                daily_arrivals.append(
+                    DailyArrivalPreview(
+                        day=day.day,
+                        archive_read_at=freeze.read_at if freeze else None,
+                        archive_through_seq=freeze.through_seq if freeze else None,
+                        outside_freeze=archive.arrivals_outside_freeze_in_transaction(db, freeze)
+                        if freeze
+                        else None,
+                    )
+                )
+                if monotonic() >= deadline:
+                    raise DomainError(
+                        "RETRYABLE_DATABASE_ERROR", "Retention preview timed out", 503
+                    )
             blockers = []
             if review.pending_days:
                 blockers.append("unsatisfied_daily_evidence_checks")
@@ -95,6 +130,10 @@ def preview_week_retention(
                 blockers.append("missing_recording_consumer")
             if observations.late_arrivals:
                 blockers.append("late_arrivals_need_review")
+            if any(day.outside_freeze is None for day in daily_arrivals):
+                blockers.append("daily_archive_boundaries_missing")
+            if any(day.outside_freeze for day in daily_arrivals):
+                blockers.append("packets_outside_daily_freeze")
             last = observations.last_seq
             if last is not None:
                 if any(last > consumer.processed_through_seq for consumer in consumers):
@@ -117,6 +156,7 @@ def preview_week_retention(
                 update={
                     "reviewed": review,
                     "observations": observations,
+                    "daily_arrivals": tuple(daily_arrivals),
                     "known_consumers": consumers,
                     "blockers": tuple(blockers),
                 }

@@ -477,6 +477,9 @@ def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
     }
     assert "unsatisfied_daily_evidence_checks" in retirement.blockers
     assert "future_report_after_retirement" in retirement.remaining_checks
+    assert len(retirement.daily_arrivals) == 7
+    selected_day = next(value for value in retirement.daily_arrivals if value.day == day)
+    assert selected_day.outside_freeze == 0 and selected_day.archive_read_at is not None
     for statement in checked_statements:
         assert statement.lstrip().split(maxsplit=1)[0].upper() in ("BEGIN", "SELECT", "SET")
         assert "agent_messages.payload" not in statement.lower()
@@ -499,6 +502,17 @@ def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
     assert late_retirement.observations.messages == retirement.observations.messages
     assert late_retirement.observations.late_arrivals == retirement.observations.late_arrivals + 1
     assert "late_arrivals_need_review" in late_retirement.blockers
+    with schedules.sessions.begin() as db:
+        db.execute(
+            update(AgentMessage)
+            .where(AgentMessage.id == observation)
+            .values(received_at=selected_day.archive_read_at + timedelta(microseconds=1))
+        )
+    outside = preview_week_retention(schedules, definition, week)
+    changed_day = next(value for value in outside.daily_arrivals if value.day == day)
+    assert changed_day.outside_freeze == 1
+    assert "packets_outside_daily_freeze" in outside.blockers
+    assert outside.reviewed == review and not outside.deletion_enabled
     # Simulate expired evidence in this test database only.
     with schedules.sessions.begin() as db:
         db.execute(delete(AgentMessage).where(AgentMessage.id == observation))

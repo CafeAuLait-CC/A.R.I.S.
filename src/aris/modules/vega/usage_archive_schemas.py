@@ -44,6 +44,20 @@ class UsageArchiveHead(UsageFactContract):
         return self
 
 
+class UsageArchiveFreeze(UsageFactContract):
+    source: UsageArchiveHeadQuery
+    start_at: AwareDatetime
+    end_at: AwareDatetime
+    read_at: AwareDatetime
+    through_seq: int = Field(ge=0, le=MAX_ARCHIVE_SEQ, strict=True)
+
+    @model_validator(mode="after")
+    def closed_interval(self) -> "UsageArchiveFreeze":
+        if not self.start_at < self.end_at <= self.read_at:
+            raise ValueError("Archive freeze requires a closed observation interval")
+        return self
+
+
 def archive_head_fingerprint(head: UsageArchiveHead) -> str:
     raw = json.dumps(
         head.model_dump(mode="json", exclude={"fingerprint", "read_at"}),

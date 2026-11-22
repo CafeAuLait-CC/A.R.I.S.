@@ -3,6 +3,7 @@
 from datetime import UTC, datetime
 from time import monotonic
 from typing import Literal
+from uuid import UUID
 
 from pydantic import AwareDatetime, Field
 from sqlalchemy import text
@@ -14,7 +15,9 @@ from aris.core.contracts import Contract, DomainError
 from aris.modules.lyra.retention_repo import RetentionRepository
 from aris.modules.lyra.source_prefix_repo import SourcePrefixRepository
 from aris.modules.lyra.trace_consumer_schemas import UsageTraceConfiguration
-from aris.modules.vega.usage_archive_schemas import UsageArchiveHeadQuery
+from aris.modules.lyra.window_schemas import UsageWindowQuery
+from aris.modules.lyra.window_snapshot_repo import UsageWindowRepository
+from aris.modules.vega.usage_archive_schemas import UsageArchiveFreeze, UsageArchiveHeadQuery
 from aris.modules.vega.usage_archive_service import VegaUsageArchive
 
 MAX_CONSUMERS = 16
@@ -57,6 +60,29 @@ class TraceRetentionBoundary(Contract):
     processed_through_seq: int
     checkpoint_through_seq: int | None
     earliest_protected_seq: int | None
+
+
+def retained_day_archive_boundary_in_transaction(
+    session: Session, query: UsageWindowQuery, snapshot_id: UUID, expected_fingerprint: str
+) -> UsageArchiveFreeze | None:
+    """Use the stored interval snapshot's fixed reading boundary, without rebuilding it."""
+    saved = UsageWindowRepository(session).get(snapshot_id)
+    if saved is None:
+        return None
+    if (
+        saved.window.query != query
+        or saved.fingerprint != expected_fingerprint
+        or query.owner_id is not None
+    ):
+        raise DomainError("CONFLICT", "Retention day has a different fixed source", 409)
+    source = saved.window.source
+    return UsageArchiveFreeze(
+        source=source.query,
+        start_at=query.start_at,
+        end_at=query.end_at,
+        read_at=source.read_at,
+        through_seq=source.highest_committed_seq,
+    )
 
 
 def trace_retention_boundaries_in_transaction(

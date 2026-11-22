@@ -20,7 +20,7 @@ from aris.modules.vega.models import (
 from aris.modules.vega.reports import AgentReport
 from aris.modules.vega.storage_schemas import MessageStorage, ObservedWindowStorage
 from aris.modules.vega.target_schemas import GpuInventoryLabel
-from aris.modules.vega.usage_archive_schemas import MAX_ARCHIVE_MESSAGES
+from aris.modules.vega.usage_archive_schemas import MAX_ARCHIVE_MESSAGES, UsageArchiveFreeze
 
 
 @dataclass(frozen=True)
@@ -312,6 +312,18 @@ class VegaRepository:
         return ObservedWindowStorage(
             messages=count, late_arrivals=late, first_seq=first, last_seq=last
         )
+
+    def arrivals_outside_freeze(self, freeze: UsageArchiveFreeze) -> int:
+        row = AgentMessage
+        return self.session.execute(
+            select(func.count()).where(
+                row.agent_id == freeze.source.agent_id,
+                row.node_id == freeze.source.node_id,
+                row.observed_at >= freeze.start_at,
+                row.observed_at < freeze.end_at,
+                or_(row.received_at > freeze.read_at, row.seq > freeze.through_seq),
+            )
+        ).scalar_one()
 
     def message_storage(self, cutoff: datetime | None) -> list[MessageStorage]:
         before = (
