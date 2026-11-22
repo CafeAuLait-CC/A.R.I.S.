@@ -274,7 +274,7 @@ def test_postgresql_reporting_gap_scan_compare_and_set_does_not_double_advance(
     history = ReportingGapHistoryService(preview)
     with monkeypatch.context() as patch, ThreadPoolExecutor(max_workers=2) as workers:
         patch.setattr(ReportingGapHistoryRepository, "advance", race)
-        pending = [workers.submit(history.scan_next, actor, SOURCE, first_seq=1) for _ in range(2)]
+        pending = [workers.submit(history.scan_next, actor, SOURCE, first_seq=3) for _ in range(2)]
         successful = []
         for task in pending:
             try:
@@ -282,7 +282,7 @@ def test_postgresql_reporting_gap_scan_compare_and_set_does_not_double_advance(
             except DomainError as error:
                 assert error.code == "RETRYABLE_DATABASE_ERROR"
     assert len(successful) == 1 and successful[0].state == "caught_up"
-    assert history.scan_next(actor, SOURCE, first_seq=1) == successful[0]
+    assert history.scan_next(actor, SOURCE, first_seq=3) == successful[0]
 
 
 def test_postgresql_activity_preview_fixed_snapshot_ignores_later_gap_fill_and_recovers_after_lock(
