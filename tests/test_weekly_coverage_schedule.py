@@ -20,7 +20,11 @@ from sqlalchemy import delete, event, func, select, text, update
 from sqlalchemy.exc import DBAPIError
 
 from aris.apps.api.main import create_app
-from aris.apps.composition.daily_coverage import prepare_day_revision, verify_daily_coverage
+from aris.apps.composition.daily_coverage import (
+    prepare_day_revision,
+    verify_daily_coverage,
+    verify_day_revision,
+)
 from aris.apps.composition.lyra import build_lyra_components
 from aris.apps.composition.lyra_coverage import (
     CoverageBuildTarget,
@@ -777,9 +781,22 @@ def test_day_revision_uses_distinct_saved_rollup_and_preserves_published_week(
             transaction_timeout_ms=30000,
         )
 
+    def verify(fingerprint):
+        return verify_day_revision(
+            paused,
+            definition,
+            day,
+            request,
+            expected_fingerprint=fingerprint,
+            transaction_timeout_ms=30000,
+        )
+
     with pytest.raises(DomainError) as error:
         prepare(paused)
     assert error.value.code == "WEEKLY_COVERAGE_NOT_CONFIGURED"
+    with pytest.raises(DomainError) as missing:
+        verify("0" * 64)
+    assert missing.value.code == "NOT_FOUND"
     for _ in range(24):
         candidate = prepare(schedules)
         assert not candidate["published"]
@@ -797,6 +814,27 @@ def test_day_revision_uses_distinct_saved_rollup_and_preserves_published_week(
         if source["snapshot_id"] != str(official_day.snapshot_id)
     ] == [day.isoformat()]
     assert prepare(paused) == candidate
+    with pytest.raises(DomainError) as mismatch:
+        verify("0" * 64)
+    assert mismatch.value.code == "CONFLICT"
+    checked = verify(proposed["fingerprint"])
+    assert checked["state"] == "revision_verified" and not checked["published"]
+    assert checked["candidate_fingerprint"] == proposed["fingerprint"]
+    assert checked["rollup_fingerprint"] == proposed["days"][0]["rollup_fingerprint"]
+    assert checked["other_days_pending"] == [
+        value.isoformat() for value in old_review.pending_days if value != day
+    ]
+    assert (
+        put(
+            client,
+            resource_batch(seq=last + 5, observed_at=evening + timedelta(minutes=2)),
+        ).status_code
+        == 200
+    )
+    with pytest.raises(DomainError) as stale:
+        verify(proposed["fingerprint"])
+    assert stale.value.code == "CONFLICT"
+    assert stale.value.message == "Prepared reporting evidence changed"
     assert schedules.verify_daily_week(CONTEXT, definition, week) == old
     assert schedules.evidence_review(definition, week) == old_review
 

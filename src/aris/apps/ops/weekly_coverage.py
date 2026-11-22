@@ -18,6 +18,7 @@ from aris.apps.composition.daily_coverage import (
     daily_coverage_step,
     prepare_day_revision,
     verify_daily_coverage,
+    verify_day_revision,
 )
 from aris.apps.composition.lyra_coverage import (
     CoverageBuildTarget,
@@ -246,8 +247,18 @@ def main(argv: list[str] | None = None) -> int:
         metavar="YYYY-MM-DD",
         help="Build or review an unpublished replacement for one saved reporting day",
     )
+    mode.add_argument(
+        "--verify-day-revision",
+        type=date.fromisoformat,
+        metavar="YYYY-MM-DD",
+        help="Recheck the retained evidence for a prepared replacement day",
+    )
     parser.add_argument("--revision-node", help="Select the node whose reporting day is revised")
     parser.add_argument("--revision-id", type=UUID, help="Use the same ID when resuming a revision")
+    parser.add_argument(
+        "--expected-revision-fingerprint",
+        help="Require the exact prepared weekly report in --verify-day-revision",
+    )
     parser.add_argument(
         "--format",
         choices=("json", "html", "csv"),
@@ -263,6 +274,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Save the successful check of --verify-day",
     )
     args = parser.parse_args(argv)
+    revision_day = args.prepare_day_revision or args.verify_day_revision
     review = any(
         value is not None
         for value in (
@@ -271,21 +283,19 @@ def main(argv: list[str] | None = None) -> int:
             args.retention_week,
             args.combine_week,
             args.day_timeline,
-            args.prepare_day_revision,
+            revision_day,
         )
     )
     if review and args.from_daily_week is not None:
         parser.error("Choose one operation on a saved natural week")
     if args.record_verification and args.verify_day is None:
         parser.error("--record-verification requires --verify-day")
-    if args.prepare_day_revision is not None and (
-        args.revision_id is None or args.revision_node is None
-    ):
-        parser.error("--prepare-day-revision requires --revision-node and --revision-id")
-    if args.prepare_day_revision is None and (
-        args.revision_id is not None or args.revision_node is not None
-    ):
-        parser.error("--revision-id and --revision-node require --prepare-day-revision")
+    if revision_day is not None and (args.revision_id is None or args.revision_node is None):
+        parser.error("Day revision requires --revision-node and --revision-id")
+    if revision_day is None and (args.revision_id is not None or args.revision_node is not None):
+        parser.error("--revision-id and --revision-node require a day revision operation")
+    if (args.verify_day_revision is None) != (args.expected_revision_fingerprint is None):
+        parser.error("--verify-day-revision requires --expected-revision-fingerprint")
     if args.combine_week is None and (
         args.format is not None or args.expected_combined_fingerprint is not None
     ):
@@ -328,20 +338,30 @@ def main(argv: list[str] | None = None) -> int:
         engine = build_engine(config.database_url.get_secret_value())
         check_database(engine)
         schedules = CoverageScheduleService(session_factory(engine), enabled=config.enabled)
-        if args.prepare_day_revision is not None:
+        if revision_day is not None:
             selected = tuple(
                 plan for plan in config.plans if plan.calendar.scope.id == args.revision_node
             )
             if len(selected) != 1:
                 raise ValueError("Day revision requires one configured plan for the selected node")
-            revision = prepare_day_revision(
-                schedules,
-                selected[0],
-                args.prepare_day_revision,
-                args.revision_id,
-                prefix_proofs_per_tick=config.prefix_proofs_per_tick,
-                transaction_timeout_ms=config.transaction_timeout_ms,
-            )
+            if args.verify_day_revision is not None:
+                revision = verify_day_revision(
+                    schedules,
+                    selected[0],
+                    revision_day,
+                    args.revision_id,
+                    expected_fingerprint=args.expected_revision_fingerprint,
+                    transaction_timeout_ms=config.transaction_timeout_ms,
+                )
+            else:
+                revision = prepare_day_revision(
+                    schedules,
+                    selected[0],
+                    revision_day,
+                    args.revision_id,
+                    prefix_proofs_per_tick=config.prefix_proofs_per_tick,
+                    transaction_timeout_ms=config.transaction_timeout_ms,
+                )
             print(json.dumps(revision))
             return 0
         if args.retention_week is not None:
