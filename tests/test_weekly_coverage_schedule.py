@@ -486,6 +486,28 @@ def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
     for statement in checked_statements:
         assert statement.lstrip().split(maxsplit=1)[0].upper() in ("BEGIN", "SELECT", "SET")
         assert "agent_messages.payload" not in statement.lower()
+    assert retirement.coverage_builds is not None
+    assert retirement.coverage_builds.builds_without_saved_windows == 0
+    assert not retirement.coverage_builds.truncated
+    draft = build_lyra_coverage_components(
+        schedules.sessions,
+        LyraCoverageRuntimeConfig(
+            enabled=True,
+            configuration=definition.configuration,
+            target=CoverageBuildTarget(
+                id=uuid4(), query=daily_coverage_targets(definition, week)[0].query
+            ),
+            transaction_timeout_ms=30000,
+        ),
+        clock=schedules.clock,
+    )
+    assert draft.run_once()["state"] == "admitted"
+    with_draft = preview_week_retention(schedules, definition, week)
+    assert (
+        with_draft.coverage_builds.reviewed_builds == retirement.coverage_builds.reviewed_builds + 1
+    )
+    assert with_draft.coverage_builds.builds_without_saved_windows == 1
+    assert "coverage_builds_without_saved_windows" in with_draft.blockers
     (check,) = review.checked_days
     assert check.day == day and check.checked_at.isoformat() == checked["checked_at"]
     evidence = DailyCoverageEvidence(**check.model_dump(exclude={"checked_at"}))

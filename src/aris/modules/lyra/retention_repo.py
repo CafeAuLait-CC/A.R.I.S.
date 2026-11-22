@@ -5,6 +5,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from aris.core.contracts import DomainError
 from aris.modules.lyra.models import (
     CoverageBuildPlanRow,
     CoverageBuildStepRow,
@@ -85,6 +86,26 @@ class RetentionRepository:
                 select(row.state, func.count()).group_by(row.state).order_by(row.state)
             )
         }
+
+    def coverage_build_ids(self, node_id: str, limit: int) -> tuple[UUID, ...]:
+        row = CoverageBuildPlanRow
+        values = self.session.scalars(
+            select(row.id).where(row.node_id == node_id).order_by(row.id).limit(limit)
+        )
+        try:
+            return tuple(UUID(value) for value in values)
+        except (ValueError, TypeError):
+            raise DomainError(
+                "DEPENDENCY_UNAVAILABLE", "Coverage build references are inconsistent", 503
+            ) from None
+
+    def saved_coverage_build_count(self, node_id: str, windows: tuple[UUID, ...]) -> int:
+        row = UsageWindowSnapshotRow
+        return self.session.execute(
+            select(func.count())
+            .select_from(row)
+            .where(row.node_id == node_id, row.id.in_(tuple(str(id) for id in windows)))
+        ).scalar_one()
 
     def evidence_counts(self) -> dict[str, int]:
         tables = {

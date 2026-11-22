@@ -1,6 +1,7 @@
 """Report durable source dependencies to a local operator."""
 
 from datetime import UTC, datetime
+from itertools import batched
 from time import monotonic
 from typing import Literal
 from uuid import UUID
@@ -12,6 +13,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from aris.core.commands.budgets import database_failure, transaction_budget
 from aris.core.contracts import Contract, DomainError
+from aris.modules.lyra.coverage_build_schemas import completed_coverage_window_id
 from aris.modules.lyra.retention_repo import RetentionRepository
 from aris.modules.lyra.source_prefix_repo import SourcePrefixRepository
 from aris.modules.lyra.trace_consumer_schemas import UsageTraceConfiguration
@@ -21,6 +23,7 @@ from aris.modules.vega.usage_archive_schemas import UsageArchiveFreeze, UsageArc
 from aris.modules.vega.usage_archive_service import VegaUsageArchive
 
 MAX_CONSUMERS = 16
+MAX_REVIEWED_BUILDS = 1024
 READ_SECONDS = 3
 
 
@@ -60,6 +63,30 @@ class TraceRetentionBoundary(Contract):
     processed_through_seq: int
     checkpoint_through_seq: int | None
     earliest_protected_seq: int | None
+
+
+class CoverageBuildDependencies(Contract):
+    reviewed_builds: int
+    builds_without_saved_windows: int
+    truncated: bool
+
+
+def coverage_build_dependencies_in_transaction(
+    session: Session, node_id: str
+) -> CoverageBuildDependencies:
+    """Check whether admitted plans have corresponding immutable interval snapshots."""
+    repo = RetentionRepository(session)
+    ids = repo.coverage_build_ids(node_id, MAX_REVIEWED_BUILDS + 1)
+    selected = ids[:MAX_REVIEWED_BUILDS]
+    missing = 0
+    for batch in batched(selected, 128):
+        expected = tuple(completed_coverage_window_id(id) for id in batch)
+        missing += len(expected) - repo.saved_coverage_build_count(node_id, expected)
+    return CoverageBuildDependencies(
+        reviewed_builds=len(selected),
+        builds_without_saved_windows=missing,
+        truncated=len(ids) > len(selected),
+    )
 
 
 def retained_day_archive_boundary_in_transaction(

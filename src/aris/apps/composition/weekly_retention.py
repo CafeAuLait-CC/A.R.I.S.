@@ -11,7 +11,9 @@ from sqlalchemy.exc import DBAPIError
 from aris.core.commands.budgets import database_failure, transaction_budget
 from aris.core.contracts import Contract, DomainError
 from aris.modules.lyra.retention_service import (
+    CoverageBuildDependencies,
     TraceRetentionBoundary,
+    coverage_build_dependencies_in_transaction,
     retained_day_archive_boundary_in_transaction,
     trace_retention_boundaries_in_transaction,
 )
@@ -46,9 +48,10 @@ class WeeklyRetentionPreview(Contract):
     observations: ObservedWindowStorage | None = None
     daily_arrivals: tuple[DailyArrivalPreview, ...] = Field(default=(), max_length=7)
     known_consumers: tuple[TraceRetentionBoundary, ...] = ()
+    coverage_builds: CoverageBuildDependencies | None = None
     blockers: tuple[str, ...]
     remaining_checks: tuple[str, ...] = (
-        "historical_build_dependencies",
+        "historical_intermediate_proofs",
         "future_report_after_retirement",
         "other_archive_consumers",
     )
@@ -98,6 +101,7 @@ def preview_week_retention(
             observations = archive.observed_window_storage_in_transaction(
                 db, scope, period.start_at, period.end_at
             )
+            builds = coverage_build_dependencies_in_transaction(db, config.node_id)
             targets = {target.day: target for target in daily_coverage_targets(definition, week)}
             daily_arrivals = []
             for day in report.report.days:
@@ -134,6 +138,10 @@ def preview_week_retention(
                 blockers.append("daily_archive_boundaries_missing")
             if any(day.outside_freeze for day in daily_arrivals):
                 blockers.append("packets_outside_daily_freeze")
+            if builds.builds_without_saved_windows:
+                blockers.append("coverage_builds_without_saved_windows")
+            if builds.truncated:
+                blockers.append("coverage_build_check_incomplete")
             last = observations.last_seq
             if last is not None:
                 if any(last > consumer.processed_through_seq for consumer in consumers):
@@ -158,6 +166,7 @@ def preview_week_retention(
                     "observations": observations,
                     "daily_arrivals": tuple(daily_arrivals),
                     "known_consumers": consumers,
+                    "coverage_builds": builds,
                     "blockers": tuple(blockers),
                 }
             )
