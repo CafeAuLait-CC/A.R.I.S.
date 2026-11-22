@@ -3,11 +3,13 @@ import os
 import subprocess
 import sys
 import time
+from uuid import UUID
 
 import pytest
 from sqlalchemy import text
 
 from aris.apps.composition.lyra import LyraRuntimeConfig, build_lyra_components
+from aris.core.contracts import DomainError
 from aris.modules.lyra.recording_job_schemas import RecordingJobLimits
 from aris.modules.lyra.residency_layout import StableResidencyLayoutMethod
 from tests.test_lyra_composition import private_file, process
@@ -140,6 +142,7 @@ def test_real_worker_sigkill_before_and_after_each_commit_recovers_exactly_once(
 @pytest.mark.parametrize("partition_recording", [1030], indirect=True)
 def test_composed_worker_records_long_live_prefixes_and_final_tail_with_bounded_raw_pages(
     partition_recording,
+    monkeypatch,
 ):
     state = partition_recording
     config = LyraRuntimeConfig.model_validate(
@@ -150,18 +153,37 @@ def test_composed_worker_records_long_live_prefixes_and_final_tail_with_bounded_
         }
     )
     graph = build_lyra_components(state[0].sessions, config, clock=lambda: state[4]["now"])
+    recorder = graph.pump.jobs.stable_recorder
+    record_in_transaction = recorder.record_in_transaction
+    injected = False
+
+    def retry_first(*args, **kwargs):
+        nonlocal injected
+        if not injected:
+            injected = True
+            raise DomainError("RETRYABLE_DATABASE_ERROR", "Fixture recorder timed out", 503)
+        return record_in_transaction(*args, **kwargs)
+
+    monkeypatch.setattr(recorder, "record_in_transaction", retry_first)
     reports = []
     for _ in range(160):
         report = graph.run_once()
         assert not report["failures"]
         reports.append(report)
+        job = report["job"]
+        if job is not None and job["state"] == "retry":
+            pending = graph.pump.jobs.exact(UUID(job["id"]))
+            assert pending.state == "queued"
+            state[4]["now"] = max(state[4]["now"], pending.available_at)
         if (
             report["source"]["state"] == "caught_up"
             and report["dispatch"]["state"] == "idle"
-            and report["job"] is None
+            and job is None
         ):
             break
     assert len(reports) <= 132
+    assert injected
+    assert any(report["job"] and report["job"]["state"] == "retry" for report in reports)
     assert recorded(state[0]) == (129, 1029 * 15000000)
     assert any(
         report["job"] is not None
