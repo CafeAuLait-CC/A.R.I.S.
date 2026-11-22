@@ -1,6 +1,6 @@
 """Report durable source dependencies to a local operator."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from itertools import batched
 from time import monotonic
 from typing import Literal
@@ -15,11 +15,13 @@ from aris.core.commands.budgets import database_failure, transaction_budget
 from aris.core.contracts import Contract, DomainError
 from aris.modules.lyra.coverage_build_schemas import completed_coverage_window_id
 from aris.modules.lyra.retention_repo import RetentionRepository
+from aris.modules.lyra.session_occupancy import SessionOccupancyRule
 from aris.modules.lyra.source_prefix_repo import SourcePrefixRepository
 from aris.modules.lyra.trace_consumer_repo import UsageTraceRepository
 from aris.modules.lyra.trace_consumer_schemas import UsageTraceConfiguration, UsageTracePosition
 from aris.modules.lyra.window_schemas import UsageWindowQuery
 from aris.modules.lyra.window_snapshot_repo import UsageWindowRepository
+from aris.modules.lyra.window_snapshot_schemas import StoredUsageWindow
 from aris.modules.vega.usage_archive_schemas import UsageArchiveFreeze, UsageArchiveHeadQuery
 from aris.modules.vega.usage_archive_service import VegaUsageArchive
 
@@ -93,7 +95,12 @@ def coverage_build_dependencies_in_transaction(
 
 
 def retained_day_archive_boundary_in_transaction(
-    session: Session, query: UsageWindowQuery, snapshot_id: UUID, expected_fingerprint: str
+    session: Session,
+    query: UsageWindowQuery,
+    snapshot_id: UUID,
+    expected_fingerprint: str,
+    *,
+    include_session_context: bool,
 ) -> UsageArchiveFreeze | None:
     """Use the stored interval snapshot's fixed reading boundary, without rebuilding it."""
     saved = UsageWindowRepository(session).get(snapshot_id)
@@ -105,11 +112,25 @@ def retained_day_archive_boundary_in_transaction(
         or query.owner_id is not None
     ):
         raise DomainError("CONFLICT", "Retention day has a different fixed source", 409)
-    source = saved.window.source
+    return daily_archive_freeze(saved, include_session_context=include_session_context)
+
+
+def daily_archive_freeze(
+    snapshot: StoredUsageWindow, *, include_session_context: bool
+) -> UsageArchiveFreeze:
+    source = snapshot.window.source
+    query = snapshot.window.query
+    if source.read_at < query.end_at:
+        raise DomainError("CONFLICT", "Daily archive was frozen before the day ended", 409)
+    padding = timedelta(
+        seconds=SessionOccupancyRule().maximum_interruption_seconds
+        if include_session_context
+        else 0
+    )
     return UsageArchiveFreeze(
         source=source.query,
-        start_at=query.start_at,
-        end_at=query.end_at,
+        start_at=query.start_at - padding,
+        end_at=min(query.end_at + padding, source.read_at),
         read_at=source.read_at,
         through_seq=source.highest_committed_seq,
     )

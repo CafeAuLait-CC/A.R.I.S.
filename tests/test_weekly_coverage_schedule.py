@@ -570,6 +570,19 @@ def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
     assert changed_day.outside_freeze == 1
     assert "packets_outside_daily_freeze" in outside.blockers
     assert outside.reviewed == review and not outside.deletion_enabled
+    day_end = next(
+        value.query.end_at for value in daily_coverage_targets(definition, week) if value.day == day
+    )
+    assert selected_day.observation_end_at == day_end + timedelta(seconds=60)
+    with schedules.sessions.begin() as db:
+        db.execute(
+            update(AgentMessage)
+            .where(AgentMessage.id == observation)
+            .values(observed_at=day_end + timedelta(seconds=30))
+        )
+    padded = preview_week_retention(schedules, definition, week)
+    assert next(value for value in padded.daily_arrivals if value.day == day).outside_freeze == 1
+    assert "packets_outside_daily_freeze" in padded.blockers and padded.payload_prefix is None
     # Simulate expired evidence in this test database only.
     with schedules.sessions.begin() as db:
         db.execute(delete(AgentMessage).where(AgentMessage.id == observation))

@@ -34,6 +34,8 @@ READ_SECONDS = 3
 
 class DailyArrivalPreview(Contract):
     day: date
+    observation_start_at: AwareDatetime | None
+    observation_end_at: AwareDatetime | None
     archive_read_at: AwareDatetime | None
     archive_through_seq: int | None
     outside_freeze: int | None
@@ -110,7 +112,11 @@ def preview_week_retention(
                 if target is None or target.snapshot_id != day.snapshot_id:
                     raise DomainError("CONFLICT", "Report day differs from its fixed target", 409)
                 freeze = retained_day_archive_boundary_in_transaction(
-                    db, target.query, day.snapshot_id, day.snapshot_fingerprint
+                    db,
+                    target.query,
+                    day.snapshot_id,
+                    day.snapshot_fingerprint,
+                    include_session_context=definition.session_occupancy is True,
                 )
                 if freeze is not None and freeze.source != scope:
                     raise DomainError("CONFLICT", "Day archive binding differs", 409)
@@ -133,6 +139,8 @@ def preview_week_retention(
                 daily_arrivals.append(
                     DailyArrivalPreview(
                         day=day.day,
+                        observation_start_at=freeze.start_at if freeze else None,
+                        observation_end_at=freeze.end_at if freeze else None,
                         archive_read_at=freeze.read_at if freeze else None,
                         archive_through_seq=freeze.through_seq if freeze else None,
                         outside_freeze=arrival_counts.get(day.day),

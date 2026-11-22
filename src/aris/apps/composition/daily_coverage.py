@@ -22,6 +22,7 @@ from aris.modules.lyra.coverage_build_schemas import completed_coverage_window_i
 from aris.modules.lyra.coverage_rollup import SavedCoverageRollup
 from aris.modules.lyra.daily_session_occupancy_service import DailySessionOccupancyService
 from aris.modules.lyra.indexed_usage_service import IndexedUsageHistoryService
+from aris.modules.lyra.retention_service import daily_archive_freeze
 from aris.modules.lyra.session_occupancy_service import SessionOccupancyService
 from aris.modules.lyra.weekly_from_daily import (
     DailyWindowReference,
@@ -39,7 +40,6 @@ from aris.modules.nova.coverage_schedule_schemas import (
 )
 from aris.modules.nova.coverage_schedule_service import CoverageScheduleService
 from aris.modules.nova.daily_coverage_calendar import DailyCoverageTarget, daily_coverage_targets
-from aris.modules.vega.usage_archive_schemas import UsageArchiveFreeze
 from aris.modules.vega.usage_archive_service import VegaUsageArchive
 from aris.modules.vega.usage_span import VegaUsageSpans
 
@@ -294,13 +294,8 @@ def verify_day_revision(
     snapshot, rollup = _reverify_daily_rollup(
         schedules, definition, target, source, actor, transaction_timeout_ms
     )
-    archive = snapshot.window.source
-    freeze = UsageArchiveFreeze(
-        source=archive.query,
-        start_at=target.query.start_at,
-        end_at=target.query.end_at,
-        read_at=archive.read_at,
-        through_seq=archive.highest_committed_seq,
+    freeze = daily_archive_freeze(
+        snapshot, include_session_context=definition.session_occupancy is True
     )
     with schedules.sessions() as db, db.no_autoflush:
         if db.get_bind().dialect.name == "postgresql":
