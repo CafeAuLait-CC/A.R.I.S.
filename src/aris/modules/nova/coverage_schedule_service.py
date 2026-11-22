@@ -5,6 +5,7 @@ from datetime import UTC, date, datetime
 from typing import Literal
 from uuid import uuid4, uuid5
 
+from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -283,6 +284,52 @@ class CoverageScheduleService:
                 self._require(db, definition)
                 self._active()
                 commit_owned_transaction(db)
+                return result
+        except DBAPIError as error:
+            raise self._failure(error) from None
+
+    def verify_daily_week(
+        self, context: SchedulerContext, definition: CoverageScheduleDefinition, week: date
+    ) -> DailyCoveragePeriodResult:
+        definition = CoverageScheduleDefinition.model_validate(definition.model_dump(mode="json"))
+        context = SchedulerContext.model_validate(context.model_dump(mode="json"))
+        if not definition.daily_rollups:
+            raise DomainError("VALIDATION_ERROR", "Daily reporting is not configured", 422)
+        targets = daily_coverage_targets(definition, week)
+        calendar = definition.calendar
+        try:
+            with self.sessions() as db, db.no_autoflush:
+                if db.get_bind().dialect.name == "postgresql":
+                    db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
+                transaction_budget(db, 100, 1000, 3000)
+                self._require(db, definition)
+                repo = CoverageScheduleRepository(db)
+                status = repo.get(definition.id)
+                result = repo.daily_result(uuid5(definition.id, week.isoformat()))
+                if status is None or result is None:
+                    raise DomainError("NOT_FOUND", "Weekly coverage report not found", 404)
+                if (
+                    status.definition != definition
+                    or result.schedule_id != definition.id
+                    or result.definition_fingerprint != definition.fingerprint
+                    or result.week != week
+                    or status.next_week <= week
+                ):
+                    raise DomainError("CONFLICT", "Weekly report schedule differs", 409)
+                actor = ActorContext(actor_id=calendar.owner_id, request_id=context.request_id)
+                recomposed = WeeklyFromDailyReader(
+                    UsageWindowReader(self.sessions)
+                ).build_in_transaction(
+                    db,
+                    actor,
+                    WeeklyFromDailyQuery(
+                        node_id=calendar.scope.id, timezone=calendar.timezone, week=week
+                    ),
+                    tuple(target.snapshot_id for target in targets),
+                )
+                if recomposed != result.report:
+                    raise DomainError("CONFLICT", "Weekly report differs from daily rollups", 409)
+                self._require(db, definition)
                 return result
         except DBAPIError as error:
             raise self._failure(error) from None

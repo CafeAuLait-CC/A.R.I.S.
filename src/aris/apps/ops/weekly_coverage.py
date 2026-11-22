@@ -14,7 +14,7 @@ from pydantic import Field, JsonValue, SecretStr, model_validator
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError, SQLAlchemyError
 
-from aris.apps.composition.daily_coverage import daily_coverage_step
+from aris.apps.composition.daily_coverage import daily_coverage_step, verify_daily_coverage
 from aris.apps.composition.lyra_coverage import (
     CoverageBuildTarget,
     LyraCoverageRuntimeConfig,
@@ -204,7 +204,15 @@ def main(argv: list[str] | None = None) -> int:
     mode = parser.add_mutually_exclusive_group(required=True)
     for flag in ("validate", "status", "once", "run"):
         mode.add_argument("--" + flag, action="store_true")
+    mode.add_argument(
+        "--verify-day",
+        type=date.fromisoformat,
+        metavar="YYYY-MM-DD",
+        help="Recheck a published report day against its retained original evidence",
+    )
     args = parser.parse_args(argv)
+    if args.verify_day is not None and args.from_daily_week is not None:
+        parser.error("--verify-day chooses the report's natural week")
     engine = None
     stop_requested = False
 
@@ -218,7 +226,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.from_daily_week is not None:
             for plan in config.plans:
                 daily_coverage_targets(plan, args.from_daily_week)
-        if args.validate or (not config.enabled and not args.status):
+        if args.verify_day is not None and (
+            not config.plans or any(not plan.daily_rollups for plan in config.plans)
+        ):
+            raise ValueError("Verification requires configured daily coverage plans")
+        if args.validate or (not config.enabled and not args.status and args.verify_day is None):
             print(
                 json.dumps(
                     {
@@ -237,6 +249,25 @@ def main(argv: list[str] | None = None) -> int:
         engine = build_engine(config.database_url.get_secret_value())
         check_database(engine)
         schedules = CoverageScheduleService(session_factory(engine), enabled=config.enabled)
+        if args.verify_day is not None:
+            print(
+                json.dumps(
+                    {
+                        "state": "verified",
+                        "plans": [
+                            verify_daily_coverage(
+                                schedules,
+                                plan,
+                                args.verify_day,
+                                transaction_timeout_ms=config.transaction_timeout_ms,
+                            )
+                            for plan in config.plans
+                        ],
+                        "deletion_enabled": False,
+                    }
+                )
+            )
+            return 0
         if args.run:
             for value in (signal.SIGINT, signal.SIGTERM):
                 signal.signal(value, request_stop)

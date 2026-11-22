@@ -20,6 +20,7 @@ from sqlalchemy import delete, event, func, select, text, update
 from sqlalchemy.exc import DBAPIError
 
 from aris.apps.api.main import create_app
+from aris.apps.composition.daily_coverage import verify_daily_coverage
 from aris.apps.composition.lyra import build_lyra_components
 from aris.apps.composition.lyra_coverage import (
     CoverageBuildTarget,
@@ -51,6 +52,7 @@ from aris.modules.nova.coverage_schedule_service import CoverageScheduleService
 from aris.modules.nova.daily_coverage_calendar import daily_coverage_targets
 from aris.modules.nova.report_calendar import WeeklyReportPlan, weekly_report_period
 from aris.modules.nova.weekly_coverage import weekly_coverage_target
+from aris.modules.vega.models import AgentMessage
 from tests.test_heartbeat import beat, heartbeat
 from tests.test_recorded_usage import reading_service
 from tests.test_stable_recording_worker import (
@@ -419,6 +421,28 @@ def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
     else:
         pytest.fail("Daily weekly result was not saved")
     result = step["result"]
+    with schedules.sessions() as db:
+        source = db.scalar(
+            select(AgentMessage)
+            .where(
+                AgentMessage.node_id == definition.calendar.scope.id,
+                AgentMessage.seq > definition.configuration.trace.initial_after_seq,
+                AgentMessage.message_kind == "telemetry",
+            )
+            .order_by(AgentMessage.seq)
+            .limit(1)
+        )
+        assert source is not None
+        day, observation = source.observed_at.date(), source.id
+    inspected = verify_daily_coverage(schedules, definition, day, transaction_timeout_ms=30000)
+    assert inspected["original_evidence_reverified"] and not inspected["deletion_enabled"]
+    assert inspected["report_fingerprint"] == result["fingerprint"]
+    # Simulate expired evidence in this test database only.
+    with schedules.sessions.begin() as db:
+        db.execute(delete(AgentMessage).where(AgentMessage.id == observation))
+    with pytest.raises(DomainError):
+        verify_daily_coverage(schedules, definition, day, transaction_timeout_ms=30000)
+
     owner = str(definition.calendar.owner_id)
     member = str(partition_recording[2][2][2][4][1])
     role = str(uuid4())

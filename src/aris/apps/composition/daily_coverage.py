@@ -1,7 +1,7 @@
 """One finite step toward a week composed of saved day windows."""
 
 from collections.abc import Callable
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from pydantic import JsonValue
 from sqlalchemy.orm import Session, sessionmaker
@@ -13,6 +13,8 @@ from aris.apps.composition.lyra_coverage import (
 )
 from aris.core.commands.schemas import ActorContext
 from aris.core.contracts import DomainError
+from aris.core.scheduler.schemas import SchedulerContext
+from aris.modules.lyra.coverage_rollup import roll_up_saved_coverage
 from aris.modules.lyra.weekly_from_daily import (
     DailyWindowReference,
     WeeklyFromDailyQuery,
@@ -20,6 +22,7 @@ from aris.modules.lyra.weekly_from_daily import (
 )
 from aris.modules.lyra.window_reader import UsageWindowReader
 from aris.modules.nova.coverage_schedule_schemas import CoverageScheduleDefinition
+from aris.modules.nova.coverage_schedule_service import CoverageScheduleService
 from aris.modules.nova.daily_coverage_calendar import daily_coverage_targets
 
 
@@ -100,4 +103,60 @@ def daily_coverage_step(
         **report,
         "state": "day_saved" if step["state"] == "finished" else step["state"],
         "build": step,
+    }
+
+
+def verify_daily_coverage(
+    schedules: CoverageScheduleService,
+    definition: CoverageScheduleDefinition,
+    day: date,
+    *,
+    transaction_timeout_ms: int,
+) -> dict[str, JsonValue]:
+    """Reverify the original evidence for one day of a published weekly result."""
+    week = day - timedelta(days=day.weekday())
+    context = SchedulerContext(request_id="daily-coverage-verification")
+    report = schedules.verify_daily_week(context, definition, week)
+    target = next(
+        (target for target in daily_coverage_targets(definition, week) if target.day == day), None
+    )
+    source = next((source for source in report.report.days if source.day == day), None)
+    if target is None or source is None or source.snapshot_id != target.snapshot_id:
+        raise DomainError("NOT_FOUND", "Published day evidence was not found", 404)
+    graph = build_lyra_coverage_components(
+        schedules.sessions,
+        LyraCoverageRuntimeConfig(
+            enabled=False,
+            configuration=definition.configuration,
+            target=CoverageBuildTarget(id=target.plan_id, query=target.query),
+            transaction_timeout_ms=transaction_timeout_ms,
+        ),
+        clock=schedules.clock,
+        status_only=True,
+    )
+    assert graph.service is not None
+    windows = graph.service.windows
+    snapshot = windows.reverify(source.snapshot_id)
+    calendar = definition.calendar
+    actor = ActorContext(actor_id=calendar.owner_id, request_id=context.request_id)
+    rollup = roll_up_saved_coverage(windows.reader.read(actor, source.snapshot_id), "day")
+    if (
+        snapshot.fingerprint != source.snapshot_fingerprint
+        or snapshot.request.query != target.query
+        or rollup.fingerprint != source.rollup_fingerprint
+    ):
+        raise DomainError("CONFLICT", "Published daily rollup differs from original evidence", 409)
+    schedules.verify_daily_week(context, definition, week)
+    return {
+        "schedule_id": str(definition.id),
+        "node_id": calendar.scope.id,
+        "week": week.isoformat(),
+        "day": day.isoformat(),
+        "report_id": str(report.id),
+        "report_fingerprint": report.fingerprint,
+        "snapshot_fingerprint": snapshot.fingerprint,
+        "rollup_fingerprint": rollup.fingerprint,
+        "coverage": rollup.coverage,
+        "original_evidence_reverified": True,
+        "deletion_enabled": False,
     }
