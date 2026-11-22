@@ -18,7 +18,7 @@ from aris.modules.vega.models import (
     NodeResource,
 )
 from aris.modules.vega.reports import AgentReport
-from aris.modules.vega.storage_schemas import MessageStorage
+from aris.modules.vega.storage_schemas import MessageStorage, ObservedWindowStorage
 from aris.modules.vega.target_schemas import GpuInventoryLabel
 from aris.modules.vega.usage_archive_schemas import MAX_ARCHIVE_MESSAGES
 
@@ -291,6 +291,27 @@ class VegaRepository:
 
     def resource(self, node_id: str) -> NodeResource | None:
         return self.session.get(NodeResource, node_id)
+
+    def observed_window_storage(
+        self, agent_id: str, node_id: str, start: datetime, end: datetime
+    ) -> ObservedWindowStorage:
+        row = AgentMessage
+        count, late, first, last = self.session.execute(
+            select(
+                func.count(),
+                func.count().filter(row.received_at >= end),
+                func.min(row.seq),
+                func.max(row.seq),
+            ).where(
+                row.agent_id == agent_id,
+                row.node_id == node_id,
+                row.observed_at >= start,
+                row.observed_at < end,
+            )
+        ).one()
+        return ObservedWindowStorage(
+            messages=count, late_arrivals=late, first_seq=first, last_seq=last
+        )
 
     def message_storage(self, cutoff: datetime | None) -> list[MessageStorage]:
         before = (

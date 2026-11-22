@@ -19,3 +19,10 @@ class ObservationStorage(Contract):
     messages: list[MessageStorage]
     deletion_enabled: Literal[False] = False
     blockers: list[str]
+
+
+class ObservedWindowStorage(Contract):
+    messages: int
+    late_arrivals: int
+    first_seq: int | None
+    last_seq: int | None

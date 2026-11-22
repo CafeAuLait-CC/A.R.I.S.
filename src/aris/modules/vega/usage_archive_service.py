@@ -13,6 +13,7 @@ from aris.core.contracts import DomainError
 from aris.core.time import utc
 from aris.modules.vega.repo import StoredUsageMessage, VegaRepository
 from aris.modules.vega.resource_schemas import ResourceTelemetryBatch
+from aris.modules.vega.storage_schemas import ObservedWindowStorage
 from aris.modules.vega.usage_archive_schemas import (
     MAX_ARCHIVE_SOURCE_CHARACTERS,
     ArchivedUsageItem,
@@ -62,6 +63,18 @@ class VegaUsageArchive:
         self.sessions = sessions
         self.clock = clock or (lambda: datetime.now(UTC))
         self.timeout_ms = timeout_ms
+
+    def observed_window_storage_in_transaction(
+        self, session: Session, query: UsageArchiveHeadQuery, start: datetime, end: datetime
+    ) -> ObservedWindowStorage:
+        """Count packet metadata by reported observation time, without reading payloads."""
+        query = UsageArchiveHeadQuery.model_validate(query.model_dump(mode="json"))
+        if start.utcoffset() is None or end.utcoffset() is None or start >= end:
+            raise ValueError("Storage preview requires a positive aware interval")
+        repo = VegaRepository(session)
+        if repo.usage_source_node(query.agent_id) != query.node_id:
+            raise DomainError("CONFLICT", "Archived usage source binding differs", 409)
+        return repo.observed_window_storage(query.agent_id, query.node_id, start, end)
 
     def head(self, query: UsageArchiveHeadQuery) -> UsageArchiveHead:
         try:

@@ -12,6 +12,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from aris.core.commands.budgets import database_failure, transaction_budget
 from aris.core.contracts import Contract, DomainError
 from aris.modules.lyra.retention_repo import RetentionRepository
+from aris.modules.lyra.source_prefix_repo import SourcePrefixRepository
+from aris.modules.lyra.trace_consumer_schemas import UsageTraceConfiguration
 from aris.modules.vega.usage_archive_schemas import UsageArchiveHeadQuery
 from aris.modules.vega.usage_archive_service import VegaUsageArchive
 
@@ -48,6 +50,46 @@ class LyraRetentionInventory(Contract):
     consumers: tuple[TraceRetentionDependency, ...] = Field(max_length=MAX_CONSUMERS)
     recording_jobs_by_state: dict[str, int]
     evidence: RetentionEvidenceCounts
+
+
+class TraceRetentionBoundary(Contract):
+    consumer_id: str
+    processed_through_seq: int
+    checkpoint_through_seq: int | None
+    earliest_protected_seq: int | None
+
+
+def trace_retention_boundaries_in_transaction(
+    session: Session, configuration: UsageTraceConfiguration, before: datetime
+) -> tuple[TraceRetentionBoundary, ...]:
+    """Summarize all durable consumers of the same source without unprotecting any data."""
+    repo = RetentionRepository(session)
+    count = repo.cursor_count()
+    if count > MAX_CONSUMERS:
+        raise DomainError("DEPENDENCY_UNAVAILABLE", "Retention exceeds consumer limit", 503)
+    checkpoints = SourcePrefixRepository(session)
+    boundaries = []
+    for position in repo.positions(count):
+        config = position.configuration
+        if (config.agent_id, config.node_id) != (configuration.agent_id, configuration.node_id):
+            continue
+        if config.consumer_id == configuration.consumer_id and config != configuration:
+            raise DomainError("CONFLICT", "Retention trace configuration differs", 409)
+        prefix = checkpoints.eligible(config, before, position.revision)
+        anchors = (
+            [run.first.seq for run in position.residency.open_runs] if position.residency else []
+        )
+        if position.trace is not None:
+            anchors.append(position.trace.anchor.reference.seq)
+        boundaries.append(
+            TraceRetentionBoundary(
+                consumer_id=config.consumer_id,
+                processed_through_seq=position.after_seq,
+                checkpoint_through_seq=prefix.reference().last_seq if prefix else None,
+                earliest_protected_seq=min(anchors, default=None),
+            )
+        )
+    return tuple(boundaries)
 
 
 def inspect_retention_dependencies(sessions: sessionmaker[Session]) -> LyraRetentionInventory:

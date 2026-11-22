@@ -27,6 +27,7 @@ from aris.apps.composition.lyra_coverage import (
     LyraCoverageRuntimeConfig,
     build_lyra_coverage_components,
 )
+from aris.apps.composition.weekly_retention import preview_week_retention
 from aris.apps.ops.weekly_coverage import WeeklyCoverageConfig, main, run_tick
 from aris.core.access.models import ExternalIdentity, Permission, Role, RoleBinding, RolePermission
 from aris.core.access.schemas import ExternalSubject
@@ -415,6 +416,11 @@ def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
         {**legacy.model_dump(mode="json"), "daily_rollups": True, "session_occupancy": True}
     )
     config = config.model_copy(update={"plans": (definition,)})
+    week = definition.calendar.first_week
+    ongoing = preview_week_retention(schedules, definition, week + timedelta(days=7))
+    assert ongoing.blockers == ("week_still_open",) and ongoing.observations is None
+    unbuilt = preview_week_retention(schedules, definition, week)
+    assert unbuilt.blockers == ("week_report_missing",) and not unbuilt.deletion_enabled
     for _ in range(64):
         tick = run_tick(config, schedules, clock=schedules.clock)
         assert not tick["needs_attention"], tick
@@ -442,7 +448,6 @@ def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
     inspected = verify_daily_coverage(schedules, definition, day, transaction_timeout_ms=30000)
     assert inspected["original_evidence_reverified"] and not inspected["deletion_enabled"]
     assert inspected["report_fingerprint"] == result["fingerprint"]
-    week = definition.calendar.first_week
     assert len(schedules.evidence_review(definition, week).pending_days) == 7
     assert inspected["checked_at"] is None
     checked = verify_daily_coverage(
@@ -450,6 +455,31 @@ def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
     )
     review = schedules.evidence_review(definition, week)
     assert len(review.pending_days) == 6 and not review.deletion_enabled
+    checked_statements = []
+
+    def retention_reads(conn, cursor, statement, parameters, context, executemany):
+        checked_statements.append(statement)
+
+    with schedules.sessions() as db:
+        engine = db.get_bind()
+    event.listen(engine, "before_cursor_execute", retention_reads)
+    try:
+        retirement = preview_week_retention(schedules, definition, week)
+    finally:
+        event.remove(engine, "before_cursor_execute", retention_reads)
+    assert retirement.reviewed == review and not retirement.deletion_enabled
+    assert retirement.observations.messages > 0
+    assert definition.configuration.trace.consumer_id in {
+        consumer.consumer_id for consumer in retirement.known_consumers
+    }
+    assert "partition-recording-fixture" in {
+        consumer.consumer_id for consumer in retirement.known_consumers
+    }
+    assert "unsatisfied_daily_evidence_checks" in retirement.blockers
+    assert "future_report_after_retirement" in retirement.remaining_checks
+    for statement in checked_statements:
+        assert statement.lstrip().split(maxsplit=1)[0].upper() in ("BEGIN", "SELECT", "SET")
+        assert "agent_messages.payload" not in statement.lower()
     (check,) = review.checked_days
     assert check.day == day and check.checked_at.isoformat() == checked["checked_at"]
     evidence = DailyCoverageEvidence(**check.model_dump(exclude={"checked_at"}))
@@ -459,6 +489,16 @@ def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
             definition, evidence.model_copy(update={"snapshot_fingerprint": "0" * 64})
         )
     assert error.value.code == "CONFLICT"
+    with schedules.sessions.begin() as db:
+        db.execute(
+            update(AgentMessage)
+            .where(AgentMessage.id == observation)
+            .values(received_at=retirement.end_at)
+        )
+    late_retirement = preview_week_retention(schedules, definition, week)
+    assert late_retirement.observations.messages == retirement.observations.messages
+    assert late_retirement.observations.late_arrivals == retirement.observations.late_arrivals + 1
+    assert "late_arrivals_need_review" in late_retirement.blockers
     # Simulate expired evidence in this test database only.
     with schedules.sessions.begin() as db:
         db.execute(delete(AgentMessage).where(AgentMessage.id == observation))

@@ -20,6 +20,7 @@ from aris.apps.composition.lyra_coverage import (
     LyraCoverageRuntimeConfig,
     build_lyra_coverage_components,
 )
+from aris.apps.composition.weekly_retention import preview_week_retention
 from aris.apps.ops.identity import read_private
 from aris.core.access.schemas import AccessContract
 from aris.core.contracts import DomainError
@@ -216,15 +217,25 @@ def main(argv: list[str] | None = None) -> int:
         metavar="YYYY-MM-DD",
         help="Show the saved evidence checks of one Monday week",
     )
+    mode.add_argument(
+        "--retention-week",
+        type=date.fromisoformat,
+        metavar="YYYY-MM-DD",
+        help="Inspect retention dependencies for one Monday week without changing records",
+    )
     parser.add_argument(
         "--record-verification",
         action="store_true",
         help="Save the successful check of --verify-day",
     )
     args = parser.parse_args(argv)
-    review = args.verify_day is not None or args.review_week is not None
+    review = any(
+        value is not None for value in (args.verify_day, args.review_week, args.retention_week)
+    )
     if review and args.from_daily_week is not None:
-        parser.error("Choose the natural week with --verify-day or --review-week")
+        parser.error(
+            "Choose the natural week with --verify-day, --review-week, or --retention-week"
+        )
     if args.record_verification and args.verify_day is None:
         parser.error("--record-verification requires --verify-day")
     engine = None
@@ -265,6 +276,22 @@ def main(argv: list[str] | None = None) -> int:
         engine = build_engine(config.database_url.get_secret_value())
         check_database(engine)
         schedules = CoverageScheduleService(session_factory(engine), enabled=config.enabled)
+        if args.retention_week is not None:
+            print(
+                json.dumps(
+                    {
+                        "state": "retention_preview",
+                        "plans": [
+                            preview_week_retention(schedules, plan, args.retention_week).model_dump(
+                                mode="json"
+                            )
+                            for plan in config.plans
+                        ],
+                        "deletion_enabled": False,
+                    }
+                )
+            )
+            return 0
         if args.verify_day is not None:
             print(
                 json.dumps(
