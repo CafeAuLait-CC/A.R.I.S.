@@ -5,8 +5,10 @@ import json
 import signal
 import sys
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, date, datetime
 from pathlib import Path
+from threading import Event, Lock
 from time import monotonic, sleep
 from uuid import UUID, uuid4
 
@@ -38,6 +40,8 @@ from aris.modules.nova.coverage_schedule_service import CoverageScheduleService
 from aris.modules.nova.daily_coverage_calendar import daily_coverage_targets
 from aris.modules.nova.report_calendar import weekly_report_period
 from aris.modules.nova.weekly_coverage import weekly_coverage_target
+
+MAX_PLAN_FAILURES = 3
 
 
 class WeeklyCoverageConfig(AccessContract):
@@ -198,6 +202,58 @@ def run_tick(
         "notification_delivery": False,
         "autostart_added": False,
     }
+
+
+def run_periodic(
+    config: WeeklyCoverageConfig,
+    schedules: CoverageScheduleService,
+    stop_requested: Callable[[], bool],
+    emit: Callable[[dict[str, JsonValue]], None],
+) -> int:
+    shutdown = Event()
+    output_lock = Lock()
+
+    def stopping() -> bool:
+        return stop_requested() or shutdown.is_set()
+
+    def run_plan(definition: CoverageScheduleDefinition) -> bool:
+        plan_config = config.model_copy(update={"plans": (definition,)})
+        failures = 0
+        while not stopping():
+            result = run_tick(plan_config, schedules)
+            failures = failures + 1 if result.get("needs_attention") else 0
+            with output_lock:
+                emit(result)
+                if failures >= MAX_PLAN_FAILURES:
+                    emit(
+                        {
+                            "state": "plan_retry_paused",
+                            "schedule_id": str(definition.id),
+                            "node_id": definition.calendar.scope.id,
+                            "consecutive_failures": failures,
+                        }
+                    )
+            if failures >= MAX_PLAN_FAILURES:
+                return True
+            if result.get("made_progress") and not failures:
+                continue
+            resume_at = monotonic() + config.poll_seconds
+            while not stopping():
+                remaining = resume_at - monotonic()
+                if remaining <= 0:
+                    break
+                sleep(min(0.1, remaining))
+        return bool(failures)
+
+    needs_attention = False
+    with ThreadPoolExecutor(max_workers=len(config.plans)) as pool:
+        workers = [pool.submit(run_plan, plan) for plan in config.plans]
+        try:
+            for worker in as_completed(workers):
+                needs_attention |= worker.result()
+        finally:
+            shutdown.set()
+    return int(needs_attention)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -464,6 +520,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.run:
             for value in (signal.SIGINT, signal.SIGTERM):
                 signal.signal(value, request_stop)
+            if args.from_daily_week is None:
+                return run_periodic(
+                    config,
+                    schedules,
+                    lambda: stop_requested,
+                    lambda result: print(json.dumps(result), flush=True),
+                )
         while True:
             result = run_tick(
                 config, schedules, status_only=args.status, from_daily_week=args.from_daily_week

@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 from aris.core.access.history_schemas import HistoricalNodeUserBatch, HistoricalNodeUserQuery
 from aris.core.access.history_service import NodeUserHistoryService
 from aris.core.contracts import DomainError
+from aris.modules.lyra.coverage_build_schemas import StoredCoverageBuild, StoredCoverageBuildStep
+from aris.modules.lyra.coverage_repo import ProcessingCoverageRepository
 from aris.modules.lyra.coverage_schemas import (
     CoverageIdentity,
     StoredProcessingCoverage,
@@ -33,6 +35,42 @@ def selected_window_manifests(
         if monotonic() >= deadline:
             raise DomainError(
                 "RETRYABLE_DATABASE_ERROR", "Window source verification budget exceeded", 503
+            )
+    return tuple(result)
+
+
+def committed_build_manifests(
+    session: Session,
+    plan: StoredCoverageBuild,
+    steps: tuple[StoredCoverageBuildStep, ...],
+    deadline: float,
+) -> tuple[StoredProcessingCoverage, ...]:
+    """Use the proofs committed by a completed build step under its fixed boundaries."""
+    repository = ProcessingCoverageRepository(session)
+    result = []
+    for step in steps:
+        manifest = repository.get(step.manifest.id)
+        if manifest is None or manifest.fingerprint != step.manifest.fingerprint:
+            raise DomainError("CONFLICT", "Committed build manifest differs", 409)
+        analysis = manifest.analysis
+        if (
+            analysis.configuration != plan.configuration
+            or analysis.read_at != plan.read_at
+            or (analysis.identities and analysis.identity_revision != plan.identity_revision)
+            or analysis.request.ledger != plan.request.ledger
+            or analysis.request.start_at != plan.request.query.start_at
+            or analysis.request.end_at != plan.request.query.end_at
+            or analysis.request.attestation_id != step.attestation_id
+            or analysis.attestation.fingerprint != step.attestation_fingerprint
+            or analysis.attestation.revision != step.revision
+            or analysis.attestation.first_seq != step.first_seq
+            or analysis.attestation.last_seq != step.last_seq
+        ):
+            raise DomainError("CONFLICT", "Committed manifest source or window differs", 409)
+        result.append(manifest)
+        if monotonic() >= deadline:
+            raise DomainError(
+                "RETRYABLE_DATABASE_ERROR", "Build manifest read budget exceeded", 503
             )
     return tuple(result)
 

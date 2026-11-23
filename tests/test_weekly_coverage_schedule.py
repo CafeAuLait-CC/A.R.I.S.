@@ -8,6 +8,7 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from threading import Event
 from time import monotonic
 from uuid import UUID, uuid4
 
@@ -32,7 +33,7 @@ from aris.apps.composition.lyra_coverage import (
     build_lyra_coverage_components,
 )
 from aris.apps.composition.weekly_retention import _health_checked_prefix, preview_week_retention
-from aris.apps.ops.weekly_coverage import WeeklyCoverageConfig, main, run_tick
+from aris.apps.ops.weekly_coverage import WeeklyCoverageConfig, main, run_periodic, run_tick
 from aris.core.access.models import ExternalIdentity, Permission, Role, RoleBinding, RolePermission
 from aris.core.access.schemas import ExternalSubject
 from aris.core.commands.schemas import ActorContext
@@ -146,11 +147,22 @@ def test_native_idle_worker_stops_with_single_and_repeated_signals(
         )
         target = None
         try:
-            assert io_ready.select([process.stdout], [], [], 15)[0], (
-                "native worker did not report ready"
-            )
-            first = json.loads(process.stdout.readline())
-            assert all(item["state"] == "caught_up" for item in first["plans"])
+            ready = set()
+            expected = {str(plan.id) for plan in config.plans}
+            output = b""
+            deadline = monotonic() + 15
+            while ready != expected:
+                assert io_ready.select([process.stdout], [], [], max(0, deadline - monotonic()))[
+                    0
+                ], "native worker did not report ready"
+                chunk = os.read(process.stdout.fileno(), 65536)
+                assert chunk, "native worker stopped before both plans were ready"
+                lines = (output + chunk).split(b"\n")
+                output = lines.pop()
+                for line in lines:
+                    for item in json.loads(line)["plans"]:
+                        assert item["state"] == "caught_up"
+                        ready.add(item["schedule_id"])
             candidates = []
             for row in subprocess.check_output(
                 ["ps", "-axo", "pid=,pgid=,uid=,command="], text=True
@@ -292,6 +304,45 @@ def test_reporting_scan_preserves_the_earliest_unverified_health_pair():
     partial = _health_checked_prefix(prefix, scanned(7, 10))
     assert (partial.first_seq, partial.through_seq, partial.stopped_before_seq) == (8, 10, 11)
     assert _health_checked_prefix(prefix, scanned(1, 12)) == prefix
+
+
+def test_failing_weekly_plan_pauses_without_blocking_the_other_plan(
+    partition_recording, settings, monkeypatch
+):
+    import aris.apps.ops.weekly_coverage as operator
+
+    schedules, config, failed, _, _ = setup(partition_recording, settings)
+    healthy = failed.model_copy(
+        update={"calendar": failed.calendar.model_copy(update={"report_type": "usage.mine"})}
+    )
+    config = config.model_copy(update={"plans": (failed, healthy), "poll_seconds": 1})
+    failure_started, healthy_advanced, stop = Event(), Event(), Event()
+    attempts = 0
+    logs = []
+
+    def tick(plan_config, _):
+        nonlocal attempts
+        (plan,) = plan_config.plans
+        if plan.id == failed.id:
+            attempts += 1
+            failure_started.set()
+            assert healthy_advanced.wait(3), "healthy plan waited on a failing transaction"
+            return {"state": "failed", "needs_attention": True, "made_progress": False}
+        assert plan.id == healthy.id and failure_started.wait(3)
+        healthy_advanced.set()
+        return {"state": "source_built", "needs_attention": False, "made_progress": False}
+
+    def emit(value):
+        logs.append(value)
+        if value["state"] == "plan_retry_paused":
+            stop.set()
+
+    monkeypatch.setattr(operator, "run_tick", tick)
+    assert run_periodic(config, schedules, stop.is_set, emit) == 1
+    assert attempts == 3 and healthy_advanced.is_set()
+    assert [value["schedule_id"] for value in logs if value["state"] == "plan_retry_paused"] == [
+        str(failed.id)
+    ]
 
 
 def test_disabled_validate_and_status_do_not_create_plans_or_databases(

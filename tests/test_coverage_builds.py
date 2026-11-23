@@ -204,6 +204,7 @@ def test_late_proof_alias_with_same_physical_ledger_head_cannot_enter_an_admitte
 
 def test_finished_generation_uses_complete_proof_prefix_and_does_not_promote_missing_steps(
     stable_recording,
+    monkeypatch,
 ):
     writer, closed, (app, _, _) = stable_recording
     writer.accept_and_record(POST, open_reference(app, closed))
@@ -216,7 +217,13 @@ def test_finished_generation_uses_complete_proof_prefix_and_does_not_promote_mis
     assert error.value.code == "COVERAGE_BUILD_INCOMPLETE" and counts(build) == before
     with pytest.raises(DomainError, match="progress changed"):
         build.advance(POST, next_step(plan, 1))
-    result = drain(build, plan).snapshot
+
+    def unexpected_replay(*_):
+        pytest.fail("Finalizing committed coverage must not replay the source")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(build.coverage, "reverify_in_transaction", unexpected_replay)
+        result = drain(build, plan).snapshot
     assert (
         result.window.source_prefix_complete
         and result.window.total_usage_microseconds == 135_000_000

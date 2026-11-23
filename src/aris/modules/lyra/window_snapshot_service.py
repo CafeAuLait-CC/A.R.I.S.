@@ -20,7 +20,10 @@ from aris.core.events import DomainEvent, OutboxEntry
 from aris.modules.lyra.coverage_build_repo import CoverageBuildRepository
 from aris.modules.lyra.coverage_ledger import indexed_coverage_ledger
 from aris.modules.lyra.coverage_ledger_service import CoverageLedgerReader
-from aris.modules.lyra.coverage_schemas import ProcessingCoverageConfiguration
+from aris.modules.lyra.coverage_schemas import (
+    ProcessingCoverageConfiguration,
+    StoredProcessingCoverage,
+)
 from aris.modules.lyra.coverage_service import ProcessingCoverageService
 from aris.modules.lyra.ledger_repo import UsageLedgerRepository
 from aris.modules.lyra.ledger_segment_decode import segment_decoding_scope
@@ -31,7 +34,11 @@ from aris.modules.lyra.window_coverage import sampled_usage_window
 from aris.modules.lyra.window_reader import UsageWindowReader
 from aris.modules.lyra.window_reader_schemas import SavedWindowView
 from aris.modules.lyra.window_schemas import SampledUsageWindow
-from aris.modules.lyra.window_snapshot_inputs import selected_window_manifests, window_identities
+from aris.modules.lyra.window_snapshot_inputs import (
+    committed_build_manifests,
+    selected_window_manifests,
+    window_identities,
+)
 from aris.modules.lyra.window_snapshot_repo import UsageWindowRepository
 from aris.modules.lyra.window_snapshot_schemas import (
     CaptureUsageWindow,
@@ -123,10 +130,12 @@ class UsageWindowSnapshotService:
         revision: int | None,
         read_at: datetime,
         deadline: float,
+        *,
+        committed: tuple[StoredProcessingCoverage, ...] | None = None,
     ) -> SampledUsageWindow:
         with segment_decoding_scope(session):
             return self._build_in_scope(
-                session, request, config, source, revision, read_at, deadline
+                session, request, config, source, revision, read_at, deadline, committed=committed
             )
 
     def _build_in_scope(
@@ -138,6 +147,8 @@ class UsageWindowSnapshotService:
         revision: int | None,
         read_at: datetime,
         deadline: float,
+        *,
+        committed: tuple[StoredProcessingCoverage, ...] | None = None,
     ) -> SampledUsageWindow:
         if request.prefix_checkpoint is not None:
             SourcePrefixRepository(session).checked(
@@ -145,8 +156,13 @@ class UsageWindowSnapshotService:
                 config.trace,
                 request.query.start_at,
             )
-        UsageWindowRepository(session).check_manifest_bytes(request.manifests)
-        manifests = selected_window_manifests(session, self.coverage, request.manifests, deadline)
+        if committed is None:
+            UsageWindowRepository(session).check_manifest_bytes(request.manifests)
+            manifests = selected_window_manifests(
+                session, self.coverage, request.manifests, deadline
+            )
+        else:
+            manifests = committed
         ledger_context = None
         if config.method == "indexed_sampled_residency_edges":
             reader = CoverageLedgerReader(
@@ -295,6 +311,8 @@ class UsageWindowSnapshotService:
             ledger=plan.request.ledger,
             manifests=tuple(step.manifest for step in steps),
         )
+        repo.check_manifest_bytes(request.manifests)
+        committed = committed_build_manifests(session, plan, steps, deadline)
         read_at = self._now()
         result = self._build(
             session,
@@ -304,6 +322,7 @@ class UsageWindowSnapshotService:
             plan.identity_revision,
             read_at,
             deadline,
+            committed=committed,
         )
         if not result.source_prefix_complete:
             raise DomainError("CONFLICT", "Coverage build source prefix is incomplete", 409)
