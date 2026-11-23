@@ -68,9 +68,12 @@ from aris.modules.nova.coverage_schedule_service import CoverageScheduleService
 from aris.modules.nova.daily_coverage_calendar import daily_coverage_targets
 from aris.modules.nova.report_calendar import WeeklyReportPlan, weekly_report_period
 from aris.modules.nova.weekly_coverage import weekly_coverage_target
+from aris.modules.vega import service as vega_service
 from aris.modules.vega.models import AgentMessage
 from aris.modules.vega.storage_schemas import RetentionPrefixPreview
 from aris.modules.vega.usage_archive_schemas import UsageArchiveHeadQuery
+from tests import test_telemetry
+from tests.test_administration import NOW
 from tests.test_heartbeat import beat, heartbeat
 from tests.test_historical_usage_facts import owner, ownership
 from tests.test_recorded_usage import reading_service
@@ -86,6 +89,20 @@ from tests.test_stable_recording_worker import (
 
 __all__ = ["admin_state", "derivations", "history_state", "ledger", "partition_recording"]
 CONTEXT = SchedulerContext(request_id="fixture-weekly-coverage")
+
+
+@pytest.fixture
+def on_time_weekly_recording(monkeypatch, request):
+    class FixtureClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            receipt = NOW + timedelta(seconds=180)
+            return receipt.astimezone(tz) if tz is not None else receipt.replace(tzinfo=None)
+
+    with monkeypatch.context() as clock:
+        clock.setattr(vega_service, "datetime", FixtureClock)
+        clock.setattr(test_telemetry, "datetime", FixtureClock)
+        return request.getfixturevalue("partition_recording")
 
 
 @pytest.mark.skipif(os.name != "posix", reason="native Unix signal contract")
@@ -508,8 +525,9 @@ def test_closed_days_survive_restart_and_feed_weekly_report_without_raw_samples(
 
 
 def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
-    partition_recording, settings
+    on_time_weekly_recording, settings
 ):
+    partition_recording = on_time_weekly_recording
     schedules, config, legacy, _, _ = setup(partition_recording, settings)
     definition = CoverageScheduleDefinition.model_validate(
         {**legacy.model_dump(mode="json"), "daily_rollups": True, "session_occupancy": True}
