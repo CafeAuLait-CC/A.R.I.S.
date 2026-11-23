@@ -105,6 +105,7 @@ class MemberRuntimeConfig(AccessContract):
     poll_seconds: float = Field(default=1, ge=0.1, le=60)
     activity_preview: ActivityPreviewConfig | None = None
     coverage_plan_ids: tuple[UUID, ...] = Field(default=(), max_length=8)
+    combined_weekly_reports: bool = Field(default=False, strict=True)
     personal_node_snapshots: bool = Field(default=False, strict=True)
     session_occupancy: bool = False
 
@@ -112,6 +113,10 @@ class MemberRuntimeConfig(AccessContract):
     def fixed_namespace_and_origin(self) -> "MemberRuntimeConfig":
         if len(set(self.coverage_plan_ids)) != len(self.coverage_plan_ids):
             raise ValueError("coverage plan IDs must be unique")
+        if self.combined_weekly_reports and not 2 <= len(self.node_ids) == len(
+            self.coverage_plan_ids
+        ):
+            raise ValueError("combined weekly reports require one configured plan for each node")
         parts = urlsplit(self.origin)
         if (
             self.namespace.provider != "slack"
@@ -292,6 +297,7 @@ def build_member_components(
         weekly_reports=WeeklyReportReader(history),
         weekly_plans=plans,
         coverage_plans=coverage_plans,
+        combined_weekly_reports=config.combined_weekly_reports,
         activity=activity,
     )
     roster = None

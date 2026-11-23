@@ -57,6 +57,95 @@ window.createWeeklyUsage = function ({el, request, lock, message, isBusy, select
     }catch(error){if(ticket===version)message(error.message,true);}finally{if(ticket===version)lock(false);}
   }
   async function download(kind){if(isBusy() || !chosen)return;const ticket=version,input={...chosen};lock(true);try{const blob=await (await request(`weekly/${kind}`,input)).blob();if(ticket!==version)return;const url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download=`aris-weekly-usage.${kind==='report' ? 'html':'csv'}`;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);message('已导出这份保存的周报。');}catch(error){if(ticket===version)message(error.message,true);}finally{if(ticket===version)lock(false);}}
+  let combined = null;
+  let combinedVersion = 0;
+  const combinedDate = el('combined-week-date');
+  const coverage = {complete:'完整', partial:'部分覆盖', unknown:'未知', missing:'待生成'};
+
+  function clearCombined() {
+    combinedVersion++;
+    combined = null;
+    el('combined-week-result').hidden = true;
+    el('combined-week-exports').hidden = true;
+    el('combined-week-nodes').replaceChildren();
+    el('combined-week-summary').textContent = '';
+  }
+
+  function configureCombined(available, timezone) {
+    clearCombined();
+    el('combined-week-panel').hidden = !available;
+    if (!available) return;
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone:timezone, year:'numeric', month:'2-digit', day:'2-digit',
+    }).formatToParts(new Date());
+    const fields = Object.fromEntries(parts.map(part => [part.type, part.value]));
+    const monday = new Date(`${fields.year}-${fields.month}-${fields.day}T00:00:00Z`);
+    monday.setUTCDate(monday.getUTCDate() - ((monday.getUTCDay() + 6) % 7) - 7);
+    combinedDate.value = monday.toISOString().slice(0, 10);
+  }
+
+  async function readCombined(event) {
+    event.preventDefault();
+    if (isBusy() || el('combined-week-panel').hidden) return;
+    clearCombined();
+    const ticket = combinedVersion;
+    const input = {source:'combined_daily_rollups', week:combinedDate.value};
+    lock(true);
+    message('正在读取全部节点周报…');
+    try {
+      const report = await (await request('weekly/read', input)).json();
+      if (ticket !== combinedVersion) return;
+      const present = report.nodes.some(value => value.report_id);
+      const amount = value => value === null ? '未知' : hours(value);
+      el('combined-week-summary').textContent = present
+        ? `${report.week} 起 · ${report.timezone} · ${coverage[report.coverage]} · 已核实合计 ${amount(report.verified_usage_microseconds)} GPU 小时 · 完整用量 ${amount(report.total_usage_microseconds)}`
+        : `${report.week} 起 · ${report.timezone} · 这周还没有保存的节点周报。`;
+      el('combined-week-nodes').replaceChildren(...report.nodes.map(value => {
+        const row = node('tr', '');
+        const title = node('th', value.node_id);
+        title.scope = 'row';
+        row.append(title, node('td', coverage[value.coverage]),
+          node('td', amount(value.verified_usage_microseconds), 'number'),
+          node('td', amount(value.verified_retained_gap_microseconds), 'number'));
+        return row;
+      }));
+      if (present) combined = {...input, expected_fingerprint:report.fingerprint};
+      el('combined-week-exports').hidden = !present;
+      el('combined-week-result').hidden = false;
+      message('');
+    } catch (error) {
+      if (ticket === combinedVersion) message(error.message, true);
+    } finally {
+      if (ticket === combinedVersion) lock(false);
+    }
+  }
+
+  async function downloadCombined(kind, extension) {
+    if (isBusy() || !combined) return;
+    const ticket = combinedVersion;
+    const input = combined;
+    lock(true);
+    try {
+      const blob = await (await request(`weekly/${kind}`, input)).blob();
+      if (ticket !== combinedVersion) return;
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `aris-combined-week-${input.week}.${extension}`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      message('已导出全部节点周报。');
+    } catch (error) {
+      if (ticket === combinedVersion) message(error.message, true);
+    } finally {
+      if (ticket === combinedVersion) lock(false);
+    }
+  }
+
+  el('combined-week-form').addEventListener('submit', readCombined);
+  combinedDate.addEventListener('change', clearCombined);
+  el('combined-week-html').addEventListener('click', () => downloadCombined('report', 'html'));
+  el('combined-week-csv').addEventListener('click', () => downloadCombined('csv', 'csv'));
   el('weekly-more').addEventListener('click',()=>load(true));el('weekly-report').addEventListener('click',()=>download('report'));el('weekly-csv').addEventListener('click',()=>download('csv'));
-  return {get active(){return active;},set active(value){active=value;el('weekly-results').hidden=!value;},load,reset};
+  return {get active(){return active;},set active(value){active=value;el('weekly-results').hidden=!value;},load,reset,configureCombined};
 };

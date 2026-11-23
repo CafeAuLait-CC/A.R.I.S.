@@ -10,7 +10,7 @@
   const hours = value => (value / 3600000000).toLocaleString("zh-CN", {maximumFractionDigits:3});
   const duration = value => {const seconds = value / 1000000; return seconds >= 3600 ? `${hours(value)} 小时` : seconds >= 60 ? `${(seconds/60).toLocaleString("zh-CN",{maximumFractionDigits:2})} 分钟` : `${seconds.toLocaleString("zh-CN",{maximumFractionDigits:3})} 秒`;};
   function message(value, error = false) {$('message').textContent = value; $('message').hidden = !value; $('message').classList.toggle('error', error);}
-  function lock(value) {busy = value; ['trend-back','query','export','previous','next','node','mode','range','start','end','owner','tab-records','tab-saved','saved-more','saved-report','saved-csv','tab-weekly','weekly-more','weekly-report','weekly-csv','tab-group','group-report','group-csv','tab-activity'].forEach(id => $(id).disabled = value);group.setBusy(value);activity.setBusy(value);if(!value)$('node').disabled=group.active; if(!value && current){$('previous').disabled = current.offset === 0; $('next').disabled = !current.has_more;}
+  function lock(value) {busy = value; ['trend-back','query','export','previous','next','node','mode','range','start','end','owner','tab-records','tab-saved','saved-more','saved-report','saved-csv','tab-weekly','weekly-more','weekly-report','weekly-csv','combined-week-date','combined-week-query','combined-week-html','combined-week-csv','tab-group','group-report','group-csv','tab-activity'].forEach(id => $(id).disabled = value);group.setBusy(value);activity.setBusy(value);if(!value)$('node').disabled=group.active; if(!value && current){$('previous').disabled = current.offset === 0; $('next').disabled = !current.has_more;}
     if(!value && routePending){routePending=false;queueMicrotask(()=>route());}
   }
   async function request(path, body, accept="application/json") {
@@ -122,6 +122,7 @@
     token=browserSessions?'':$('credential').value.trim();$('credential').value='';
     try{if(browserSessions){const response=await fetch('/internal/members/session',{cache:'no-store',credentials:'same-origin',headers:{'X-ARIS-Request':'usage-session'}});if(!response.ok)throw new Error('请先登录实验室工作台。');const identity=await response.json();if(opening!==epoch)return;csrf=identity.csrf_token;portalActor=identity.actor;workbench.session(portalActor);workbench.view('records');}
       session=await (await request('session')).json();if(opening!==epoch)return;saved.active=false;saved.reset();weekly.active=false;weekly.reset();group.active=false;group.reset();activity.active=false;activity.reset();group.configure(session.nodes);
+      weekly.configureCombined(session.combined_weekly_reports_available, session.actor.timezone);
       $('tab-saved').hidden=!session.saved_snapshots_available;$('tab-weekly').hidden=!session.weekly_reports_available;$('tab-group').hidden=!session.group_reports_available;$('tab-records').setAttribute('aria-selected','true');$('tab-saved').setAttribute('aria-selected','false');$('tab-weekly').setAttribute('aria-selected','false');$('tab-group').setAttribute('aria-selected','false');$('tab-activity').setAttribute('aria-selected','false');
       $('node').replaceChildren(...session.nodes.map(node=>new Option(node.node_id,node.node_id)));$('identity').textContent=session.actor.display_name;
       if(browserSessions)workbench.usage(session);
@@ -130,7 +131,7 @@
     }catch(error){if(opening===epoch){token='';message(error.message,true);}}finally{if(opening===epoch)lock(false);}
   }
   $('connect-form').addEventListener('submit',event=>{event.preventDefault();connect();});
-  function clearConnection(){clearDrill();epoch++;token='';csrf='';session=null;portalActor=null;current=null;selection=null;routePending=false;$('export-dialog').close();saved.active=false;saved.reset();weekly.active=false;weekly.reset();group.active=false;group.reset();activity.active=false;activity.reset();lock(false);$('node-filter').hidden=false;
+  function clearConnection(){clearDrill();epoch++;token='';csrf='';session=null;portalActor=null;current=null;selection=null;routePending=false;$('export-dialog').close();saved.active=false;saved.reset();weekly.active=false;weekly.reset();weekly.configureCombined(false);group.active=false;group.reset();activity.active=false;activity.reset();lock(false);$('node-filter').hidden=false;
     if(browserSessions)workbench.session(null);
     $('workspace').hidden=true;$('results').hidden=true;$('connect-panel').hidden=false;$('identity').textContent='本地只读查询';message('');}
   $('disconnect').addEventListener('click',clearConnection);

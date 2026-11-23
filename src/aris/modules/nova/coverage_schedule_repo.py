@@ -1,6 +1,6 @@
 import hashlib
 from datetime import date, datetime, timedelta
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from sqlalchemy import select, text, update
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
@@ -25,6 +25,7 @@ from aris.modules.nova.coverage_schedule_schemas import (
     VerifiedDailyCoverageRevision,
     schedule_canonical,
 )
+from aris.modules.nova.report_calendar import weekly_report_period
 
 
 def inconsistent() -> DomainError:
@@ -93,6 +94,30 @@ class CoverageScheduleRepository:
         if id is None:
             return None
         return self.daily_result(id) if status.definition.daily_rollups else self.result(id)
+
+    def published_daily_week(
+        self,
+        definition: CoverageScheduleDefinition,
+        week: date,
+        *,
+        status: CoverageScheduleStatus | None = None,
+    ) -> DailyCoveragePeriodResult:
+        weekly_report_period(definition.calendar, week)
+        if status is None:
+            status = self.get(definition.id)
+        result = self.daily_result(uuid5(definition.id, week.isoformat()))
+        if status is None or result is None:
+            raise DomainError("NOT_FOUND", "Weekly coverage report not found", 404)
+        if (
+            not definition.daily_rollups
+            or status.definition != definition
+            or result.schedule_id != definition.id
+            or result.definition_fingerprint != definition.fingerprint
+            or result.week != week
+            or status.next_week <= week
+        ):
+            raise DomainError("CONFLICT", "Weekly report schedule differs", 409)
+        return result
 
     def result(self, id: UUID) -> CoveragePeriodResult | None:
         row = (

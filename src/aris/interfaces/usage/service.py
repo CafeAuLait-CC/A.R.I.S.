@@ -129,6 +129,7 @@ class UsageSession(AccessContract):
     weekly_reports_available: bool = False
     weekly_plans_available: bool = False
     coverage_plans_available: bool = False
+    combined_weekly_reports_available: bool = False
     group_reports_available: bool = False
     activity_preview_nodes: tuple[str, ...] = ()
     session_occupancy_available: bool = False
@@ -309,6 +310,7 @@ class UsageHistorySurface:
         weekly_reports: WeeklyReportReader | None = None,
         weekly_plans: WeeklyPlanReader | None = None,
         coverage_plans: CoverageScheduleReader | None = None,
+        combined_weekly_reports: bool = False,
         activity: ActivityPreviewAccess | None = None,
         gpu_labels: UsageGpuLabels | None = None,
         session_occupancy: SessionOccupancyService | None = None,
@@ -322,6 +324,9 @@ class UsageHistorySurface:
         self.weekly_reports = weekly_reports
         self.weekly_plans = weekly_plans
         self.coverage_plans = coverage_plans
+        if combined_weekly_reports and (coverage_plans is None or not 2 <= len(node_ids) <= 8):
+            raise ValueError("combined weekly reports require two to eight configured nodes")
+        self.combined_weekly_reports_configured = combined_weekly_reports
         if activity is not None and (
             activity.reader.sessions is not history.sessions
             or any(node not in node_ids for node in activity.node_ids)
@@ -372,6 +377,10 @@ class UsageHistorySurface:
                     weekly_reports_available=self.weekly_reports is not None,
                     weekly_plans_available=self.weekly_plans is not None,
                     coverage_plans_available=self.coverage_plans is not None,
+                    combined_weekly_reports_available=(
+                        self.combined_weekly_reports_configured
+                        and sum(node.node for node in nodes) == len(self.node_ids)
+                    ),
                     group_reports_available=len(nodes) > 1,
                     activity_preview_nodes=tuple(
                         node.node_id

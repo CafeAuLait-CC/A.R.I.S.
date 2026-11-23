@@ -16,8 +16,12 @@ from aris.core.commands.budgets import transaction_budget
 from aris.core.commands.schemas import ActorContext
 from aris.core.contracts import DomainError
 from aris.modules.lyra.coverage_rollup import CoverageDuration
+from aris.modules.nova.combined_coverage_week import CombinedCoverageWeek, combine_coverage_week
 from aris.modules.nova.coverage_schedule_repo import CoverageScheduleRepository
-from aris.modules.nova.coverage_schedule_schemas import DailyCoveragePeriodResult
+from aris.modules.nova.coverage_schedule_schemas import (
+    CoverageScheduleStatus,
+    DailyCoveragePeriodResult,
+)
 from aris.modules.nova.report_calendar import weekly_report_period
 
 
@@ -164,6 +168,49 @@ class CoverageScheduleReader:
             verified_session_microseconds=verified + gaps if gaps is not None else None,
             durations=durations,
         )
+
+    def combined_report_in_transaction(
+        self,
+        session: Session,
+        actor: ActorContext,
+        *,
+        node_ids: tuple[str, ...],
+        week: date,
+    ) -> CombinedCoverageWeek:
+        for node in node_ids:
+            self.require_report_in_transaction(session, actor, node, "node")
+        repo = CoverageScheduleRepository(session)
+        plans: dict[str, CoverageScheduleStatus] = {}
+        for id in self.plan_ids:
+            status = repo.get(id)
+            if status is None or not status.definition.daily_rollups:
+                continue
+            node = status.definition.calendar.scope.id
+            if node in node_ids:
+                if node in plans:
+                    raise DomainError("CONFLICT", "Multiple daily schedules for a node", 409)
+                plans[node] = status
+        if plans.keys() != set(node_ids):
+            raise DomainError("USAGE_NOT_CONFIGURED", "Combined weekly report is unavailable", 503)
+        timezones = {status.definition.calendar.timezone for status in plans.values()}
+        if len(timezones) != 1:
+            raise DomainError("CONFLICT", "Node report calendars differ", 409)
+        reports: dict[str, DailyCoveragePeriodResult | None] = dict.fromkeys(node_ids)
+        for node, status in plans.items():
+            definition = status.definition
+            if week < definition.calendar.first_week:
+                continue
+            try:
+                reports[node] = repo.published_daily_week(definition, week, status=status)
+            except DomainError as error:
+                if error.code != "NOT_FOUND":
+                    raise
+        try:
+            return combine_coverage_week(week, timezones.pop(), reports)
+        except ValueError:
+            raise DomainError(
+                "CONFLICT", "Saved node reports differ from the calendar", 409
+            ) from None
 
     def read_in_transaction(
         self, session: Session, actor: ActorContext, *, node_id: str, mode: Literal["mine", "node"]

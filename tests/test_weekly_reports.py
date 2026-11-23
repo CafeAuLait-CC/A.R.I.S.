@@ -1,5 +1,6 @@
 import json
 from datetime import UTC, date, datetime, timedelta
+from functools import partial
 from uuid import uuid4
 
 import pytest
@@ -29,7 +30,9 @@ from aris.modules.nova.report_scheduler import enqueue_weekly_reports
 from aris.modules.nova.weekly_plan_reader import WeeklyPlanReader
 from aris.modules.nova.weekly_plan_schemas import WeeklyPreparationLimits
 from aris.modules.nova.weekly_plan_service import WeeklyPlanService
-from tests.test_administration import admin_state
+from aris.modules.vega import service as vega_service
+from tests import test_telemetry, test_usage_derivations, test_usage_ledger
+from tests.test_administration import NOW, admin_state
 from tests.test_mapping_history import history_state
 from tests.test_recorded_usage import readings
 from tests.test_usage_derivations import derivations
@@ -38,6 +41,18 @@ from tests.test_usage_ledger import POST, ledger, post_window
 
 __all__ = ["admin_state", "history_state", "derivations", "ledger", "readings"]
 CONTEXT = SchedulerContext(request_id="fixture-weekly-report")
+
+
+@pytest.fixture(autouse=True)
+def report_source_clock(monkeypatch):
+    class FixtureClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            received = NOW + timedelta(seconds=220)
+            return received.astimezone(tz) if tz is not None else received.replace(tzinfo=None)
+
+    for module in (vega_service, test_telemetry, test_usage_derivations, test_usage_ledger):
+        monkeypatch.setattr(module, "datetime", FixtureClock)
 
 
 def weekly(readings, mode="mine"):
@@ -378,11 +393,9 @@ def test_private_weekly_operator_validates_without_db_and_runs_one_explicit_batc
         )
         assert weekly_main(["--config", str(config), "--validate"]) == 0
         assert not json.loads(capsys.readouterr().out)["database_accessed"]
-    monkeypatch.setattr(
-        operator,
-        "IndexedUsageHistoryService",
-        lambda sessions: IndexedUsageHistoryService(sessions, clock=readings[1][0].clock),
-    )
+    clock = readings[1][0].clock
+    for service in (IndexedUsageHistoryService, SchedulerService, WeeklyPlanService):
+        monkeypatch.setattr(operator, service.__name__, partial(service, clock=clock))
     assert weekly_main(["--config", str(config), "--once"]) == 0
     result = json.loads(capsys.readouterr().out)
     assert result["plans"][0]["tasks_prepared"] == 1 and result["job_states"]["completed"] == 1

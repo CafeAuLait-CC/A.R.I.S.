@@ -781,12 +781,25 @@ def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
     owner = str(definition.calendar.owner_id)
     member = str(partition_recording[2][2][2][4][1])
     role = str(uuid4())
+    second_role, second_grant = str(uuid4()), str(uuid4())
     with schedules.sessions.begin() as db:
         permission = db.scalar(select(Permission.id).where(Permission.name == "usage.read_own"))
-        assert permission
+        full = db.scalar(select(Permission.id).where(Permission.name == "usage.read_all"))
+        assert permission and full
         db.add(Role(id=role, name="fixture-weekly-member"))
+        db.add(Role(id=second_role, name="fixture-weekly-second-node"))
         db.flush()
         db.add(RolePermission(role_id=role, permission_id=permission))
+        db.add(RolePermission(role_id=second_role, permission_id=full))
+        db.add(
+            RoleBinding(
+                id=second_grant,
+                user_id=owner,
+                role_id=second_role,
+                scope_type="node",
+                scope_id="node-b",
+            )
+        )
         db.add(
             RoleBinding(
                 id=str(uuid4()), user_id=member, role_id=role, scope_type="node", scope_id="node-a"
@@ -802,6 +815,13 @@ def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
                 select(ExternalIdentity).where(ExternalIdentity.user_id.in_((owner, member)))
             )
         }
+    second_input = definition.model_dump(mode="json")
+    second_input["calendar"]["scope"]["id"] = "node-b"
+    second_input["configuration"]["trace"].update(
+        agent_id="agent-b", node_id="node-b", consumer_id="weekly-fixture-node-b"
+    )
+    second = CoverageScheduleDefinition.model_validate(second_input)
+    assert schedules.select(CONTEXT, second) is not None
     token_admin, token_member = str(uuid4()), str(uuid4())
     auth = BoundSubjectTokens(
         [
@@ -813,11 +833,12 @@ def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
     surface = UsageHistorySurface(
         UsageHistoryService(schedules.sessions, clock=schedules.clock),
         auth,
-        ("node-a",),
+        ("node-a", "node-b"),
         saved_windows=UsageWindowReader(schedules.sessions),
         coverage_plans=CoverageScheduleReader(
-            schedules.sessions, (definition.id,), include_node_for_personal=True
+            schedules.sessions, (definition.id, second.id), include_node_for_personal=True
         ),
+        combined_weekly_reports=True,
     )
     app = create_app(
         settings,
@@ -872,10 +893,17 @@ def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
         assert owner not in json.dumps(slack) and str(original.id) not in json.dumps(slack)
         assert all(field["type"] == "plain_text" for field in slack["blocks"][2]["fields"])
         with TestClient(app) as client:
+            admin = {"Authorization": f"Bearer {token_admin}"}
+            regular = {"Authorization": f"Bearer {token_member}"}
+            assert client.post("/internal/usage/session", headers=admin).json()[
+                "combined_weekly_reports_available"
+            ]
+            assert not client.post("/internal/usage/session", headers=regular).json()[
+                "combined_weekly_reports_available"
+            ]
+            combined_input = {"source": "combined_daily_rollups", "week": week.isoformat()}
             for route in ("read", "report", "csv"):
                 path = "/internal/usage/weekly/" + route
-                admin = {"Authorization": f"Bearer {token_admin}"}
-                regular = {"Authorization": f"Bearer {token_member}"}
                 visible = client.post(path, headers=admin, json={**payload, "mode": "node"})
                 hidden = client.post(path, headers=regular, json={**payload, "mode": "mine"})
                 denied = client.post(path, headers=regular, json={**payload, "mode": "node"})
@@ -900,6 +928,51 @@ def test_daily_weekly_exports_read_the_saved_report_and_respect_member_scope(
                     rows = list(csv.DictReader(io.StringIO(visible.content.decode("utf-8-sig"))))
                     assert any(row["owner_id"] == owner for row in rows)
                     assert all(None not in row and None not in row.values() for row in rows)
+                requested = {**combined_input, "expected_fingerprint": partial.fingerprint}
+                combined_visible = client.post(path, headers=admin, json=requested)
+                assert combined_visible.status_code == 200, combined_visible.text
+                assert "no-store" in combined_visible.headers["cache-control"]
+                assert client.post(path, headers=regular, json=requested).status_code == 403
+                if route == "read":
+                    assert combined_visible.json() == partial.model_dump(mode="json")
+                else:
+                    assert combined_visible.text == (
+                        combined_html if route == "report" else combined_week_csv(partial)
+                    )
+                    assert (
+                        client.post(
+                            path,
+                            headers=admin,
+                            json={**requested, "expected_fingerprint": "0" * 64},
+                        ).status_code
+                        == 409
+                    )
+            no_reports = client.post(
+                "/internal/usage/weekly/read",
+                headers=admin,
+                json={**combined_input, "week": (week - timedelta(days=7)).isoformat()},
+            ).json()
+            assert len(no_reports["nodes"]) == 2
+            assert all(
+                node["coverage"] == "missing" and node["verified_usage_microseconds"] is None
+                for node in no_reports["nodes"]
+            )
+            assert (
+                client.post(
+                    "/internal/usage/weekly/read",
+                    headers=admin,
+                    json={**combined_input, "week": (week + timedelta(days=1)).isoformat()},
+                ).status_code
+                == 422
+            )
+            with schedules.sessions.begin() as db:
+                db.execute(delete(RoleBinding).where(RoleBinding.id == second_grant))
+            assert (
+                client.post(
+                    "/internal/usage/weekly/read", headers=admin, json=combined_input
+                ).status_code
+                == 403
+            )
         with schedules.sessions.begin() as db:
             db.execute(
                 delete(RolePermission).where(

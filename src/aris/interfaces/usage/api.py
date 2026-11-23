@@ -12,9 +12,10 @@ from aris.interfaces.usage.group_service import GroupUsageInput, group_usage
 from aris.interfaces.usage.saved_service import SavedUsageQuery, SavedUsageRead, saved_usage
 from aris.interfaces.usage.service import UsageHistoryInput, UsageHistorySurface
 from aris.interfaces.usage.weekly_service import (
+    CombinedWeeklyUsageRead,
     WeeklyPlanRead,
+    WeeklyReportRead,
     WeeklyUsageQuery,
-    WeeklyUsageRead,
     weekly_plans,
     weekly_usage,
 )
@@ -101,7 +102,7 @@ def build_router(service: UsageHistorySurface, paths: BrowserPaths = INTERNAL_PA
         selection = (
             await bounded_input(request, WeeklyUsageQuery)
             if route == "query"
-            else await bounded_input(request, WeeklyUsageRead)
+            else (await bounded_input(request, WeeklyReportRead)).root
         )
         output: Literal["html", "csv", "json"] = (
             "html" if route == "report" else "csv" if route == "csv" else "json"
@@ -116,6 +117,11 @@ def build_router(service: UsageHistorySurface, paths: BrowserPaths = INTERNAL_PA
         )
         if isinstance(result, bytes):
             extension = "html" if output == "html" else "csv"
+            filename = (
+                f"aris-combined-week-{selection.week}.{extension}"
+                if isinstance(selection, CombinedWeeklyUsageRead)
+                else f"aris-weekly-usage.{extension}"
+            )
             return Response(
                 result,
                 media_type="text/html; charset=utf-8"
@@ -123,7 +129,7 @@ def build_router(service: UsageHistorySurface, paths: BrowserPaths = INTERNAL_PA
                 else "text/csv; charset=utf-8",
                 headers={
                     **PAGE_HEADERS,
-                    "Content-Disposition": f'attachment; filename="aris-weekly-usage.{extension}"',
+                    "Content-Disposition": f'attachment; filename="{filename}"',
                 },
             )
         return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)

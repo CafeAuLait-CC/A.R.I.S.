@@ -326,7 +326,7 @@ class CoverageScheduleService:
                 transaction_budget(db, 100, 1000, 3000)
                 self._require(db, definition)
                 repo = CoverageScheduleRepository(db)
-                result = self._published_daily_week(repo, definition, week)
+                result = repo.published_daily_week(definition, week)
                 actor = ActorContext(actor_id=calendar.owner_id, request_id=context.request_id)
                 recomposed = WeeklyFromDailyReader(
                     UsageWindowReader(self.sessions)
@@ -344,26 +344,6 @@ class CoverageScheduleService:
                 return result
         except DBAPIError as error:
             raise self._failure(error) from None
-
-    @staticmethod
-    def _published_daily_week(
-        repo: CoverageScheduleRepository, definition: CoverageScheduleDefinition, week: date
-    ) -> DailyCoveragePeriodResult:
-        weekly_report_period(definition.calendar, week)
-        status = repo.get(definition.id)
-        result = repo.daily_result(uuid5(definition.id, week.isoformat()))
-        if status is None or result is None:
-            raise DomainError("NOT_FOUND", "Weekly coverage report not found", 404)
-        if (
-            not definition.daily_rollups
-            or status.definition != definition
-            or result.schedule_id != definition.id
-            or result.definition_fingerprint != definition.fingerprint
-            or result.week != week
-            or status.next_week <= week
-        ):
-            raise DomainError("CONFLICT", "Weekly report schedule differs", 409)
-        return result
 
     @staticmethod
     def _evidence_matches(
@@ -390,7 +370,7 @@ class CoverageScheduleService:
                 transaction_budget(db, 100, 1000, 3000)
                 repo = CoverageScheduleRepository(db)
                 self._require(db, definition)
-                report = self._published_daily_week(repo, definition, week)
+                report = repo.published_daily_week(definition, week)
                 now = self._now()
                 if not self._evidence_matches(report, evidence) or now < report.created_at:
                     raise DomainError("CONFLICT", "Evidence check differs from the report", 409)
@@ -449,7 +429,7 @@ class CoverageScheduleService:
         self._active()
         self._require(db, definition)
         repo = CoverageScheduleRepository(db)
-        if self._published_daily_week(repo, definition, original.week) != original:
+        if repo.published_daily_week(definition, original.week) != original:
             raise DomainError(
                 "CONFLICT", "Weekly report changed before verification was saved", 409
             )
@@ -497,7 +477,7 @@ class CoverageScheduleService:
                 transaction_budget(db, 100, 1000, 3000)
                 self._require(db, definition)
                 repo = CoverageScheduleRepository(db)
-                original = self._published_daily_week(repo, definition, week)
+                original = repo.published_daily_week(definition, week)
                 result = repo.verified_revision(original.id, revision_id)
                 if result is None or result.day != day:
                     raise DomainError("NOT_FOUND", "Saved revision was not found", 404)
@@ -528,7 +508,7 @@ class CoverageScheduleService:
         definition = CoverageScheduleDefinition.model_validate(definition.model_dump(mode="json"))
         self._require(db, definition)
         repo = CoverageScheduleRepository(db)
-        report = self._published_daily_week(repo, definition, week)
+        report = repo.published_daily_week(definition, week)
         checks = repo.evidence_checks(report.id)
         if any(
             not self._evidence_matches(report, check) or check.checked_at < report.created_at
@@ -581,7 +561,7 @@ class CoverageScheduleService:
                     read = None
                     if week >= definition.calendar.first_week:
                         try:
-                            read = self._published_daily_week(repo, definition, week)
+                            read = repo.published_daily_week(definition, week)
                         except DomainError as error:
                             if error.code != "NOT_FOUND":
                                 raise
@@ -622,9 +602,7 @@ class CoverageScheduleService:
                     db.execute(text("BEGIN"))
                 transaction_budget(db, 100, 1000, 3000)
                 self._require(db, definition)
-                report = self._published_daily_week(
-                    CoverageScheduleRepository(db), definition, week
-                )
+                report = CoverageScheduleRepository(db).published_daily_week(definition, week)
                 source = next((source for source in report.report.days if source.day == day), None)
                 if source is None or source.snapshot_id != target.snapshot_id:
                     raise DomainError(
