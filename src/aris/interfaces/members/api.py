@@ -7,7 +7,7 @@ from uuid import uuid4
 from fastapi import APIRouter, FastAPI, Request
 from pydantic import Field, SecretStr, field_validator, model_validator
 from starlette.concurrency import run_in_threadpool
-from starlette.responses import HTMLResponse, JSONResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
 from aris.core.access.password_schemas import (
     ActivatePasswordInput,
@@ -21,8 +21,10 @@ from aris.core.access.sessions import SessionGrant
 from aris.core.contracts import DomainError, ErrorDetail, ErrorResponse
 from aris.interfaces.commands.api import authorization, bounded_input
 from aris.interfaces.identity.slack_directory import SlackRosterQuery
+from aris.interfaces.members.live import PREVIEW_MEDIA_TYPE, PreviewQuery, preview_stream
 from aris.interfaces.members.service import GeneralQuery, MemberPortalSurface
 from aris.interfaces.web_paths import INTERNAL_PATHS, BrowserPaths
+from aris.interfaces.workbench import page_shell, script, stylesheet
 
 COOKIE = "aris_member_session"
 COOKIE_PATH = "/internal"
@@ -242,6 +244,7 @@ def build_router(surface: MemberPortalSurface, paths: BrowserPaths = INTERNAL_PA
                 "nodes": list(surface.node_ids),
                 "workspace_namespace": surface.members.administration.namespace.namespace,
                 "slack_roster_available": surface.roster_source is not None,
+                "live_preview_available": surface.live_preview_origin is not None,
                 "account": (
                     await run_in_threadpool(surface.accounts.summary, identity.user_id)
                 ).model_dump(mode="json"),
@@ -282,7 +285,23 @@ def build_router(surface: MemberPortalSurface, paths: BrowserPaths = INTERNAL_PA
         return JSONResponse(result.model_dump(mode="json"), headers=PAGE_HEADERS)
 
     @router.post(paths.account + "/general")
-    async def general(request: Request) -> JSONResponse:
+    async def general(request: Request) -> Response:
+        if request.headers.get("accept") == PREVIEW_MEDIA_TYPE:
+            token, csrf = cookie(request), request.headers.get("x-csrf-token")
+            if not token or not csrf:
+                raise DomainError("PERMISSION_DENIED", "Sign in to start a preview", 401)
+            source = surface.live_preview_origin
+            if source is None:
+                raise DomainError("PREVIEW_UNAVAILABLE", "Live preview is not configured", 503)
+            if request.query_params:
+                raise DomainError("VALIDATION_ERROR", "Unexpected preview parameters", 422)
+            query = await bounded_input(request, PreviewQuery)
+            actor = await run_in_threadpool(surface.authorize_preview, token, csrf, query.node_ids)
+            return StreamingResponse(
+                preview_stream(surface, source, token, csrf, query, actor),
+                media_type=PREVIEW_MEDIA_TYPE,
+                headers={**PAGE_HEADERS, "X-Accel-Buffering": "no"},
+            )
         data = await bounded_input(request, GeneralQuery)
         result = await run_in_threadpool(
             surface.general, authorization(request), request.state.request_id, data
@@ -291,14 +310,23 @@ def build_router(surface: MemberPortalSurface, paths: BrowserPaths = INTERNAL_PA
 
     @router.get(paths.home, response_class=HTMLResponse)
     def page() -> HTMLResponse:
-        html = paths.render((ASSETS / "index.html").read_text())
+        html = paths.render(page_shell((ASSETS / "index.html").read_text()))
         html = html.replace("<html ", f'<html data-cancel-path="{paths.cancel}" ', 1)
-        return HTMLResponse(html, headers=PAGE_HEADERS)
+        return HTMLResponse(
+            html,
+            headers={
+                **PAGE_HEADERS,
+                "Content-Security-Policy": PAGE_HEADERS["Content-Security-Policy"]
+                + "; img-src data:",
+            },
+        )
 
     @router.get(paths.member_assets + "/{name}")
     def asset(name: Literal["members.js", "members.css"]) -> Response:
+        source = (ASSETS / name).read_text()
+        shared = script() if name.endswith(".js") else stylesheet(portrait=True)
         return Response(
-            paths.render((ASSETS / name).read_text()),
+            paths.render(shared + "\n" + source),
             media_type="text/javascript" if name.endswith(".js") else "text/css",
             headers=PAGE_HEADERS,
         )

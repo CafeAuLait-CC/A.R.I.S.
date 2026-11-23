@@ -13,6 +13,7 @@ class Element {
   addEventListener(name,fn){(this.listeners[name] ||= []).push(fn);}
   showModal(){this.open=true;}
   close(){this.open=false;}
+  focus(){}
 }
 const settle=async()=>{for(let i=0;i<3;i++)await new Promise(setImmediate);};
 async function page(layout,options={}) {
@@ -44,9 +45,10 @@ async function page(layout,options={}) {
     if(path.endsWith('/'+layout.cancel)){control.cancelled++;control.phase='cancelled';return response({outcome:{state:'cancelled'}});}
     throw new Error('Unexpected fixture request '+path);
   };
-  const document={documentElement:{dataset:{cancelPath:layout.cancel}},getElementById:id=>elements.get(id),createElement:tag=>new Element(tag),querySelectorAll:()=>[]};
-  const context={document,window:{addEventListener(){}},fetch,structuredClone,crypto:{randomUUID:()=>crypto.randomUUID()},AbortController,Intl,Date,console,Option:class extends Element{constructor(label,value){super('option');this.textContent=label;this.value=value;}},setTimeout:(fn,delay)=>{const id=++timerID;timers.set(id,{fn,delay});return id;},clearTimeout:id=>timers.delete(id)};
-  vm.runInNewContext(layout.source.replace('\n})();','\n globalThis.testHooks={state,begin,operate};\n})();'),context);
+  const document={documentElement:{dataset:{cancelPath:layout.cancel}},getElementById:id=>elements.get(id),createElement:tag=>new Element(tag),querySelectorAll:()=>[],addEventListener(){}};
+  const context=vm.createContext({document,window:{location:{hash:'#profile'},addEventListener(){}},fetch,structuredClone,crypto:{randomUUID:()=>crypto.randomUUID()},AbortController,Intl,Date,console,Option:class extends Element{constructor(label,value){super('option');this.textContent=label;this.value=value;}},setTimeout:(fn,delay)=>{const id=++timerID;timers.set(id,{fn,delay});return id;},clearTimeout:id=>timers.delete(id)});
+  vm.runInContext(layout.workbench,context);
+  vm.runInContext(layout.source.replace('\n})();','\n globalThis.testHooks={state,begin,operate};\n})();'),context);
   await settle();const hooks=context.testHooks,$=id=>elements.get(id);
   const begin=()=>hooks.begin('identity.edit_own_profile',{expected_revision:2,profile:{display_name:'Updated',timezone:'UTC',email:'draft@example.test'}},new Set());
   const beginMember=()=>{
@@ -60,6 +62,10 @@ let checks=0;
 for(const layout of layouts){
   assert(!layout.html.includes('id="account-remember"'));
   assert(!layout.source.includes("$('account-remember')"));
+  assert(!layout.html.includes('Administrator migration'));
+  assert(layout.html.indexOf('id="login-intro"')<layout.html.indexOf('id="auth-activate"'));
+  assert(layout.html.indexOf('id="auth-activate"')<layout.html.indexOf('id="login-form"'));
+  assert(layout.html.indexOf('id="login-form"')<layout.html.indexOf('id="auth-reset"'));
   {
     const p=await page(layout,{signedOut:true});
     p.$('login-username').value='test-only';p.$('login-password').value='fixture-password-123';

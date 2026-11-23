@@ -1,45 +1,149 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ARIS · Members &amp; access</title>
+  <meta name="theme-color" content="#f2f5f7">
+  <title>A.R.I.S. · 实验室工作台</title>
   <link rel="stylesheet" href="/internal/members/ui/assets/members.css">
   <script src="/internal/members/ui/assets/members.js" defer></script>
 </head>
 <body>
+<!-- workbench-open -->
 <main>
-  <header class="page-header"><div><p class="eyebrow">ARIS · Workspace</p><h1>Members &amp; access</h1><p class="subtitle">Manage your profile, members and resource statistics.</p></div><div id="account" hidden><span id="actor-name"></span><span id="actor-role" class="badge"></span><button id="sign-out" type="button" class="quiet">Sign out</button></div></header>
-  <section id="login-panel" class="panel login-panel" aria-labelledby="login-title">
-    <h2 id="login-title">Sign in</h2><p id="login-intro" class="muted">Enter your username and password.</p>
-    <nav class="auth-tabs" aria-label="Account access"><button id="auth-sign-in" type="button" class="quiet" aria-current="page">Sign in</button><button id="auth-activate" type="button" class="quiet">Activate account</button><button id="auth-reset" type="button" class="quiet">Reset password</button></nav>
+  <section id="login-panel" class="login-panel" aria-labelledby="login-title">
+    <div class="auth-main">
+      <a class="aris-brand" href="/internal/members/ui"><span class="aris-mark" aria-hidden="true">A</span><span><strong>A.R.I.S.</strong><small>实验室工作台</small></span></a>
+      <div class="auth-content" lang="en">
+    <h1 id="login-title">Sign in</h1><p class="muted"><span id="login-intro">Enter your username and password.</span> <span id="login-signup">Don’t have an account? <button id="auth-activate" class="auth-link" type="button">Sign up</button></span></p>
     <form id="login-form"><label for="login-username">Username<input id="login-username" autocomplete="username" required spellcheck="false"></label><label for="login-password">Password<input id="login-password" type="password" autocomplete="current-password" required></label><label class="check"><input id="remember" type="checkbox" checked> Keep me signed in for 7 days</label><button id="sign-in" type="submit">Sign in</button></form>
     <form id="invitation-form" hidden><label for="invitation-username">Username<input id="invitation-username" autocomplete="username" required spellcheck="false"></label><button id="send-invitation" type="button">Send invitation code</button><p id="invitation-message" class="muted small" role="status" aria-live="polite"></p><div id="invitation-fields" hidden><label for="invitation-code">Invitation code<input id="invitation-code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required></label><label for="invitation-password">New password<input id="invitation-password" type="password" autocomplete="new-password" required></label><label for="invitation-confirm">Confirm password<input id="invitation-confirm" type="password" autocomplete="new-password" required></label><label class="check"><input id="invitation-remember" type="checkbox" checked> Keep me signed in for 7 days</label><button id="complete-invitation" type="submit">Activate account</button></div></form>
-    <details id="legacy-login" class="migration-login"><summary>Administrator migration</summary><p class="muted small">Use your previous credential once, then set a username and password in your profile.</p><form id="legacy-form"><label for="credential">Previous personal credential<input id="credential" type="password" autocomplete="off" required spellcheck="false"></label><label class="check"><input id="legacy-remember" type="checkbox" checked> Keep me signed in for 7 days</label><button id="legacy-sign-in" type="submit">Continue</button></form></details>
+    <div class="auth-links" role="group" aria-label="Account access"><button id="auth-sign-in" class="auth-link" type="button" hidden>Back to sign in</button><button id="auth-reset" class="auth-link" type="button">Reset password</button></div>
+        <div id="login-feedback"><div id="notice" class="notice" role="status" aria-live="polite" hidden></div></div>
+      </div>
+    </div>
+    <aside class="auth-art" aria-label="Aris">
+      <div class="auth-portrait"></div>
+      <h2>A.R.I.S.</h2><p>Aris · 实验室协调</p>
+    </aside>
   </section>
-  <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
   <section id="workspace" hidden>
-    <nav class="page-nav" aria-label="Workspace"><button id="members-tab" type="button" class="quiet" aria-current="page">Members</button><button id="profile-tab" type="button" class="quiet">Your profile</button><button id="general-tab" type="button" class="quiet">General statistics</button><a href="/internal/usage/ui" class="button-link">Usage statistics</a></nav>
-    <section id="members-panel" class="panel" aria-labelledby="members-title">
-      <div class="section-heading"><div><h2 id="members-title">Members</h2><p class="muted">New members receive the Member role. Access changes require review.</p></div><div class="toolbar"><button id="load-members" type="button" class="quiet">Load registered members</button><button id="load-slack" type="button" class="quiet" hidden>Load Slack members</button><button id="add-member" type="button">Add member</button></div></div>
-      <div class="table-controls"><label for="filter">Filter loaded members<input id="filter" type="search" placeholder="Name or Slack Member ID" autocomplete="off"></label></div>
-      <label class="check"><input id="active-only" type="checkbox" checked> Active members only</label>
-      <div class="bulk-controls"><label class="check"><input id="select-visible" type="checkbox"> Select visible members</label><span id="selection-count">0 selected</span><button id="bulk-member" type="button" class="quiet">Set selected to Member</button><button id="bulk-admin" type="button" class="quiet">Set selected to Admin</button><button id="bulk-remove" type="button" class="quiet danger">Remove selected</button><button id="clear-selection" type="button" class="quiet">Clear selection</button><button id="review-selected" type="button">Save Changes</button></div>
-      <p id="directory-snapshot" class="muted small"></p>
-      <div class="table-scroll"><table><thead id="members-head"></thead><tbody id="members-body"></tbody></table></div>
-      <div class="page-controls"><span id="draft-note" class="muted small">Edits stay in this page until you review and confirm them.</span><button id="resume-review" type="button" class="quiet" hidden>View save progress</button><button id="next-page" type="button" class="quiet" disabled>Load next page</button></div>
-      <p class="muted small">Removing a member disables login and keeps their reservation and usage history. Lowering a role removes old directory-admin/full-statistics bindings while retaining unrelated business roles.</p>
+    <div id="workspace-feedback"></div>
+    <section id="members-panel" aria-labelledby="members-title" hidden>
+      <header class="workbench-page-heading members-heading">
+        <div><h1 id="members-title">成员管理</h1><p>管理 Slack 成员登记、账户状态和 Linux 用户名映射。</p></div>
+        <button id="add-member" type="button"><svg class="aris-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>添加成员</button>
+      </header>
+      <div class="member-tabs" role="tablist" aria-label="成员名单">
+        <button id="members-registered" type="button" role="tab" aria-selected="true" aria-controls="member-results">A.R.I.S. 成员</button>
+        <button id="members-slack" type="button" role="tab" aria-selected="false" aria-controls="member-results" tabindex="-1">Slack 名单</button>
+      </div>
+      <section id="member-results" role="tabpanel" aria-labelledby="members-registered">
+        <div class="panel member-filters">
+          <label class="member-search" for="filter">搜索成员<span><svg class="aris-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 5 5"/></svg><input id="filter" type="search" placeholder="姓名或 Slack Member ID" autocomplete="off"></span></label>
+          <label class="check"><input id="active-only" type="checkbox" checked>仅显示活跃成员</label>
+        </div>
+        <section class="panel member-directory" aria-label="成员搜索结果">
+          <div id="bulk-controls" class="bulk-controls" hidden>
+            <span id="selection-count">已选 0 人</span>
+            <button id="bulk-member" type="button" class="quiet">设为 Member</button>
+            <button id="bulk-admin" type="button" class="quiet">设为 Admin</button>
+            <button id="bulk-remove" type="button" class="quiet danger">停用所选</button>
+            <button id="clear-selection" type="button" class="quiet">清除选择</button>
+            <button id="review-selected" type="button">核对并保存</button>
+          </div>
+          <div class="table-scroll" tabindex="0" role="region" aria-label="成员表格"><table><thead id="members-head"><tr><th scope="col"><input id="select-visible" type="checkbox" aria-label="选择当前显示的成员"></th></tr></thead><tbody id="members-body"></tbody></table></div>
+          <p id="members-empty" class="member-empty muted" role="status" hidden></p>
+          <footer class="page-controls"><span id="member-count" class="muted small" aria-live="polite"></span><button id="resume-review" type="button" class="quiet" hidden>查看保存进度</button><button id="next-page" type="button" class="quiet" hidden>下一页</button></footer>
+        </section>
+      </section>
     </section>
-    <section id="profile-panel" class="panel" aria-labelledby="profile-title" hidden>
-      <h2 id="profile-title">Your profile</h2><form id="profile-form"><div class="profile-fields"><label for="profile-name">Display name<input id="profile-name" maxlength="128" required></label><label for="profile-email">Email<input id="profile-email" type="email" maxlength="254" autocomplete="email"></label></div><p class="muted small">Profile updates cannot change your role or account status.</p><button type="submit">Save Changes</button></form>
+    <section id="profile-panel" aria-labelledby="profile-title" hidden>
+      <header class="workbench-page-heading"><h1 id="profile-title">个人资料</h1></header>
+      <div class="panel profile-card" lang="en"><h2>Account details</h2><form id="profile-form"><div class="profile-fields"><label for="profile-name">Display name<input id="profile-name" maxlength="128" required></label><label for="profile-email">Email<input id="profile-email" type="email" maxlength="254" autocomplete="email"></label></div><p class="muted small">Profile updates cannot change your role or account status.</p><button type="submit">Save Changes</button></form>
       <section class="account-password" aria-labelledby="account-password-title"><h3 id="account-password-title">Account &amp; password</h3><p id="account-note" class="muted small"></p><form id="account-password-form"><div class="profile-fields"><label for="account-username">Username<input id="account-username" autocomplete="username" required spellcheck="false"></label><label id="current-password-field" for="current-password" hidden>Current password<input id="current-password" type="password" autocomplete="current-password"></label><label for="account-password">New password<input id="account-password" type="password" autocomplete="new-password" required></label><label for="account-confirm">Confirm password<input id="account-confirm" type="password" autocomplete="new-password" required></label></div><p id="account-message" class="muted small" role="status" aria-live="polite"></p><button id="save-password" type="submit">Set password</button></form></section>
+      </div>
     </section>
-    <section id="general-panel" class="panel" aria-labelledby="general-title" hidden>
-      <div class="section-heading"><div><h2 id="general-title">General statistics</h2><p class="muted">Hardware and recorded totals, without individual usage details.</p><p class="muted small">Recorded totals do not establish complete actual usage. Accounting is enabled separately from hardware collection.</p></div><button id="refresh-general" type="button">Refresh</button></div>
-      <div class="profile-fields"><label for="general-node">Node<select id="general-node"></select></label><label for="general-start">From<input id="general-start" type="date"></label><label for="general-end">Through<input id="general-end" type="date"></label></div><div id="general-data"></div>
+    <section id="general-panel" aria-labelledby="general-title" hidden>
+      <header class="workbench-page-heading overview-heading">
+        <div><h1 id="general-title">GPU 概览</h1><p>查看各节点的 GPU 状态、利用率与已记录用量。</p></div>
+        <div class="overview-actions">
+          <button id="refresh-general" class="quiet" type="button"><svg class="aris-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5m-3.8-3a7.4 7.4 0 0 1 12.3-3L20 9M4 15l2.5 3a7.4 7.4 0 0 0 12.3-3"/></svg>刷新状态</button>
+          <button id="overview-live-toggle" class="quiet" type="button" aria-pressed="false" hidden disabled>开启实时预览</button>
+        </div>
+      </header>
+      <section class="welcome" aria-labelledby="welcome-title">
+        <div class="welcome-copy"><p>Aris · 实验室协调</p><h2 id="welcome-title">欢迎回来</h2><p id="welcome-note">点击设备查看显存和利用率。</p></div>
+        <div class="welcome-art" aria-hidden="true"></div>
+      </section>
+      <div id="overview-stats" class="overview-metrics" aria-label="资源摘要"></div>
+      <section aria-labelledby="overview-node-title">
+        <header class="overview-section-heading"><h2 id="overview-node-title">节点状态</h2><p id="overview-sample" class="muted small"></p></header>
+        <form id="overview-filters" class="overview-controls panel" aria-label="节点和用量日期筛选">
+          <label for="general-node">节点<select id="general-node"></select></label>
+          <div class="overview-range">
+            <span id="general-range-label">用量日期范围 <small id="general-range-caption"></small></span>
+            <div id="general-range" class="range-options" role="group" aria-labelledby="general-range-label">
+              <button type="button" data-range="week" aria-pressed="true">本周</button>
+              <button type="button" data-range="seven" aria-pressed="false">近 7 天</button>
+              <button type="button" data-range="custom" aria-pressed="false">自定义</button>
+            </div>
+          </div>
+          <div id="overview-custom" class="overview-custom" hidden>
+            <label for="general-start">开始日期<input id="general-start" type="date" required disabled></label>
+            <label for="general-end">结束日期<input id="general-end" type="date" required disabled></label>
+            <button class="quiet" type="submit">应用</button>
+          </div>
+        </form>
+        <p id="general-message" class="notice" role="status" aria-live="polite" hidden></p>
+        <p id="overview-live-status" class="live-preview-status" role="status" aria-live="polite" hidden></p>
+        <div id="general-data" aria-busy="false"></div>
+      </section>
+      <div class="overview-bottom">
+        <section class="panel overview-report">
+          <header><h2>匿名每日用量</h2><a href="/internal/usage/ui">查看个人用量</a></header>
+          <div id="overview-trend" class="overview-report-body"><p class="muted small">正在读取已记录用量…</p></div>
+        </section>
+        <section class="panel overview-report">
+          <header><h2>自动周快照</h2><span id="overview-plan-status" class="status-badge" hidden></span></header>
+          <div class="overview-report-body">
+            <div id="overview-plan" aria-live="polite"><p class="muted small">正在读取计划…</p></div>
+            <a id="overview-plan-link" href="/internal/usage/ui#saved" hidden>查看计划与快照</a>
+          </div>
+        </section>
+      </div>
     </section>
   </section>
 </main>
-<dialog id="review-dialog" aria-labelledby="review-title"><div class="dialog-header"><h2 id="review-title">Confirm changes</h2><button id="close-review" type="button" class="quiet">Close</button></div><div id="review-content" class="review-content"></div><p id="review-status" class="notice" role="status" aria-live="polite"></p><div class="dialog-actions"><button id="withdraw-review" type="button" class="quiet">Cancel</button><button id="confirm-review" type="button">Confirm changes</button></div></dialog>
-<dialog id="add-dialog" aria-labelledby="add-title"><div class="dialog-header"><h2 id="add-title">Add member</h2><button id="close-add" type="button" class="quiet">Close</button></div><form id="add-form"><label for="new-id">Slack Member ID<input id="new-id" pattern="[UW][A-Za-z0-9]+" placeholder="U0123456789" required></label><label for="new-name">Display name<input id="new-name" maxlength="128" required></label><label for="new-email">Email<input id="new-email" type="email" maxlength="254" autocomplete="off"></label><label for="new-username">Login username<input id="new-username" autocomplete="off" spellcheck="false"></label><p class="muted small">Verify the Member ID in Slack. The new member receives Member access and can request their own invitation code after you save a login username.</p><button type="submit">Add to selection</button></form></dialog>
+<!-- workbench-close -->
+<dialog id="gpu-dialog" class="drawer" aria-labelledby="gpu-title">
+  <div class="dialog-header"><h2 id="gpu-title">GPU 详情</h2><button id="close-gpu" class="quiet" type="button">关闭</button></div>
+  <div id="gpu-detail"></div>
+</dialog>
+<dialog id="review-dialog" lang="en" aria-labelledby="review-title"><div class="dialog-header"><h2 id="review-title">Confirm changes</h2><button id="close-review" type="button" class="quiet">Close</button></div><div id="review-content" class="review-content"></div><p id="review-status" class="notice" role="status" aria-live="polite"></p><div class="dialog-actions"><button id="withdraw-review" type="button" class="quiet">Cancel</button><button id="confirm-review" type="button">Confirm changes</button></div></dialog>
+<dialog id="member-dialog" aria-labelledby="member-dialog-title">
+  <div class="dialog-header"><h2 id="member-dialog-title">管理成员</h2><button id="close-member" type="button" class="quiet">关闭</button></div>
+  <p id="member-editor-summary" class="muted small"></p>
+  <form id="member-editor">
+    <div class="member-form-grid">
+      <label for="manage-id">Slack Member ID<input id="manage-id" pattern="[UW][A-Za-z0-9]+" placeholder="U0123456789" required spellcheck="false"></label>
+      <label for="manage-name">显示名<input id="manage-name" maxlength="128" required autofocus></label>
+      <label for="manage-email">邮箱<input id="manage-email" type="email" maxlength="254" autocomplete="off"></label>
+      <label for="manage-username">登录用户名<input id="manage-username" maxlength="64" autocomplete="off" spellcheck="false"></label>
+      <label for="manage-role">角色<select id="manage-role"><option value="member">Member</option><option value="admin">Admin</option></select></label>
+      <label for="manage-active">账户状态<select id="manage-active"><option value="active">启用</option><option value="suspended">停用</option></select></label>
+    </div>
+    <fieldset class="member-mappings">
+      <legend>Linux 用户名映射</legend>
+      <div id="manage-mappings" class="member-form-grid"></div>
+    </fieldset>
+    <p id="member-editor-note" class="muted small"></p>
+    <p id="member-editor-error" class="notice error" role="alert" hidden></p>
+    <div class="dialog-actions">
+      <button id="cancel-member" type="button" class="quiet">取消</button>
+      <button id="stage-member" value="stage" type="submit" class="quiet">暂存到批量</button>
+      <button id="save-member" value="save" type="submit">核对并保存</button>
+    </div>
+  </form>
+</dialog>
 </body>
 </html>

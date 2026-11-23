@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 from aris.interfaces.web_paths import INTERNAL_PATHS, PUBLIC_PATHS
+from aris.interfaces.workbench import page_shell, script
 
 ROOT = Path(__file__).resolve().parents[1]
 local_node = ROOT / ".local/bin/node"
@@ -34,7 +35,8 @@ subprocess.run([node, "-e", parser], input=json.dumps(scripts), text=True, check
 assets = ROOT / "src/aris/interfaces/members/static"
 layouts = [
     {
-        "html": layout.render((assets / "index.html").read_text()),
+        "html": layout.render(page_shell((assets / "index.html").read_text())),
+        "workbench": layout.render(script()),
         "source": layout.render((assets / "members.js").read_text()),
         "account": layout.account,
         "commands": layout.commands,

@@ -11,7 +11,7 @@ from aris.core.commands.schemas import ActorContext
 from aris.core.contracts import DomainError
 from aris.modules.lyra.indexed_usage_history import indexed_usage_summary
 from aris.modules.lyra.indexed_usage_service import IndexedUsageHistoryService
-from aris.modules.lyra.usage_history import UsageHistoryQuery
+from aris.modules.lyra.usage_history import UsageHistoryDay, UsageHistoryQuery, recorded_usage_days
 
 
 class GeneralUsageTotal(AccessContract):
@@ -20,13 +20,16 @@ class GeneralUsageTotal(AccessContract):
     end_at: AwareDatetime
     recorded_microseconds: int = Field(ge=0)
     gpu_count: int = Field(ge=0)
+    days: tuple[UsageHistoryDay, ...] = Field(default=(), max_length=368)
     source_coverage: Literal["unknown"] = "unknown"
     total_usage_microseconds: None = None
     quota_usage_available: Literal[False] = False
 
 
 class GeneralUsageService(IndexedUsageHistoryService):
-    def total(self, actor: ActorContext, query: UsageHistoryQuery) -> GeneralUsageTotal:
+    def total(
+        self, actor: ActorContext, query: UsageHistoryQuery, *, include_days: bool = False
+    ) -> GeneralUsageTotal:
         query = UsageHistoryQuery.model_validate(query.model_dump(mode="json"))
         authority = AccessRequest(
             user_id=actor.actor_id,
@@ -38,21 +41,24 @@ class GeneralUsageService(IndexedUsageHistoryService):
             self.access.require_in_transaction(session, authority)
             if query.end_at > self._now():
                 raise DomainError("VALIDATION_ERROR", "Usage window has not ended", 422)
-            history = indexed_usage_summary(
+            window = self._window_in_transaction(
+                session,
                 query,
-                self._window_in_transaction(
-                    session,
-                    query,
-                    owner_id=None,
-                    deadline=monotonic() + self.timeout_ms / 1000,
-                ),
+                owner_id=None,
+                deadline=monotonic() + self.timeout_ms / 1000,
             )
+            history = indexed_usage_summary(query, window)
             result = GeneralUsageTotal(
                 node_id=history.node_id,
                 start_at=history.start_at,
                 end_at=history.end_at,
                 recorded_microseconds=history.recorded_microseconds,
                 gpu_count=history.gpu_count,
+                days=recorded_usage_days(
+                    query, ((entry.start_at, entry.end_at) for entry in window.active)
+                )
+                if include_days
+                else (),
             )
             self.access.require_in_transaction(session, authority)
             return result

@@ -19,6 +19,7 @@ from aris.interfaces.usage.weekly_service import (
     weekly_usage,
 )
 from aris.interfaces.web_paths import INTERNAL_PATHS, BrowserPaths
+from aris.interfaces.workbench import page_shell, script, stylesheet
 
 ASSETS = Path(__file__).with_name("static")
 PAGE_HEADERS = {
@@ -233,15 +234,12 @@ def build_router(service: UsageHistorySurface, paths: BrowserPaths = INTERNAL_PA
     @router.get(paths.usage_page, response_class=HTMLResponse)
     def page() -> HTMLResponse:
         html = (ASSETS / "index.html").read_text()
-        navigation = ""
-        if getattr(service.authenticator, "browser_sessions", False):
+        browser_sessions = getattr(service.authenticator, "browser_sessions", False)
+        if browser_sessions:
             html = html.replace("<html ", '<html data-member-sessions="true" ', 1)
-            navigation = (
-                '<a id="portal-return" class="portal-return" href="/internal/members/ui">'
-                "Members &amp; profile</a>"
-            )
-        html = html.replace("<!-- member-portal-navigation -->", navigation, 1)
-        return HTMLResponse(paths.render(html), headers=PAGE_HEADERS)
+        return HTMLResponse(
+            paths.render(page_shell(html, enabled=browser_sessions)), headers=PAGE_HEADERS
+        )
 
     @router.get(paths.usage_assets + "/{name}")
     def asset(
@@ -256,8 +254,13 @@ def build_router(service: UsageHistorySurface, paths: BrowserPaths = INTERNAL_PA
             "usage-hardware-chart.js",
         ],
     ) -> Response:
+        source = (ASSETS / name).read_text()
+        if name == "usage.css":
+            source = stylesheet() + "\n" + source
+        elif name == "usage.js":
+            source = script() + "\n" + source
         return Response(
-            paths.render((ASSETS / name).read_text()),
+            paths.render(source),
             headers=PAGE_HEADERS,
             media_type="text/javascript" if name.endswith(".js") else "text/css",
         )

@@ -13,12 +13,13 @@
   <script src="/internal/usage/ui/assets/usage.js" defer></script>
 </head>
 <body>
+<!-- workbench-open -->
 <main>
-  <header class="page-head"><div><p class="eyebrow">ARIS / USAGE</p><h1>使用记录</h1><p class="subtitle">查看 GPU 使用历史，了解时间花在了哪里。</p></div><div class="page-actions"><!-- member-portal-navigation --><span id="identity" class="identity">本地只读查询</span></div></header>
+  <header class="page-head"><div><h1 id="usage-title">用量统计</h1></div><div class="page-actions"><span id="identity" class="identity">本地只读查询</span></div></header>
   <section id="connect-panel" class="panel connect-panel" aria-labelledby="connect-title">
     <div><h2 id="connect-title">连接使用记录</h2><p>使用你的开发访问凭据。凭据仅保留在当前页面内存中。</p></div>
     <form id="connect-form"><label for="credential" class="sr-only">开发访问凭据</label><input id="credential" type="password" autocomplete="off" placeholder="开发访问凭据" required><button type="submit">连接</button></form>
-    <a id="portal-login" href="/internal/members/ui" hidden>前往成员管理页登录</a>
+    <a id="portal-login" href="/internal/members/ui" hidden>前往实验室工作台登录</a>
   </section>
   <div id="message" role="status" aria-live="polite" hidden></div>
   <section id="workspace" hidden>
@@ -53,7 +54,7 @@
         <section class="panel owners-panel"><div class="section-head"><h2>用户汇总</h2><span>已记录 GPU 小时</span></div><div id="owner-summary"></div></section>
       </div>
       <section class="panel records-panel">
-        <div class="section-head"><div><h2 id="records-title">连续使用记录</h2><p id="snapshot-note" class="muted"></p></div><div class="export-actions"><button id="report" class="secondary" type="button">导出报告</button><button id="export" class="secondary" type="button">导出 CSV</button><button id="raw-export" class="secondary" type="button">原始分段 CSV</button></div></div>
+        <div class="section-head"><div><h2 id="records-title">连续使用记录</h2><p id="snapshot-note" class="muted"></p></div><div class="export-actions"><button id="export" class="secondary" type="button">导出用量</button></div></div>
         <div class="table-scroll"><table><thead><tr><th>用户</th><th>GPU</th><th>开始</th><th>结束</th><th id="record-duration-label" class="number">已记录时长</th></tr></thead><tbody id="records"></tbody></table></div>
         <div id="empty" class="empty" hidden><h3>这段时间还没有使用记录</h3><p>可以切换节点或日期再查看。没有记录不代表 GPU 未被使用。</p></div>
         <div class="pagination"><span id="page-note"></span><div><button id="previous" class="secondary" type="button">上一页</button><button id="next" class="secondary" type="button">下一页</button></div></div>
@@ -162,4 +163,18 @@
     </section>
   </section>
 </main>
+<!-- workbench-close -->
+<dialog id="export-dialog" aria-labelledby="export-title">
+  <h2 id="export-title">导出用量</h2>
+  <p id="export-scope"></p>
+  <form id="export-form">
+    <fieldset>
+      <legend>文件格式</legend>
+      <label><input type="radio" name="format" value="csv" checked> 合并 CSV</label>
+      <label><input type="radio" name="format" value="segments"> 原始分段 CSV</label>
+      <label><input type="radio" name="format" value="html"> HTML 报告</label>
+    </fieldset>
+    <div class="export-actions"><button class="secondary" id="cancel-export" type="button">取消</button><button type="submit">下载</button></div>
+  </form>
+</dialog>
 </body></html>

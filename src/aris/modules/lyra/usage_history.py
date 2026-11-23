@@ -1,6 +1,8 @@
 """User and calendar summaries of the existing immutable recorded-use ledger."""
 
+from bisect import bisect_right
 from collections import defaultdict
+from collections.abc import Iterable
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Literal
 from uuid import UUID
@@ -118,6 +120,29 @@ def calendar_boundaries(start: date, end: date, timezone: str) -> tuple[datetime
     )
 
 
+def recorded_usage_days(
+    query: UsageHistoryQuery, intervals: Iterable[tuple[datetime, datetime]]
+) -> tuple[UsageHistoryDay, ...]:
+    zone = ZoneInfo(query.timezone)
+    first = query.start_at.astimezone(zone).date()
+    last = (query.end_at - MICROSECOND).astimezone(zone).date()
+    boundaries = calendar_boundaries(first, last, query.timezone)
+    totals = [0] * (len(boundaries) - 1)
+    for interval_start, interval_end in intervals:
+        start = max(interval_start, query.start_at)
+        end = min(interval_end, query.end_at)
+        index = bisect_right(boundaries, start) - 1
+        while start < end:
+            stop = min(end, boundaries[index + 1])
+            totals[index] += (stop - start) // MICROSECOND
+            start = stop
+            index += 1
+    return tuple(
+        UsageHistoryDay(date=first + timedelta(days=index), recorded_microseconds=total)
+        for index, total in enumerate(totals)
+    )
+
+
 def usage_history(
     query: UsageHistoryQuery,
     *,
@@ -194,20 +219,7 @@ def _history_from_rows(
             key=lambda value: (-value.recorded_microseconds, str(value.owner_id)),
         )
     )
-    zone = ZoneInfo(query.timezone)
-    first = query.start_at.astimezone(zone).date()
-    last = (query.end_at - MICROSECOND).astimezone(zone).date()
-    boundaries = calendar_boundaries(first, last, query.timezone)
-    days = tuple(
-        UsageHistoryDay(
-            date=first + timedelta(days=index),
-            recorded_microseconds=sum(
-                max(timedelta(0), min(row.end_at, end) - max(row.start_at, start)) // MICROSECOND
-                for row in ordered
-            ),
-        )
-        for index, (start, end) in enumerate(zip(boundaries, boundaries[1:], strict=False))
-    )
+    days = recorded_usage_days(query, ((row.start_at, row.end_at) for row in ordered))
     values = dict(
         node_id=query.node_id,
         owner_id=owner_id,

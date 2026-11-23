@@ -161,8 +161,9 @@ def test_browser_cookie_restores_without_reentering_credential_and_logout_revoke
         assert usage_page.status_code == 200
         assert 'data-member-sessions="true"' in usage_page.text
         heading = usage_page.text.split("</header>", 1)[0]
-        assert 'id="portal-return"' in heading
-        assert 'href="/internal/members/ui">Members &amp; profile</a>' in heading
+        assert 'id="workbench-nav"' in heading
+        assert 'href="/internal/members/ui#profile"' in heading
+        assert 'id="workbench-admin" class="workbench-nav-group" hidden' in heading
         assert 'id="connect-panel"' not in heading
         assert (
             post(client, "/internal/usage/session", None).json()["credential_mode"]
@@ -339,10 +340,21 @@ def test_general_response_is_anonymous_while_own_queries_exclude_other_users(por
         )
         login(client, MEMBER_TOKEN)
         result = post(
-            client, "/internal/members/general", {"node_id": "node-a", "window": window()}
+            client,
+            "/internal/members/general",
+            {"node_id": "node-a", "window": window(), "include_days": True},
         )
         assert result.status_code == 200, result.text
         assert result.json()["recorded_usage"]["recorded_microseconds"] == 90000000
+        days = result.json()["recorded_usage"]["days"]
+        assert len(days) == 8
+        assert [day for day in days if day["recorded_microseconds"]] == [
+            {"date": "2026-11-16", "recorded_microseconds": 90000000}
+        ]
+        hardware = result.json()["hardware"]
+        assert hardware["system_observed_at"] is not None
+        assert hardware["system_freshness"] in {"CURRENT", "STALE"}
+        assert "heartbeat_at" in hardware
         assert not any(
             value in result.text
             for value in (

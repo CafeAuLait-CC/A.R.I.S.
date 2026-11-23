@@ -64,8 +64,13 @@ def test_public_pages_and_every_asset_use_only_the_public_layout(public_portal):
             assert response.headers["cache-control"] == "no-store"
             assert "Content-Security-Policy" in response.headers
             assert client.head(path).content == b""
-        assert 'href="/usage"' in client.get("/").text
-        assert 'href="/">Members &amp; profile</a>' in client.get("/usage").text
+        home, usage = client.get("/"), client.get("/usage")
+        assert 'href="/usage#saved"' in home.text
+        assert 'href="/usage#activity"' in home.text
+        assert 'href="/#profile"' in usage.text
+        assert 'id="workbench-nav"' in home.text and 'id="workbench-nav"' in usage.text
+        assert "img-src data:" in home.headers["content-security-policy"]
+        assert "img-src" not in usage.headers["content-security-policy"]
         assert 'data-cancel-path="cancel"' in client.get("/").text
         assert client.get("/account/session").status_code == 401
 

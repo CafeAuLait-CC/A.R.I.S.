@@ -2,13 +2,17 @@
 (() => {
   const $ = id => document.getElementById(id);
   const browserSessions = document.documentElement.dataset.memberSessions === 'true';
+  const workbench = window.arisWorkbench;
+  let portalActor = null, routePending = false;
   let csrf = '';
   let token = "", session = null, current = null, selection = null, busy = false, epoch = 0, drillParent = null;
   const text = (tag, value, className) => {const node = document.createElement(tag); node.textContent = value; if(className) node.className = className; return node;};
   const hours = value => (value / 3600000000).toLocaleString("zh-CN", {maximumFractionDigits:3});
   const duration = value => {const seconds = value / 1000000; return seconds >= 3600 ? `${hours(value)} 小时` : seconds >= 60 ? `${(seconds/60).toLocaleString("zh-CN",{maximumFractionDigits:2})} 分钟` : `${seconds.toLocaleString("zh-CN",{maximumFractionDigits:3})} 秒`;};
   function message(value, error = false) {$('message').textContent = value; $('message').hidden = !value; $('message').classList.toggle('error', error);}
-  function lock(value) {busy = value; ['trend-back','query','export','raw-export','report','previous','next','node','mode','range','start','end','owner','tab-records','tab-saved','saved-more','saved-report','saved-csv','tab-weekly','weekly-more','weekly-report','weekly-csv','tab-group','group-report','group-csv','tab-activity'].forEach(id => $(id).disabled = value);group.setBusy(value);activity.setBusy(value);if(!value)$('node').disabled=group.active; if(!value && current){$('previous').disabled = current.offset === 0; $('next').disabled = !current.has_more;}}
+  function lock(value) {busy = value; ['trend-back','query','export','previous','next','node','mode','range','start','end','owner','tab-records','tab-saved','saved-more','saved-report','saved-csv','tab-weekly','weekly-more','weekly-report','weekly-csv','tab-group','group-report','group-csv','tab-activity'].forEach(id => $(id).disabled = value);group.setBusy(value);activity.setBusy(value);if(!value)$('node').disabled=group.active; if(!value && current){$('previous').disabled = current.offset === 0; $('next').disabled = !current.has_more;}
+    if(!value && routePending){routePending=false;queueMicrotask(()=>route());}
+  }
   async function request(path, body, accept="application/json") {
     const pendingEpoch = epoch;
     const response = await fetch(`/internal/usage/${path}`, {method:'POST', cache:'no-store', credentials:browserSessions?'same-origin':'omit', headers:{Accept:accept,...(browserSessions?{'X-CSRF-Token':csrf}:{Authorization:`Bearer ${token}`}), ...(body ? {'Content-Type':'application/json'} : {})}, body:body ? JSON.stringify(body) : undefined});
@@ -16,9 +20,14 @@
     if(!response.ok) {let code; try{code = (await response.json()).error.code;}catch{code = 'UNAVAILABLE';} const errors = {PERMISSION_DENIED:'没有相应的使用记录读取权限，或凭据已失效。', VALIDATION_ERROR:'请检查日期范围与查询条件。', USAGE_REPORT_TOO_LARGE:'这份账本超出当前查询上限，请稍后再试或联系管理员。', CONFLICT:'这份查询快照暂时不可用，请重新查询。'}; throw new Error(errors[code] || '使用记录暂时不可用，请稍后重试。');}
     return response;
   }
-  function localDate(value) {const parts = new Intl.DateTimeFormat('en-CA',{timeZone:session.actor.timezone,year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(value); const p = Object.fromEntries(parts.map(item => [item.type,item.value])); return `${p.year}-${p.month}-${p.day}`;}
-  function dates() {const end = localDate(new Date()); const start = new Date(`${end}T12:00:00Z`); if($('range').value === 'week') start.setUTCDate(start.getUTCDate() - (start.getUTCDay()+6)%7); else if($('range').value === 'seven') start.setUTCDate(start.getUTCDate()-6); else return; $('start').value = start.toISOString().slice(0,10); $('end').value = end;}
-  function modes() {const node = group.active ? {mine:session.nodes.some(value=>value.mine),node:session.nodes.some(value=>value.node)}:session.nodes.find(value => value.node_id === $('node').value); [...$('mode').options].forEach(option => option.disabled = !node[option.value === 'mine' ? 'mine':'node']); if($('mode').selectedOptions[0].disabled) $('mode').value = node.mine ? 'mine':'node'; $('owner-filter').hidden = activity.active || group.active || weekly.active || $('mode').value !== 'node';$('node-filter').hidden=group.active;$('node').disabled=group.active || busy;$('tab-activity').hidden=$('mode').value!=='node' || !session.activity_preview_nodes.includes($('node').value);['range','start','end'].forEach(id=>$(id).closest('label').hidden=activity.active);}
+  function dates() {
+    const preset=$('range').value;
+    if(preset==='custom')return;
+    const [start,end]=window.arisCalendarRange(session.actor.timezone,preset);
+    $('start').value=start;
+    $('end').value=end;
+  }
+  function modes() {const node = group.active ? {mine:session.nodes.some(value=>value.mine),node:session.nodes.some(value=>value.node)}:session.nodes.find(value => value.node_id === $('node').value); [...$('mode').options].forEach(option => option.disabled = !node[option.value === 'mine' ? 'mine':'node']); if($('mode').selectedOptions[0].disabled) $('mode').value = node.mine ? 'mine':'node'; $('owner-filter').hidden = activity.active || group.active || weekly.active || $('mode').value !== 'node';$('node-filter').hidden=group.active;$('node').disabled=group.active || busy;$('tab-activity').hidden=(browserSessions ? portalActor?.role!=='admin' : $('mode').value!=='node') || !session.activity_preview_nodes.includes($('node').value);['range','start','end'].forEach(id=>$(id).closest('label').hidden=activity.active);if(browserSessions)$('mode').closest('label').hidden=activity.active;}
   const label = id => current.labels[id] || id;
   function clearDrill(){drillParent=null;$('trend-back').hidden=true;}
   function restoreForm(context,start,end,ownerName){
@@ -67,43 +76,98 @@
   const group=window.createGroupUsage({el:$,request,lock,message,isBusy:()=>busy,
     selection:()=>({mode:$('mode').value,window:{kind:'calendar',start_date:$('start').value,end_date:$('end').value,timezone:session.actor.timezone}})});
   const activity=window.createActivityUsage({el:$,request,lock,message,isBusy:()=>busy,selection:()=>$('node').value,timezone:()=>session.actor.timezone});
+  const tabs=['records','saved','weekly','group','activity'];
   async function tab(value){if(busy)return;clearDrill();saved.active=value==='saved';weekly.active=value==='weekly';group.active=value==='group';activity.active=value==='activity';$('results').hidden=activity.active || saved.active || weekly.active || group.active || !current;modes();
+    const view=saved.active || weekly.active?'reports':activity.active?'activity':'records';
+    const title={reports:'快照与周报',activity:'归档观测',records:'用量统计'}[view];
+    $('usage-title').textContent=title;
+    if(browserSessions)workbench.view(view);
     for(const name of ['records','saved','weekly','group','activity'])$(`tab-${name}`).setAttribute('aria-selected',String(value===name));
     if(activity.active)await activity.load();else if(group.active){group.refreshNodes();await group.load();}else if(weekly.active)await weekly.load();else if(saved.active)await saved.load();else{$('results').hidden=true;await load();}}
-  $('tab-records').addEventListener('click',()=>tab('records'));
-  $('tab-saved').addEventListener('click',()=>tab('saved'));
-  $('tab-weekly').addEventListener('click',()=>tab('weekly'));
-  $('tab-group').addEventListener('click',()=>tab('group'));
-  $('tab-activity').addEventListener('click',()=>tab('activity'));
+  function chooseTab(value) {
+    if(busy)return;
+    if(browserSessions)history.replaceState(null,'',value==='records'?location.pathname:'#'+value);
+    return tab(value);
+  }
+  function route() {
+    if(!browserSessions || !session)return;
+    if(busy){routePending=true;return;}
+    let [target,query]=location.hash.slice(1).split('?',2);
+    if(target==='activity' && portalActor.role==='admin') {
+      const nodes=session.activity_preview_nodes;
+      const node=new URLSearchParams(query).get('node');
+      const selected=nodes.includes(node)?node:nodes.includes($('node').value)?$('node').value:nodes[0];
+      if(selected){$('node').value=selected;modes();}
+    }
+    if(!tabs.includes(target) || $(`tab-${target}`).hidden)target='records';
+    return tab(target);
+  }
+  for(const name of tabs)$(`tab-${name}`).addEventListener('click',()=>chooseTab(name));
+  window.addEventListener('hashchange',route);
   async function load(offset=0, fixed=false) {
     if(activity.active)return activity.load();
     if(group.active)return group.load();
     if(weekly.active)return weekly.load();
     if(saved.active)return saved.load();
-    if(busy)return;const operation=epoch;lock(true);message('正在读取使用记录…');
+    if(busy)return;
+    if(!fixed && (!$('start').reportValidity() || !$('end').reportValidity() || $('start').value>$('end').value)){
+      message('请检查起止日期。',true);return false;
+    }
+    const operation=epoch;lock(true);message('正在读取使用记录…');
     const input=fixed && selection ? {...selection,offset} : {node_id:$('node').value,mode:$('mode').value,owner_id:$('mode').value==='node' && $('owner').value ? $('owner').value:null, window:{kind:'calendar',start_date:$('start').value,end_date:$('end').value,timezone:session.actor.timezone},limit:25,offset:0,presentation:'continuous',include_sessions:session.session_occupancy_available===true};
     try{const result=await (await request('query',input)).json();if(operation!==epoch)return false;current=result;selection={...input,window:{kind:'utc',start_at:result.report.start_at,end_at:result.report.end_at,timezone:result.report.timezone},snapshot:result.report.snapshot,offset:0,...(result.session_occupancy?{session_read_at:result.session_occupancy.as_of,session_identity_revision:result.session_occupancy.identity_revision}:{})};if(!input.owner_id){$('owner').replaceChildren(new Option('全部用户',''),...result.report.owners.map(owner=>new Option(result.labels[owner.owner_id] || owner.owner_id,owner.owner_id)));}render();message('');return true;}catch(error){if(operation!==epoch)return false;message(error.message,true);if(!fixed){$('results').hidden=true;current=null;selection=null;}return false;}finally{if(operation===epoch)lock(false);}
   }
   async function connect() {
     if(busy)return;epoch++;const opening=epoch;lock(true);
     token=browserSessions?'':$('credential').value.trim();$('credential').value='';
-    try{if(browserSessions){const response=await fetch('/internal/members/session',{cache:'no-store',credentials:'same-origin',headers:{'X-ARIS-Request':'usage-session'}});if(!response.ok)throw new Error('请先到成员管理页登录。');const identity=await response.json();if(opening!==epoch)return;csrf=identity.csrf_token;}
+    try{if(browserSessions){const response=await fetch('/internal/members/session',{cache:'no-store',credentials:'same-origin',headers:{'X-ARIS-Request':'usage-session'}});if(!response.ok)throw new Error('请先登录实验室工作台。');const identity=await response.json();if(opening!==epoch)return;csrf=identity.csrf_token;portalActor=identity.actor;workbench.session(portalActor);workbench.view('records');}
       session=await (await request('session')).json();if(opening!==epoch)return;saved.active=false;saved.reset();weekly.active=false;weekly.reset();group.active=false;group.reset();activity.active=false;activity.reset();group.configure(session.nodes);
       $('tab-saved').hidden=!session.saved_snapshots_available;$('tab-weekly').hidden=!session.weekly_reports_available;$('tab-group').hidden=!session.group_reports_available;$('tab-records').setAttribute('aria-selected','true');$('tab-saved').setAttribute('aria-selected','false');$('tab-weekly').setAttribute('aria-selected','false');$('tab-group').setAttribute('aria-selected','false');$('tab-activity').setAttribute('aria-selected','false');
       $('node').replaceChildren(...session.nodes.map(node=>new Option(node.node_id,node.node_id)));$('identity').textContent=session.actor.display_name;
-      $('timezone').textContent=`时区 ${session.actor.timezone}`;$('connect-panel').hidden=true;$('workspace').hidden=false;modes();dates();lock(false);await load();
+      if(browserSessions)workbench.usage(session);
+      $('timezone').textContent=`时区 ${session.actor.timezone}`;$('connect-panel').hidden=true;$('workspace').hidden=false;modes();dates();lock(false);
+      if(browserSessions)await route();else await load();
     }catch(error){if(opening===epoch){token='';message(error.message,true);}}finally{if(opening===epoch)lock(false);}
   }
   $('connect-form').addEventListener('submit',event=>{event.preventDefault();connect();});
-  function clearConnection(){clearDrill();epoch++;token='';csrf='';session=null;current=null;selection=null;saved.active=false;saved.reset();weekly.active=false;weekly.reset();group.active=false;group.reset();activity.active=false;activity.reset();lock(false);$('node-filter').hidden=false;
+  function clearConnection(){clearDrill();epoch++;token='';csrf='';session=null;portalActor=null;current=null;selection=null;routePending=false;$('export-dialog').close();saved.active=false;saved.reset();weekly.active=false;weekly.reset();group.active=false;group.reset();activity.active=false;activity.reset();lock(false);$('node-filter').hidden=false;
+    if(browserSessions)workbench.session(null);
     $('workspace').hidden=true;$('results').hidden=true;$('connect-panel').hidden=false;$('identity').textContent='本地只读查询';message('');}
-  $('disconnect').addEventListener('click',async()=>{if(browserSessions){try{const response=await fetch('/internal/members/logout',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:'{}'});if(!response.ok && response.status!==401)throw new Error('退出登录失败，请刷新后重试。');}catch(error){message(error.message,true);return;}}clearConnection();});
+  $('disconnect').addEventListener('click',clearConnection);
   $('node').addEventListener('change',()=>{clearDrill();modes();activity.reset();if(activity.active && $('tab-activity').hidden)tab('records');$('owner').replaceChildren(new Option('全部用户',''));});$('mode').addEventListener('change',()=>{clearDrill();modes();activity.reset();if(activity.active && $('tab-activity').hidden)tab('records');$('owner').value='';if(group.active)group.refreshNodes();});$('range').addEventListener('change',()=>{clearDrill();dates();});['start','end'].forEach(id=>$(id).addEventListener('change',()=>{clearDrill();$('range').value='custom';}));$('query').addEventListener('click',()=>{clearDrill();load();});$('owner').addEventListener('change',()=>{clearDrill();load();});$('previous').addEventListener('click',()=>load(Math.max(0,current.offset-current.limit),true));$('next').addEventListener('click',()=>load(current.offset+current.limit,true));
   async function download(path,filename,success,presentation){if(!selection || busy)return;lock(true);try{const blob=await (await request(path,presentation?{...selection,presentation,include_sessions:false,session_read_at:null,session_identity_revision:null}:selection)).blob();const url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download=filename;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);message(success);}catch(error){message(error.message,true);}finally{lock(false);}}
-  $('export').addEventListener('click',()=>download('export','aris-recorded-usage.csv','已导出当前快照的全部匹配记录。'));
-  $('raw-export').addEventListener('click',()=>download('export','aris-original-usage-segments.csv','已导出同一快照的全部原始分段。','segments'));
-  $('report').addEventListener('click',()=>download('report','aris-recorded-usage-report.html','报告已导出，可在浏览器阅读或打印。'));
+  const exportsByFormat={
+    csv:['export','aris-recorded-usage.csv','已导出当前快照的全部匹配记录。'],
+    segments:['export','aris-original-usage-segments.csv','已导出同一快照的全部原始分段。','segments'],
+    html:['report','aris-recorded-usage-report.html','报告已导出，可在浏览器阅读或打印。'],
+  };
+  $('export').addEventListener('click',()=>{
+    if(!selection || busy)return;
+    const windowRange=selection.window;
+    const stamp=new Intl.DateTimeFormat('zh-CN',{timeZone:windowRange.timezone,dateStyle:'short',timeStyle:'short'});
+    const owner=selection.mode==='mine'?'我的用量':selection.owner_id?label(selection.owner_id):'节点用量 · 全部成员';
+    $('export-scope').textContent=`${selection.node_id} · ${owner} · ${stamp.format(new Date(windowRange.start_at))} 至 ${stamp.format(new Date(windowRange.end_at))}（不含结束时刻）· ${windowRange.timezone}`;
+    $('export-dialog').showModal();
+  });
+  $('cancel-export').addEventListener('click',()=>$('export-dialog').close());
+  $('export-form').addEventListener('submit',event=>{
+    event.preventDefault();
+    const format=new FormData(event.currentTarget).get('format');
+    $('export-dialog').close();
+    download(...exportsByFormat[format]);
+  });
   window.addEventListener('pagehide',clearConnection);
   window.addEventListener('pageshow',event=>{if(browserSessions && event.persisted)connect();});
-  if(browserSessions){$('connect-form').hidden=true;$('portal-login').hidden=false;$('disconnect').textContent='退出登录';connect();}
+  if(browserSessions){
+    $('connect-form').hidden=true;$('portal-login').hidden=false;$('disconnect').hidden=true;$('identity').hidden=true;
+    $('sign-out').addEventListener('click',async()=>{
+      const button=$('sign-out');button.disabled=true;
+      try{
+        const response=await fetch('/internal/members/logout',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:'{}'});
+        if(!response.ok && response.status!==401)throw new Error('退出登录失败，请刷新后重试。');
+        clearConnection();location.assign('/internal/members/ui');
+      }catch(error){message(error.message,true);}finally{button.disabled=false;}
+    });
+    connect();
+  }
 })();

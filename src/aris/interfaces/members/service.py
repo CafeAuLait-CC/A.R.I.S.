@@ -12,6 +12,7 @@ from aris.core.access.members import MemberAdministrationService
 from aris.core.access.passwords import PasswordAccountService
 from aris.core.access.schemas import AccessContract, AccessRequest, AccessScope
 from aris.core.access.sessions import LoginSessionService, SessionBearerAuthenticator
+from aris.core.commands.budgets import transaction_budget
 from aris.core.commands.schemas import ActorContext
 from aris.core.contracts import DomainError
 from aris.interfaces.commands.service import UserCommandSurface
@@ -36,6 +37,7 @@ class MemberRoster(AccessContract):
 class GeneralQuery(AccessContract):
     node_id: str = Field(min_length=1, max_length=128, pattern=r"^\S+$")
     window: Annotated[CalendarWindow | UTCWindow, Field(discriminator="kind")]
+    include_days: bool = Field(default=False, strict=True)
 
 
 class GeneralGpu(AccessContract):
@@ -53,6 +55,9 @@ class GeneralNode(AccessContract):
     status: str
     telemetry_status: str
     observed_at: AwareDatetime | None = None
+    heartbeat_at: AwareDatetime | None = None
+    system_observed_at: AwareDatetime | None = None
+    system_freshness: Literal["CURRENT", "STALE", "MISSING"] = "MISSING"
     cpu_percent: float | None = None
     memory_total_bytes: int | None = None
     memory_available_bytes: int | None = None
@@ -78,6 +83,7 @@ class MemberPortalSurface:
         origin: str,
         accounts: PasswordAccountService,
         roster: IdentityAdminSurface | None = None,
+        live_preview_origin: str | None = None,
     ) -> None:
         self.members, self.authenticator, self.commands = members, authenticator, commands
         self.accounts = accounts
@@ -85,9 +91,28 @@ class MemberPortalSurface:
         self.directory = AccessDirectoryQueries(members.administration)
         self.usage, self.general_usage, self.hardware = usage, general_usage, hardware
         self.node_ids, self.origin, self.roster_source = node_ids, origin, roster
+        self.live_preview_origin = live_preview_origin
 
     def identity(self, authorization: str | None) -> PortalIdentity:
         return self.members.identity(self.authenticator.authenticate(authorization))
+
+    def authorize_preview(self, token: str, csrf: str, node_ids: tuple[str, ...]) -> UUID:
+        actor = self.login.current(token, csrf).principal.user_id
+        if not set(node_ids).issubset(self.node_ids):
+            raise DomainError("PERMISSION_DENIED", "Node is outside this portal", 403)
+        access = self.members.access
+        with access.sessions() as session, session.no_autoflush:
+            transaction_budget(session, 100, 1000, 3000)
+            for node in node_ids:
+                access.require_in_transaction(
+                    session,
+                    AccessRequest(
+                        user_id=actor,
+                        permission="usage.read_general",
+                        scope=AccessScope(type="node", id=node),
+                    ),
+                )
+        return UUID(str(actor))
 
     def read_directory(
         self, authorization: str | None, after: str | None, limit: int
@@ -148,6 +173,7 @@ class MemberPortalSurface:
         total = self.general_usage.total(
             ActorContext(actor_id=actor.user_id, request_id=request_id),
             window,
+            include_days=query.include_days,
         )
         item = next(
             (
@@ -172,6 +198,9 @@ class MemberPortalSurface:
                 status=node.status,
                 telemetry_status=node.telemetry_status,
                 observed_at=node.observed_at,
+                heartbeat_at=node.heartbeat_at,
+                system_observed_at=item.system_observed_at,
+                system_freshness=item.system_freshness,
                 cpu_percent=system.cpu.utilization_percent
                 if system is not None and system.cpu.quality == "ok"
                 else None,

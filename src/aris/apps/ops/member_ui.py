@@ -26,6 +26,7 @@ from aris.core.access.schemas import AccessContract
 from aris.core.config import Settings
 from aris.core.contracts import DomainError
 from aris.core.db import build_engine, check_database, session_factory
+from aris.interfaces.members.live import dashboard_origin
 from aris.interfaces.members.public import PublicPortalBoundary
 from aris.interfaces.slack.config import SlackSettings
 from aris.interfaces.web_paths import INTERNAL_PATHS, PUBLIC_PATHS
@@ -58,6 +59,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--validate", action="store_true")
     parser.add_argument("--worker", action="store_true")
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--vega-dashboard-origin", help="Optional loopback Vega dashboard origin")
     args = parser.parse_args(argv)
     if not 1024 <= args.port <= 65535 or (args.once and not args.worker):
         parser.error("use an unprivileged port; --once requires --worker")
@@ -74,6 +76,13 @@ def main(argv: list[str] | None = None) -> int:
             else SlackSettings(_env_file=None, team_id="", signing_secret="", bot_token="")
         )
         validate_member_configuration(settings, slack, config.members)
+        preview = (
+            dashboard_origin(args.vega_dashboard_origin)
+            if args.vega_dashboard_origin is not None
+            else None
+        )
+        if preview == f"http://127.0.0.1:{args.port}":
+            raise ValueError("Vega dashboard must use a separate listener")
         if args.validate:
             print(
                 json.dumps(
@@ -89,6 +98,7 @@ def main(argv: list[str] | None = None) -> int:
                         "autostart": False,
                         "cookie_authentication": True,
                         "public_browser_routes": public,
+                        "live_preview_configured": preview is not None,
                     }
                 )
             )
@@ -103,7 +113,7 @@ def main(argv: list[str] | None = None) -> int:
         engine = build_engine(settings.database_url)
         check_database(engine)
         components = build_member_components(
-            session_factory(engine), settings, slack, config.members
+            session_factory(engine), settings, slack, config.members, live_preview_origin=preview
         )
         if args.worker:
             while True:

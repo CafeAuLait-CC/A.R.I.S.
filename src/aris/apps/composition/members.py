@@ -31,6 +31,7 @@ from aris.interfaces.commands.auth import BoundSubjectTokens, UserTokenBinding
 from aris.interfaces.commands.service import UserCommandSurface
 from aris.interfaces.identity.service import IdentityAdminSurface, IdentityQueryLimits
 from aris.interfaces.identity.slack_directory import SlackDirectoryClient, SlackDirectoryProvider
+from aris.interfaces.members.live import dashboard_origin
 from aris.interfaces.members.service import MemberPortalSurface
 from aris.interfaces.slack.client import SlackClient
 from aris.interfaces.slack.config import SlackSettings
@@ -186,8 +187,11 @@ def build_member_components(
     directory_provider: SlackDirectoryProvider | None = None,
     invitation_sender: InvitationSender | None = None,
     clock: Callable[[], datetime] | None = None,
+    live_preview_origin: str | None = None,
 ) -> MemberComponents:
     bindings = validate_member_configuration(settings, slack, config)
+    if live_preview_origin is not None:
+        live_preview_origin = dashboard_origin(live_preview_origin)
     all_permissions = tuple(
         sorted({permission for role in PORTAL_ROLES for permission in role.permissions})
     )
@@ -310,6 +314,7 @@ def build_member_components(
         config.node_ids,
         origin=config.origin,
         roster=roster,
+        live_preview_origin=live_preview_origin,
         accounts=PasswordAccountService(
             sessions,
             login,
