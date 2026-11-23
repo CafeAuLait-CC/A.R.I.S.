@@ -484,8 +484,30 @@ def test_restart_resumes_original_steps_and_saved_snapshot_cursor_without_promot
     later = drain(schedules, config)
     assert later["coverage"] in ("partial", "unknown") and later["total_usage_microseconds"] is None
     assert schedules.select(CONTEXT, definition, status_only=True).next_week == date(2026, 11, 30)
+    daily = definition.model_copy(
+        update={
+            "daily_rollups": True,
+            "calendar": definition.calendar.model_copy(update={"first_week": date(2026, 11, 23)}),
+        }
+    )
+    assert schedules.select(CONTEXT, daily) is not None
+    reader = CoverageScheduleReader(schedules.sessions, (daily.id,))
+    actor = ActorContext(actor_id=definition.calendar.owner_id, request_id="archived-week-read")
     with schedules.sessions() as db:
         assert db.scalar(select(func.count()).select_from(CoveragePeriodResultRow)) == 2
+        archived = reader.combined_report_in_transaction(
+            db, actor, node_ids=("node-a",), week=date(2026, 11, 16)
+        )
+        (node,) = archived.nodes
+        assert str(node.report_id) == result["id"]
+        assert node.verified_usage_microseconds == result["verified_usage_microseconds"]
+        assert archived.coverage == "partial" and archived.total_usage_microseconds is None
+        assert node.verified_retained_gap_microseconds is None
+        assert result["fingerprint"] in combined_week_csv(archived)
+        current = reader.combined_report_in_transaction(
+            db, actor, node_ids=("node-a",), week=date(2026, 11, 23)
+        )
+        assert current.nodes[0].coverage == "missing"
 
 
 def test_closed_days_survive_restart_and_feed_weekly_report_without_raw_samples(

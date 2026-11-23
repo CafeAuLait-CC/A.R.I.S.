@@ -1,5 +1,6 @@
 """Combine independently saved node reports for a single natural week."""
 
+from collections.abc import Mapping
 from datetime import date, timedelta
 from typing import Literal
 from uuid import UUID
@@ -9,6 +10,7 @@ from pydantic import AwareDatetime, Field
 from aris.core.access.schemas import AccessContract, UserPrincipal
 from aris.modules.lyra.usage_history import calendar_boundaries
 from aris.modules.nova.coverage_schedule_schemas import (
+    CoveragePeriodResult,
     DailyCoveragePeriodResult,
     schedule_canonical,
     schedule_fingerprint,
@@ -39,7 +41,9 @@ class CombinedCoverageWeek(AccessContract):
 
 
 def combine_coverage_week(
-    week: date, timezone: str, reports: dict[str, DailyCoveragePeriodResult | None]
+    week: date,
+    timezone: str,
+    reports: Mapping[str, DailyCoveragePeriodResult | CoveragePeriodResult | None],
 ) -> CombinedCoverageWeek:
     UserPrincipal.iana_timezone(timezone)
     if week.weekday() != 0 or not 1 <= len(reports) <= 8:
@@ -60,24 +64,38 @@ def combine_coverage_week(
                 )
             )
             continue
-        result = DailyCoveragePeriodResult.model_validate(result.model_dump(mode="json"))
-        report = result.report
-        if (report.query.node_id, report.query.timezone, result.week) != (
-            node_id,
-            timezone,
-            week,
-        ) or (report.start_at, report.end_at) != (start, end):
+        if result.week != week:
             raise ValueError("Node report differs from the combined calendar")
+        if isinstance(result, CoveragePeriodResult):
+            snapshot = CoveragePeriodResult.model_validate(result.model_dump(mode="json"))
+            coverage = snapshot.coverage
+            verified = snapshot.verified_usage_microseconds
+            gaps = None
+        else:
+            result = DailyCoveragePeriodResult.model_validate(result.model_dump(mode="json"))
+            report = result.report
+            if (report.query.node_id, report.query.timezone, report.start_at, report.end_at) != (
+                node_id,
+                timezone,
+                start,
+                end,
+            ):
+                raise ValueError("Node report differs from the combined calendar")
+            coverage = report.coverage
+            verified = report.verified_usage_microseconds
+            gaps = (
+                report.session_evidence.retained_microseconds
+                if report.session_evidence is not None
+                else None
+            )
         nodes.append(
             NodeCoverageWeek(
                 node_id=node_id,
                 report_id=result.id,
                 report_fingerprint=result.fingerprint,
-                coverage=report.coverage,
-                verified_usage_microseconds=report.verified_usage_microseconds,
-                verified_retained_gap_microseconds=report.session_evidence.retained_microseconds
-                if report.session_evidence is not None
-                else None,
+                coverage=coverage,
+                verified_usage_microseconds=verified,
+                verified_retained_gap_microseconds=gaps,
             )
         )
     complete = all(node.coverage == "complete" for node in nodes)

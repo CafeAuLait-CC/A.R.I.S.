@@ -26,6 +26,7 @@ from aris.modules.nova.coverage_schedule_schemas import (
     schedule_canonical,
 )
 from aris.modules.nova.report_calendar import weekly_report_period
+from aris.modules.nova.weekly_coverage import weekly_coverage_target
 
 
 def inconsistent() -> DomainError:
@@ -117,6 +118,27 @@ class CoverageScheduleRepository:
             or status.next_week <= week
         ):
             raise DomainError("CONFLICT", "Weekly report schedule differs", 409)
+        return result
+
+    def published_snapshot_week(
+        self, status: CoverageScheduleStatus, week: date
+    ) -> CoveragePeriodResult | None:
+        definition = status.definition
+        period = weekly_report_period(definition.calendar, week)
+        target = weekly_coverage_target(
+            definition.calendar, period, definition.configuration, now=period.scheduled_for
+        )
+        result = self.result(target.id)
+        if result is None:
+            return None
+        if (
+            definition.daily_rollups
+            or result.schedule_id != definition.id
+            or result.definition_fingerprint != definition.fingerprint
+            or result.week != week
+            or status.next_week <= week
+        ):
+            raise DomainError("CONFLICT", "Weekly snapshot schedule differs", 409)
         return result
 
     def result(self, id: UUID) -> CoveragePeriodResult | None:

@@ -19,6 +19,7 @@ from aris.modules.lyra.coverage_rollup import CoverageDuration
 from aris.modules.nova.combined_coverage_week import CombinedCoverageWeek, combine_coverage_week
 from aris.modules.nova.coverage_schedule_repo import CoverageScheduleRepository
 from aris.modules.nova.coverage_schedule_schemas import (
+    CoveragePeriodResult,
     CoverageScheduleStatus,
     DailyCoveragePeriodResult,
 )
@@ -195,10 +196,24 @@ class CoverageScheduleReader:
         timezones = {status.definition.calendar.timezone for status in plans.values()}
         if len(timezones) != 1:
             raise DomainError("CONFLICT", "Node report calendars differ", 409)
-        reports: dict[str, DailyCoveragePeriodResult | None] = dict.fromkeys(node_ids)
+        reports: dict[str, DailyCoveragePeriodResult | CoveragePeriodResult | None] = dict.fromkeys(
+            node_ids
+        )
         for node, status in plans.items():
             definition = status.definition
             if week < definition.calendar.first_week:
+                # The original snapshot plan shares the calendar identity, including the node.
+                predecessor = definition.model_copy(
+                    update={"daily_rollups": None, "session_occupancy": None}
+                )
+                archived = repo.get(predecessor.id)
+                if archived is not None and week >= archived.definition.calendar.first_week:
+                    calendar = archived.definition.calendar.model_copy(
+                        update={"first_week": definition.calendar.first_week}
+                    )
+                    if calendar != definition.calendar:
+                        raise DomainError("CONFLICT", "Archived node report calendar differs", 409)
+                    reports[node] = repo.published_snapshot_week(archived, week)
                 continue
             try:
                 reports[node] = repo.published_daily_week(definition, week, status=status)
