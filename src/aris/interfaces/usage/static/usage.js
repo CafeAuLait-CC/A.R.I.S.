@@ -10,7 +10,7 @@
   const hours = value => (value / 3600000000).toLocaleString("zh-CN", {maximumFractionDigits:3});
   const duration = value => {const seconds = value / 1000000; return seconds >= 3600 ? `${hours(value)} 小时` : seconds >= 60 ? `${(seconds/60).toLocaleString("zh-CN",{maximumFractionDigits:2})} 分钟` : `${seconds.toLocaleString("zh-CN",{maximumFractionDigits:3})} 秒`;};
   function message(value, error = false) {$('message').textContent = value; $('message').hidden = !value; $('message').classList.toggle('error', error);}
-  function lock(value) {busy = value; ['trend-back','query','export','previous','next','node','mode','range','start','end','owner','tab-records','tab-saved','saved-more','saved-report','saved-csv','tab-weekly','weekly-more','weekly-report','weekly-csv','combined-week-date','combined-week-query','combined-week-html','combined-week-csv','tab-group','group-report','group-csv','tab-activity'].forEach(id => $(id).disabled = value);group.setBusy(value);activity.setBusy(value);if(!value)$('node').disabled=group.active; if(!value && current){$('previous').disabled = current.offset === 0; $('next').disabled = !current.has_more;}
+  function lock(value) {busy = value; ['trend-back','query','export','previous','next','node','mode','range','start','end','owner','tab-records','tab-saved','saved-more','saved-report','saved-csv','open-combined-weekly','tab-weekly','weekly-more','weekly-report','weekly-csv','combined-week-date','combined-week-query','combined-week-html','combined-week-csv','tab-group','group-report','group-csv','tab-activity'].forEach(id => $(id).disabled = value);group.setBusy(value);activity.setBusy(value);if(!value)$('node').disabled=group.active; if(!value && current){$('previous').disabled = current.offset === 0; $('next').disabled = !current.has_more;}
     if(!value && routePending){routePending=false;queueMicrotask(()=>route());}
   }
   async function request(path, body, accept="application/json") {
@@ -103,6 +103,10 @@
     return tab(target);
   }
   for(const name of tabs)$(`tab-${name}`).addEventListener('click',()=>chooseTab(name));
+  $('open-combined-weekly').addEventListener('click',async()=>{
+    await chooseTab('weekly');
+    if(weekly.active)$('combined-week-date').focus();
+  });
   window.addEventListener('hashchange',route);
   async function load(offset=0, fixed=false) {
     if(activity.active)return activity.load();

@@ -69,6 +69,8 @@ def test_public_pages_and_every_asset_use_only_the_public_layout(public_portal):
         assert 'href="/usage#activity"' in home.text
         assert 'href="/#profile"' in usage.text
         assert 'id="workbench-nav"' in home.text and 'id="workbench-nav"' in usage.text
+        assert 'id="open-combined-weekly" type="button" class="secondary" hidden' in usage.text
+        assert 'id="combined-week-panel"' in usage.text
         assert "img-src data:" in home.headers["content-security-policy"]
         assert "img-src" not in usage.headers["content-security-policy"]
         assert 'data-cancel-path="cancel"' in client.get("/").text

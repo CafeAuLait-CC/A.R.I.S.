@@ -74,6 +74,7 @@ window.createWeeklyUsage = function ({el, request, lock, message, isBusy, select
   function configureCombined(available, timezone) {
     clearCombined();
     el('combined-week-panel').hidden = !available;
+    el('open-combined-weekly').hidden = !available;
     if (!available) return;
     const parts = new Intl.DateTimeFormat('en-CA', {
       timeZone:timezone, year:'numeric', month:'2-digit', day:'2-digit',

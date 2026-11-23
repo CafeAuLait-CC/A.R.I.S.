@@ -62,7 +62,10 @@
       <p class="coverage-note">这里只汇总已进入账本的记录；尚未确认完整观测覆盖，因此不代表全部实际用量，也不用于配额扣减。撤销的记录已从当前汇总中扣除。</p>
     </div>
     <section id="saved-results" role="tabpanel" aria-labelledby="tab-saved" hidden>
-      <div class="saved-intro"><h2>统计快照</h2><p class="muted">浏览已保存的采样统计；每份结果保留生成时的依据。</p></div>
+      <div class="saved-intro section-head">
+        <div><h2>统计快照</h2><p class="muted">浏览已保存的采样统计；每份结果保留生成时的依据。</p></div>
+        <button id="open-combined-weekly" type="button" class="secondary" hidden>全部节点周报</button>
+      </div>
       <section id="saved-plans" class="panel weekly-plans" hidden><details><summary>自动统计计划</summary><div id="saved-plan-list" class="weekly-plan-list"></div><p id="saved-plan-note" class="muted"></p></details></section>
       <div id="saved-empty" class="panel empty" hidden><h3>所选日期暂无区间快照</h3><p>可以切换节点、日期或视图。</p></div>
       <div class="saved-layout">
