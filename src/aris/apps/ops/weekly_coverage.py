@@ -5,7 +5,7 @@ import json
 import signal
 import sys
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import UTC, date, datetime
 from pathlib import Path
 from threading import Event, Lock
@@ -87,7 +87,7 @@ def run_tick(
             "plans": [],
             "made_progress": False,
         }
-    now = (clock or (lambda: datetime.now(UTC)))()
+    now = (clock or schedules.clock)()
     context = SchedulerContext(request_id="weekly-coverage-" + str(uuid4()))
     items: list[JsonValue] = []
     attention = False
@@ -204,6 +204,27 @@ def run_tick(
     }
 
 
+def _periodic_wait_seconds(
+    result: dict[str, JsonValue], clock: Callable[[], datetime], retry_seconds: int
+) -> float:
+    plans = result.get("plans")
+    if result.get("needs_attention") or not isinstance(plans, list) or not plans:
+        return retry_seconds
+    plan = plans[0]
+    if not isinstance(plan, dict):
+        return retry_seconds
+    match plan.get("state"):
+        case "future_day":
+            due_at = plan.get("due_at")
+        case "caught_up":
+            due_at = plan.get("next_due_at")
+        case _:
+            return retry_seconds
+    if not isinstance(due_at, str):
+        return retry_seconds
+    return max(0.0, (datetime.fromisoformat(due_at) - clock()).total_seconds())
+
+
 def run_periodic(
     config: WeeklyCoverageConfig,
     schedules: CoverageScheduleService,
@@ -237,22 +258,23 @@ def run_periodic(
                 return True
             if result.get("made_progress") and not failures:
                 continue
-            resume_at = monotonic() + config.poll_seconds
-            while not stopping():
-                remaining = resume_at - monotonic()
-                if remaining <= 0:
-                    break
-                sleep(min(0.1, remaining))
+            shutdown.wait(_periodic_wait_seconds(result, schedules.clock, config.poll_seconds))
         return bool(failures)
 
     needs_attention = False
     with ThreadPoolExecutor(max_workers=len(config.plans)) as pool:
         workers = [pool.submit(run_plan, plan) for plan in config.plans]
+        pending = set(workers)
         try:
-            for worker in as_completed(workers):
-                needs_attention |= worker.result()
+            while pending and not stop_requested():
+                # The signal handler only sets a flag. Wake waiting plans from normal code.
+                completed, pending = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
+                for worker in completed:
+                    needs_attention |= worker.result()
         finally:
             shutdown.set()
+    for worker in pending:
+        needs_attention |= worker.result()
     return int(needs_attention)
 
 

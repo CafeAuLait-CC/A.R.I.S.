@@ -115,11 +115,12 @@ def test_native_idle_worker_stops_with_single_and_repeated_signals(
     personal = definition.model_copy(
         update={"calendar": definition.calendar.model_copy(update={"report_type": "usage.mine"})}
     )
+    daily = definition.model_copy(update={"daily_rollups": True})
     config = WeeklyCoverageConfig(
         enabled=True,
         environment="test",
         database_url=settings.database_url,
-        plans=(definition, personal),
+        plans=(definition, personal, daily),
         poll_seconds=60,
     )
     path = tmp_path / "weekly-native.json"
@@ -178,7 +179,10 @@ def test_native_idle_worker_stops_with_single_and_repeated_signals(
                 output = lines.pop()
                 for line in lines:
                     for item in json.loads(line)["plans"]:
-                        assert item["state"] == "caught_up"
+                        expected_state = (
+                            "future_day" if item["schedule_id"] == str(daily.id) else "caught_up"
+                        )
+                        assert item["state"] == expected_state
                         ready.add(item["schedule_id"])
             candidates = []
             for row in subprocess.check_output(
@@ -211,7 +215,7 @@ def test_native_idle_worker_stops_with_single_and_repeated_signals(
                     os.kill(target, signal.SIGUSR1)
                 raise
             assert process.returncode == 0, error
-            assert monotonic() - began < 3, "shutdown must interrupt a 60-second idle wait"
+            assert monotonic() - began < 3, "shutdown must interrupt the calendar wait"
         finally:
             if process.poll() is None:
                 try:
@@ -224,7 +228,7 @@ def test_native_idle_worker_stops_with_single_and_repeated_signals(
                 process.communicate(timeout=5)
     with schedules.sessions() as db:
         assert UsageLedgerRepository(db).head("node-a") == before
-        assert db.scalar(select(func.count()).select_from(CoverageScheduleRow)) == 2
+        assert db.scalar(select(func.count()).select_from(CoverageScheduleRow)) == len(config.plans)
         assert db.scalar(select(func.count()).select_from(CoveragePeriodResultRow)) == 0
 
 
@@ -321,6 +325,61 @@ def test_reporting_scan_preserves_the_earliest_unverified_health_pair():
     partial = _health_checked_prefix(prefix, scanned(7, 10))
     assert (partial.first_seq, partial.through_seq, partial.stopped_before_seq) == (8, 10, 11)
     assert _health_checked_prefix(prefix, scanned(1, 12)) == prefix
+
+
+def test_periodic_report_waits_until_due_and_retries_only_unfinished_work(
+    partition_recording, settings, monkeypatch
+):
+    import aris.apps.ops.weekly_coverage as operator
+
+    schedules, config, definition, clock, _ = setup(partition_recording, settings)
+    daily = definition.model_copy(update={"daily_rollups": True})
+    config = config.model_copy(update={"plans": (daily,), "poll_seconds": 60})
+    due = datetime(2026, 11, 23, 0, 5, tzinfo=UTC)
+    initial = due - timedelta(hours=6)
+    tomorrow = due + timedelta(days=1)
+    restarted = due + timedelta(minutes=2)
+    clock["now"] = initial
+    external_stop = Event()
+    expected_ticks = iter(
+        (
+            (initial, "future_day", due),
+            (due, "waiting", None),
+            (due + timedelta(minutes=1), "failed", None),
+            (restarted, "day_saved", None),
+            (restarted, "daily_report_saved", None),
+            (restarted, "future_day", tomorrow),
+        )
+    )
+    delays = []
+
+    class CalendarWait(Event):
+        def wait(self, timeout=None):
+            assert timeout is not None and timeout > 0
+            delays.append(timeout)
+            clock["now"] += timedelta(seconds=timeout)
+            if clock["now"] == tomorrow:
+                external_stop.set()
+            return self.is_set()
+
+    def tick(plan_config, service):
+        assert plan_config.plans == (daily,)
+        now, state, due_at = next(expected_ticks)
+        assert service.clock() == now
+        plan = {"state": state}
+        if due_at:
+            plan["due_at"] = due_at.isoformat()
+        return {
+            "plans": [plan],
+            "needs_attention": state == "failed",
+            "made_progress": state in ("day_saved", "daily_report_saved"),
+        }
+
+    monkeypatch.setattr(operator, "Event", CalendarWait)
+    monkeypatch.setattr(operator, "run_tick", tick)
+    assert run_periodic(config, schedules, external_stop.is_set, lambda _: None) == 0
+    assert delays == [21600, 60, 60, 86280]
+    assert next(expected_ticks, None) is None
 
 
 def test_failing_weekly_plan_pauses_without_blocking_the_other_plan(
