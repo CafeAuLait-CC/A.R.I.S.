@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 from threading import Barrier
 from types import SimpleNamespace
 from uuid import uuid4
@@ -16,6 +17,8 @@ from aris.core.contracts import DomainError
 from aris.core.events import DomainEvent, OutboxEntry
 from aris.modules.lyra.ledger_repo import UsageLedgerRepository
 from aris.modules.lyra.models import UsageWindowSnapshotRow
+from aris.modules.lyra.trace_consumer_schemas import UsageTraceConsumeRequest
+from aris.modules.lyra.window_coverage import sampled_usage_window
 from aris.modules.lyra.window_snapshot_schemas import CaptureUsageWindow, WindowManifestSelection
 from aris.modules.lyra.window_snapshot_service import UsageWindowSnapshotService
 from aris.modules.vega.models import AgentMessage
@@ -23,9 +26,11 @@ from aris.modules.vega.usage_archive_schemas import UsageArchiveHeadQuery
 from tests.test_administration import admin_state
 from tests.test_closed_run_recording import closed
 from tests.test_heartbeat import beat, heartbeat
+from tests.test_historical_usage_facts import owner, ownership
 from tests.test_mapping_history import history_state
-from tests.test_processing_coverage import capture_request, coverage, incoming
+from tests.test_processing_coverage import attest, capture_request, coverage, incoming
 from tests.test_recorded_usage import reading_service
+from tests.test_resource_telemetry import put, resource_batch
 from tests.test_trace_consumer import CONTEXT
 from tests.test_usage_derivations import derivations
 from tests.test_usage_ledger import POST, ledger
@@ -127,6 +132,61 @@ def test_partial_coverage_is_a_saved_unknown_total_not_a_successful_zero(windows
     assert saved.window.total_usage_microseconds is None and not saved.window.quota_usage_available
     assert saved.window.recorded_microseconds == 30_000_000
     assert windows.service.reverify(request.id) == saved
+
+
+def test_capture_uses_sampled_start_and_stop_boundaries_without_changing_legacy_replay(
+    windows, monkeypatch
+):
+    state, service = windows.state, windows.service
+    source = state.service
+    trace = source.attestations.verifier
+    stopped_at = state.run.last.compute_observed_at
+    started_at = stopped_at + timedelta(seconds=45)
+    idle = resource_batch(seq=10, observed_at=stopped_at + timedelta(seconds=30))
+    idle["resources"]["compute"].update(reported_processes=0, gpus=[])
+    assert put(state.ledger[4], idle).status_code == 200
+    busy = ownership(resource_batch(seq=11, observed_at=started_at), [owner()])
+    assert put(state.ledger[4], busy).status_code == 200
+    clock = state.ledger[2][2][5]
+    clock["now"] = max(datetime.now(UTC), clock["now"], started_at) + timedelta(seconds=1)
+    receipt = trace.consume(
+        CONTEXT,
+        UsageTraceConsumeRequest(
+            id=uuid4(),
+            expected_configuration_fingerprint=source.configuration.trace.fingerprint,
+            expected_revision=state.last.revision,
+            through_seq=11,
+        ),
+    )
+    following_proof = attest(source.attestations, trace, trace.exact(receipt.id))
+    manifests = windows.manifests + tuple(
+        source.record(CONTEXT, capture_request(source, proof, stopped_at, started_at)).manifest
+        for proof in (state.last, following_proof)
+    )
+    original = incoming_window(windows, manifests=manifests)
+    original = original.model_copy(
+        update={"query": original.query.model_copy(update={"end_at": started_at})}
+    )
+
+    def legacy_window(*args, **kwargs):
+        return sampled_usage_window(*args, **{**kwargs, "sampled_boundaries": False})
+
+    with monkeypatch.context() as legacy:
+        legacy.setattr(
+            "aris.modules.lyra.window_snapshot_service.sampled_usage_window", legacy_window
+        )
+        prior = service.capture(CONTEXT, original).snapshot
+    revised = service.capture(CONTEXT, original.model_copy(update={"id": uuid4()})).snapshot
+    assert prior.window.unknown_gpu_microseconds == 30_000_000
+    assert revised.window.unknown_gpu_microseconds == revised.window.uncovered_gpu_microseconds == 0
+    assert (
+        revised.window.total_usage_microseconds == prior.window.recorded_microseconds == 30_000_000
+    )
+    recorded, idle = revised.window.cells
+    assert (recorded.start_at, recorded.end_at) == (original.query.start_at, stopped_at)
+    assert (idle.state, idle.start_at, idle.end_at) == ("observed_idle", stopped_at, started_at)
+    assert service.reverify(prior.request.id) == prior
+    assert service.reverify(revised.request.id) == revised
 
 
 def test_snapshot_with_pending_usage_stays_reproducible_after_later_recording(coverage):

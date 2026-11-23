@@ -36,6 +36,8 @@ from aris.modules.lyra.window_schemas import (
 )
 from aris.modules.vega.usage_archive_schemas import UsageArchiveHead
 
+SAMPLED_IDLE = "SAMPLED_IDLE"
+
 
 @dataclass(frozen=True)
 class _Candidate:
@@ -219,6 +221,8 @@ def _gpu_cells(
     active: tuple[CoverageLedgerEntry, ...],
     reversed_entries: tuple[CoverageLedgerEntry, ...],
     global_reason: str | None,
+    *,
+    sampled_boundaries: bool,
 ) -> list[WindowCoverageCell]:
     candidates = [value for value in sources if value.gpu_uuid == gpu]
     measurements = [entry for entry in active if entry.measurement.gpu_uuid == gpu]
@@ -272,6 +276,14 @@ def _gpu_cells(
                 cell.entry_id
             }:
                 state, reason, owner = "unknown", "LEDGER_SOURCE_CONFLICT", None
+            # A valid start/stop edge is outside the sampled process residency.
+            elif (
+                sampled_boundaries
+                and not present[1]
+                and not present[2]
+                and (state == "observed_idle" or (state, reason) == ("unknown", "USAGE_TRANSITION"))
+            ):
+                state, reason = "observed_idle", SAMPLED_IDLE
         output = WindowCoverageCell(
             gpu_uuid=gpu, start_at=start, end_at=end, state=state, reason=reason, owner_id=owner
         )
@@ -303,6 +315,7 @@ def sampled_usage_window(
     read_at: datetime,
     prefix_checkpoint: SourcePrefixReference | None = None,
     ledger_context: CoverageLedger | None = None,
+    sampled_boundaries: bool = False,
 ) -> SampledUsageWindow:
     if read_at.tzinfo is None or read_at.utcoffset() is None:
         raise ValueError("usage window requires an aware read time")
@@ -377,6 +390,7 @@ def sampled_usage_window(
             active,
             comparison.reversals,
             global_reason,
+            sampled_boundaries=sampled_boundaries,
         )
     )
     if len(cells) > MAX_WINDOW_CELLS:

@@ -30,7 +30,7 @@ from aris.modules.lyra.ledger_segment_decode import segment_decoding_scope
 from aris.modules.lyra.ledger_window_read import LedgerWindowQuery
 from aris.modules.lyra.source_prefix_repo import SourcePrefixRepository
 from aris.modules.lyra.trace_consumer_schemas import UsageTraceConsumeContext
-from aris.modules.lyra.window_coverage import sampled_usage_window
+from aris.modules.lyra.window_coverage import SAMPLED_IDLE, sampled_usage_window
 from aris.modules.lyra.window_reader import UsageWindowReader
 from aris.modules.lyra.window_reader_schemas import SavedWindowView
 from aris.modules.lyra.window_schemas import SampledUsageWindow
@@ -132,10 +132,19 @@ class UsageWindowSnapshotService:
         deadline: float,
         *,
         committed: tuple[StoredProcessingCoverage, ...] | None = None,
+        sampled_boundaries: bool = True,
     ) -> SampledUsageWindow:
         with segment_decoding_scope(session):
             return self._build_in_scope(
-                session, request, config, source, revision, read_at, deadline, committed=committed
+                session,
+                request,
+                config,
+                source,
+                revision,
+                read_at,
+                deadline,
+                committed=committed,
+                sampled_boundaries=sampled_boundaries,
             )
 
     def _build_in_scope(
@@ -148,6 +157,7 @@ class UsageWindowSnapshotService:
         read_at: datetime,
         deadline: float,
         *,
+        sampled_boundaries: bool,
         committed: tuple[StoredProcessingCoverage, ...] | None = None,
     ) -> SampledUsageWindow:
         if request.prefix_checkpoint is not None:
@@ -209,6 +219,7 @@ class UsageWindowSnapshotService:
             read_at=read_at,
             prefix_checkpoint=request.prefix_checkpoint,
             ledger_context=ledger_context,
+            sampled_boundaries=sampled_boundaries,
         )
         self._deadline(deadline)
         return result
@@ -382,6 +393,10 @@ class UsageWindowSnapshotService:
                     result.window.identity_revision,
                     result.window.read_at,
                     deadline,
+                    # A window with no sampled-idle cell is identical under either rule.
+                    sampled_boundaries=any(
+                        cell.reason == SAMPLED_IDLE for cell in result.window.cells
+                    ),
                 )
                 if window != result.window:
                     raise DomainError("CONFLICT", "Captured window evidence changed", 409)
