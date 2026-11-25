@@ -22,6 +22,23 @@ class UsageArchiveHeadQuery(UsageFactContract):
     node_id: str = Field(min_length=1, max_length=128, pattern=r"^\S+$")
 
 
+class ArchiveRetentionState(UsageFactContract):
+    source: UsageArchiveHeadQuery
+    highest_committed_seq: int = Field(ge=0, le=MAX_ARCHIVE_SEQ, strict=True)
+    retired_through_seq: int = Field(ge=0, le=MAX_ARCHIVE_SEQ, strict=True)
+    receipts_compacted_through_seq: int = Field(ge=0, le=MAX_ARCHIVE_SEQ, strict=True)
+
+    @model_validator(mode="after")
+    def ordered_boundaries(self) -> "ArchiveRetentionState":
+        if not (
+            self.receipts_compacted_through_seq
+            <= self.retired_through_seq
+            <= self.highest_committed_seq
+        ):
+            raise ValueError("Archive retention boundaries differ from the source head")
+        return self
+
+
 class UsageArchiveHead(UsageFactContract):
     assessment_scope: Literal["archive_source_ceiling"] = "archive_source_ceiling"
     sequence_coverage: Literal["not_assessed"] = "not_assessed"

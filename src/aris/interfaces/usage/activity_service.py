@@ -19,7 +19,11 @@ from aris.modules.lyra.hardware_preview import (
     SampleStatistic,
 )
 from aris.modules.lyra.reporting_gaps import ReportingGapPreview
-from aris.modules.vega.usage_archive_schemas import ArchivedUsageReference, UsageArchiveHeadQuery
+from aris.modules.vega.usage_archive_schemas import (
+    ArchivedUsageReference,
+    ArchiveRetentionState,
+    UsageArchiveHeadQuery,
+)
 
 if TYPE_CHECKING:
     from aris.interfaces.usage.service import UsageHistorySurface
@@ -155,6 +159,11 @@ class GpuHardwareSummaryView(AccessContract):
     fingerprint: str
 
 
+class ArchiveRetentionView(AccessContract):
+    retired_through_seq: str = Field(pattern=r"^(0|[1-9][0-9]*)$")
+    receipts_compacted_through_seq: str = Field(pattern=r"^(0|[1-9][0-9]*)$")
+
+
 class ActivityPreviewView(AccessContract):
     assessment_scope: Literal["reported_compute_observation_groups"]
     continuous_usage_established: Literal[False]
@@ -191,6 +200,7 @@ class ActivityPreviewView(AccessContract):
     hardware: GpuHardwareSummaryView | None = None
     sampling_incidents: tuple[GpuSamplingIncident, ...] | None = None
     reporting: ReportingGapPreview | None = None
+    source_retention: ArchiveRetentionView | None = None
 
 
 def statistic_view(value: SampleStatistic) -> SampleStatisticView:
@@ -330,6 +340,18 @@ def activity_usage(
         source = next(item for item in access.config.sources if item.node_id == query.node_id)
         actor = ActorContext(actor_id=user, request_id=request_id)
         through_seq = int(query.through_seq) if query.through_seq is not None else None
+        retention = _retention_state(surface, source)
+        max_messages = query.max_messages
+        if retention.retired_through_seq:
+            if through_seq is None:
+                through_seq = retention.highest_committed_seq
+            if through_seq <= retention.retired_through_seq:
+                raise DomainError(
+                    "ARCHIVE_EXPIRED",
+                    "原始采样已按保留规则清理，请查看统计快照或周报。",
+                    410,
+                )
+            max_messages = min(max_messages, through_seq - retention.retired_through_seq)
         if query.include_health and not access.config.hardware_metrics:
             raise DomainError("USAGE_NOT_CONFIGURED", "GPU health preview is not enabled", 503)
         if access.config.hardware_metrics:
@@ -337,7 +359,7 @@ def activity_usage(
                 actor,
                 source,
                 access.config.rule,
-                max_messages=query.max_messages,
+                max_messages=max_messages,
                 through_seq=through_seq,
                 include_incidents=query.include_health,
             )
@@ -354,13 +376,25 @@ def activity_usage(
                     actor,
                     source,
                     access.config.rule,
-                    max_messages=query.max_messages,
+                    max_messages=max_messages,
                     through_seq=through_seq,
                 )
             )
+        current = _retention_state(surface, source)
+        if current.retired_through_seq != retention.retired_through_seq:
+            raise DomainError(
+                "RETRYABLE_DATABASE_ERROR", "Archive retention changed; refresh this view", 503
+            )
         if _current_subject(surface, subject, query.node_id) != user:
             raise DomainError("PERMISSION_DENIED", "Current identity differs", 403)
-        return result
+        return result.model_copy(
+            update={
+                "source_retention": ArchiveRetentionView(
+                    retired_through_seq=str(current.retired_through_seq),
+                    receipts_compacted_through_seq=str(current.receipts_compacted_through_seq),
+                )
+            }
+        )
     except DBAPIError as error:
         code = database_failure(error)
         raise DomainError(
@@ -368,3 +402,14 @@ def activity_usage(
             "Activity identity database is unavailable",
             503,
         ) from None
+
+
+def _retention_state(
+    surface: "UsageHistorySurface", source: UsageArchiveHeadQuery
+) -> ArchiveRetentionState:
+    assert surface.activity is not None
+    with surface.history.sessions() as session, session.no_autoflush:
+        if session.get_bind().dialect.name == "postgresql":
+            session.execute(text("SET TRANSACTION READ ONLY"))
+        transaction_budget(session, 100, 750, 1500)
+        return surface.activity.reader.source.retention_state_in_transaction(session, source)

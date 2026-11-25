@@ -28,6 +28,7 @@ from aris.modules.vega.usage_archive_schemas import (
     ArchivedReportingPage,
     ArchivedUsageItem,
     ArchivedUsageReference,
+    ArchiveRetentionState,
     UsageArchiveFreeze,
     UsageArchiveHead,
     UsageArchiveHeadQuery,
@@ -127,6 +128,28 @@ class VegaUsageArchive:
         self.sessions = sessions
         self.clock = clock or (lambda: datetime.now(UTC))
         self.timeout_ms = timeout_ms
+
+    def retention_state_in_transaction(
+        self, session: Session, source: UsageArchiveHeadQuery
+    ) -> ArchiveRetentionState:
+        source = UsageArchiveHeadQuery.model_validate(source.model_dump(mode="json"))
+        row = VegaRepository(session).archive_retention_state(source.agent_id)
+        if row is None:
+            raise DomainError("NOT_FOUND", "Archived usage source is unknown", 404)
+        node, highest, retired, compacted = row
+        if node != source.node_id:
+            raise DomainError("CONFLICT", "Archive retention source binding differs", 409)
+        try:
+            return ArchiveRetentionState(
+                source=source,
+                highest_committed_seq=highest,
+                retired_through_seq=retired,
+                receipts_compacted_through_seq=compacted,
+            )
+        except ValueError:
+            raise DomainError(
+                "DEPENDENCY_UNAVAILABLE", "Archive retention state is inconsistent", 503
+            ) from None
 
     def protect_source_in_transaction(
         self, session: Session, source: UsageArchiveHeadQuery, *, after_seq: int | None = None

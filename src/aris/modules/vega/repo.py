@@ -219,6 +219,22 @@ class VegaRepository:
     def usage_source_node(self, agent_id: str) -> str | None:
         return self.session.scalar(select(Node.id).where(Node.agent_id == agent_id))
 
+    def archive_retention_state(self, agent_id: str) -> tuple[str, int, int, int] | None:
+        row = self.session.execute(
+            select(
+                Node.id,
+                Node.last_seq,
+                func.coalesce(AgentArchiveState.retired_through_seq, 0),
+                func.coalesce(AgentArchiveState.receipts_compacted_through_seq, 0),
+                AgentArchiveState.node_id,
+            )
+            .outerjoin(AgentArchiveState, AgentArchiveState.agent_id == Node.agent_id)
+            .where(Node.agent_id == agent_id)
+        ).one_or_none()
+        if row is not None and row[4] is not None and row[4] != row[0]:
+            raise DomainError("DEPENDENCY_UNAVAILABLE", "Archive retention binding differs", 503)
+        return (row[0], row[1], row[2], row[3]) if row is not None else None
+
     def usage_source_ceiling(self, agent_id: str) -> tuple[str, int, int | None] | None:
         archived = (
             select(func.max(AgentMessage.seq))

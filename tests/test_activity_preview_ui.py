@@ -1,4 +1,5 @@
 from datetime import timedelta
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -16,7 +17,7 @@ from aris.interfaces.usage.activity_service import (
 )
 from aris.interfaces.usage.service import UsageHistorySurface
 from aris.modules.lyra.reporting_gap_history_service import ReportingGapHistoryService
-from aris.modules.vega.models import AgentMessage
+from aris.modules.vega.models import AgentArchiveState, AgentMessage, AgentMessageReceipt
 from aris.modules.vega.usage_archive_schemas import UsageArchiveHeadQuery
 from tests.test_activity_preview import RULE, fact, grouped
 from tests.test_activity_preview_service import preview_source
@@ -193,6 +194,59 @@ def test_optional_archive_route_is_absent_by_default_and_reads_real_fixed_source
         )
         assert client.get("/internal/usage/ui/assets/usage-activity.js").status_code == 200
     assert counts(preview_source[3][0]) == before
+
+
+def test_archive_ui_distinguishes_retired_prefix_from_missing_packets(preview_source, settings):
+    app, surface, _, _ = interface(preview_source, settings)
+    # This fixture starts at seq 3. First it is a genuine missing prefix; then
+    # seed the independent retained acknowledgments and completed exit boundary.
+    with TestClient(app) as client:
+        initial = client.post(
+            "/internal/usage/activity/query",
+            headers=HEADERS,
+            json={"node_id": "node-a", "max_messages": 128},
+        ).json()
+        assert initial["missing_seq"] == "1" and not initial["range_complete"]
+        with surface.history.sessions.begin() as db:
+            for seq in (1, 2):
+                db.add(
+                    AgentMessageReceipt(
+                        agent_id="agent-a",
+                        seq=seq,
+                        message_id=str(uuid4()),
+                        fingerprint="a" * 64,
+                        applied_to_current=True,
+                    )
+                )
+            db.get(AgentArchiveState, "agent-a").retired_through_seq = 2
+        response = client.post(
+            "/internal/usage/activity/query",
+            headers=HEADERS,
+            json={"node_id": "node-a", "max_messages": 128},
+        )
+        assert response.status_code == 200
+        value = response.json()
+        assert value["range_complete"] and value["missing_seq"] is None
+        assert value["source_packets"] == 5 and value["requested_after_seq"] == "2"
+        assert value["source_retention"] == {
+            "retired_through_seq": "2",
+            "receipts_compacted_through_seq": "0",
+        }
+        expired = client.post(
+            "/internal/usage/activity/query",
+            headers=HEADERS,
+            json={"node_id": "node-a", "max_messages": 128, "through_seq": "2"},
+        )
+        assert expired.status_code == 410 and expired.json()["error"]["code"] == "ARCHIVE_EXPIRED"
+        # An older saved preview fingerprint remains independently reproducible.
+        fixed = surface.activity.reader.recent(
+            preview_source[2],
+            UsageArchiveHeadQuery(agent_id="agent-a", node_id="node-a"),
+            RULE,
+            max_messages=5,
+            through_seq=7,
+        )
+        assert fixed.fingerprint == value["source_result_fingerprint"]
 
 
 def test_archive_http_binding_input_and_current_all_permission_are_required_before_reading(
