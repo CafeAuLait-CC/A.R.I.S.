@@ -3,6 +3,7 @@
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.engine import RowMapping
 from sqlalchemy.orm import Session
 
 from aris.core.contracts import DomainError
@@ -78,8 +79,10 @@ class CoverageBuildRepository:
             .mappings()
             .one_or_none()
         )
-        if row is None:
-            return None
+        return self._decode_step(row) if row is not None else None
+
+    @staticmethod
+    def _decode_step(row: RowMapping) -> StoredCoverageBuildStep:
         try:
             raw = row["canonical_step"]
             if len(raw.encode()) > MAX_BUILD_STEP_BYTES:
@@ -137,18 +140,33 @@ class CoverageBuildRepository:
             if plan.request.prefix_checkpoint
             else plan.configuration.trace.initial_after_seq
         )
-        for revision in revisions:
-            step = self.step(plan.request.id, revision)
-            if step is None or (
-                step.plan_fingerprint != plan.fingerprint
-                or step.previous_fingerprint != previous
-                or step.first_seq != after + 1
-                or step.manifest.id != plan.manifest_id(revision)
-                or step.created_at < plan.created_at
-            ):
+        row = CoverageBuildStepRow
+        for offset in range(0, len(revisions), 64):
+            batch = revisions[offset : offset + 64]
+            rows = (
+                self.session.execute(
+                    select(*row.__table__.c)
+                    .where(row.plan_id == str(plan.request.id), row.revision.in_(batch))
+                    .order_by(row.revision)
+                )
+                .mappings()
+                .all()
+            )
+            if len(rows) != len(batch):
                 raise inconsistent_build()
-            result.append(step)
-            previous, after = step.fingerprint, step.last_seq
+            for revision, value in zip(batch, rows, strict=True):
+                step = self._decode_step(value)
+                if (
+                    step.revision != revision
+                    or step.plan_fingerprint != plan.fingerprint
+                    or step.previous_fingerprint != previous
+                    or step.first_seq != after + 1
+                    or step.manifest.id != plan.manifest_id(revision)
+                    or step.created_at < plan.created_at
+                ):
+                    raise inconsistent_build()
+                result.append(step)
+                previous, after = step.fingerprint, step.last_seq
         if after != plan.source.highest_committed_seq or (
             plan.tail is not None and result and result[-1].attestation_id != plan.tail.request.id
         ):

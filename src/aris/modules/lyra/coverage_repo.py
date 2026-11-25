@@ -4,6 +4,7 @@ import hashlib
 from uuid import UUID
 
 from sqlalchemy import select, text
+from sqlalchemy.engine import RowMapping
 from sqlalchemy.orm import Session
 
 from aris.core.contracts import DomainError
@@ -11,6 +12,8 @@ from aris.core.time import utc
 from aris.modules.lyra.coverage_schemas import MAX_COVERAGE_BYTES, StoredProcessingCoverage
 from aris.modules.lyra.models import UsageCoverageManifestRow
 from aris.modules.lyra.trace_consumer_schemas import canonical_trace
+
+MANIFEST_BATCH_SIZE = 32
 
 
 class ProcessingCoverageRepository:
@@ -35,8 +38,20 @@ class ProcessingCoverageRepository:
             .mappings()
             .one_or_none()
         )
-        if row is None:
-            return None
+        return self._decode(row) if row is not None else None
+
+    def get_batch(self, ids: tuple[UUID, ...]) -> dict[UUID, StoredProcessingCoverage]:
+        """Read a bounded batch whose total bytes have already been checked by the caller."""
+        if not 1 <= len(ids) <= MANIFEST_BATCH_SIZE or len(set(ids)) != len(ids):
+            raise ValueError("coverage manifest batch requires bounded, unique IDs")
+        row = UsageCoverageManifestRow
+        rows = self.session.execute(
+            select(*row.__table__.c).where(row.id.in_(tuple(str(id) for id in ids)))
+        ).mappings()
+        return {value.analysis.request.id: value for value in map(self._decode, rows)}
+
+    @staticmethod
+    def _decode(row: RowMapping) -> StoredProcessingCoverage:
         try:
             raw = row["canonical_manifest"]
             if len(raw.encode()) > MAX_COVERAGE_BYTES:

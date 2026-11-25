@@ -5,7 +5,7 @@ from uuid import uuid4
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import func, select, text
+from sqlalchemy import event, func, select, text
 from sqlalchemy.exc import DBAPIError
 
 from aris.core.audit import AuditEntry
@@ -221,9 +221,26 @@ def test_finished_generation_uses_complete_proof_prefix_and_does_not_promote_mis
     def unexpected_replay(*_):
         pytest.fail("Finalizing committed coverage must not replay the source")
 
+    for revision in range(plan.start_revision, plan.target_revision):
+        build.advance(POST, next_step(plan, revision))
+    assert plan.target_revision - plan.start_revision > 1
+    reads = {"usage_coverage_build_steps": 0, "usage_coverage_manifests": 0}
+
+    def count_reads(_conn, _cursor, statement, _parameters, _context, _many):
+        if statement.lstrip().upper().startswith("SELECT"):
+            for table in reads:
+                if table in statement:
+                    reads[table] += 1
+
     with monkeypatch.context() as patch:
         patch.setattr(build.coverage, "reverify_in_transaction", unexpected_replay)
-        result = drain(build, plan).snapshot
+        engine = build.sessions.kw["bind"]
+        event.listen(engine, "before_cursor_execute", count_reads)
+        try:
+            result = build.finish(POST, plan.request.id).snapshot
+        finally:
+            event.remove(engine, "before_cursor_execute", count_reads)
+    assert reads == {"usage_coverage_build_steps": 2, "usage_coverage_manifests": 2}
     assert (
         result.window.source_prefix_complete
         and result.window.total_usage_microseconds == 135_000_000
