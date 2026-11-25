@@ -14,7 +14,7 @@ from aris.core.commands.budgets import database_failure, transaction_budget
 from aris.core.contracts import DomainError
 from aris.core.db import commit_owned_transaction, transaction_savepoint
 from aris.core.events import DomainEvent, OutboxEntry
-from aris.modules.lyra.coverage_build_repo import CoverageBuildRepository
+from aris.modules.lyra.coverage_build_schemas import StoredCoverageBuild
 from aris.modules.lyra.coverage_inputs import (
     coverage_parents,
     coverage_recording_candidates,
@@ -41,7 +41,6 @@ from aris.modules.lyra.processing_coverage import (
     recording_id,
     recording_reference,
 )
-from aris.modules.lyra.trace_attestation_repo import TraceAttestationRepository
 from aris.modules.lyra.trace_attestation_schemas import StoredTraceAttestation
 from aris.modules.lyra.trace_attestation_service import TraceAttestationService
 from aris.modules.lyra.trace_consumer_repo import UsageTraceRepository
@@ -234,18 +233,16 @@ class ProcessingCoverageService:
         self,
         session: Session,
         context: UsageTraceConsumeContext,
-        plan_id: UUID,
-        revision: int,
+        plan: StoredCoverageBuild,
+        proof: StoredTraceAttestation,
     ) -> ProcessingCoverageReceipt:
-        """Only an already admitted persistent build can capture a historical boundary."""
-        plan = CoverageBuildRepository(session).get(plan_id)
-        if plan is None:
-            raise DomainError("NOT_FOUND", "Coverage build not found", 404)
-        proof = TraceAttestationRepository(session).at_revision(
-            plan.configuration.trace.consumer_id,
-            revision,
-        )
-        if proof is None or not plan.start_revision < revision <= plan.target_revision:
+        """Use the committed plan and proof the build service checked in this transaction."""
+        revision = proof.revision
+        if (
+            not plan.start_revision < revision <= plan.target_revision
+            or proof.consumer_id != plan.configuration.trace.consumer_id
+            or proof.configuration_fingerprint != plan.configuration.trace.fingerprint
+        ):
             raise DomainError("CONFLICT", "Coverage build source revision is absent", 409)
         request = ProcessingCoverageRequest(
             id=plan.manifest_id(revision),

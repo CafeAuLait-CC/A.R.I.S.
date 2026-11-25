@@ -348,8 +348,8 @@ class CoverageBuildService:
                 manifest = self.coverage.record_build_step_in_transaction(
                     db,
                     context,
-                    request.id,
-                    next_revision,
+                    plan,
+                    proof,
                 ).manifest
                 draft = StoredCoverageBuildStep.model_construct(
                     plan_id=request.id,
@@ -448,6 +448,10 @@ class CoverageBuildService:
         return saved
 
     def progress(self, id: UUID) -> CoverageBuildProgress:
+        return self.inspect_progress(id)[1]
+
+    def inspect_progress(self, id: UUID) -> tuple[StoredCoverageBuild, CoverageBuildProgress]:
+        """Read the plan and verify its progress together for the report worker."""
         try:
             with self.sessions() as db:
                 self._begin(db)
@@ -459,7 +463,7 @@ class CoverageBuildService:
                 if step is not None:
                     self._saved_step(db, plan, step)
                 revision = step.revision if step else plan.start_revision
-                return CoverageBuildProgress(
+                return plan, CoverageBuildProgress(
                     plan_id=id,
                     plan_fingerprint=plan.fingerprint,
                     processed_revision=revision,

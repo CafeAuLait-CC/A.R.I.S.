@@ -111,13 +111,18 @@ class CoverageBuildRepository:
             raise inconsistent_build() from None
 
     def latest(self, id: UUID) -> StoredCoverageBuildStep | None:
-        revision = self.session.scalar(
-            select(CoverageBuildStepRow.revision)
-            .where(CoverageBuildStepRow.plan_id == str(id))
-            .order_by(CoverageBuildStepRow.revision.desc())
-            .limit(1)
+        row = CoverageBuildStepRow
+        value = (
+            self.session.execute(
+                select(*row.__table__.c)
+                .where(row.plan_id == str(id))
+                .order_by(row.revision.desc())
+                .limit(1)
+            )
+            .mappings()
+            .one_or_none()
         )
-        return self.step(id, revision) if revision is not None else None
+        return self._decode_step(value) if value is not None else None
 
     def completed_steps(self, plan: StoredCoverageBuild) -> tuple[StoredCoverageBuildStep, ...]:
         # Keys only before proof bodies; the caller then applies the original manifest byte budget.

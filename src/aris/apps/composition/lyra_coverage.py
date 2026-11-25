@@ -141,7 +141,7 @@ class LyraCoverageComponents:
         if self.service is None or target is None or config.configuration is None:
             return self._summary("paused" if not config.enabled else "not_configured")
         try:
-            plan = self.service.exact(target.id)
+            plan, progress = self.service.inspect_progress(target.id)
         except DomainError as error:
             if error.code != "NOT_FOUND":
                 raise
@@ -183,7 +183,6 @@ class LyraCoverageComponents:
             )
         ):
             raise DomainError("CONFLICT", "Coverage worker target has different fixed input", 409)
-        progress = self.service.progress(target.id)
         if status_only:
             return self._summary("finished" if progress.window_saved else "pending", progress)
         if not config.enabled:

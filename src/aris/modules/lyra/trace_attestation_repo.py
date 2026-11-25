@@ -4,6 +4,7 @@ import json
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.engine import RowMapping
 from sqlalchemy.orm import Session
 
 from aris.core.contracts import DomainError
@@ -37,8 +38,10 @@ class TraceAttestationRepository:
             .mappings()
             .one_or_none()
         )
-        if row is None:
-            return None
+        return self._decode(row) if row is not None else None
+
+    @staticmethod
+    def _decode(row: RowMapping) -> StoredTraceAttestation:
         try:
             raw = row["canonical_record"]
             if len(raw.encode()) > MAX_ATTESTATION_BYTES:
@@ -90,10 +93,14 @@ class TraceAttestationRepository:
         )
 
     def at_revision(self, consumer_id: str, revision: int) -> StoredTraceAttestation | None:
-        id = self.session.scalar(
-            select(UsageTraceAttestationRow.id).where(
-                UsageTraceAttestationRow.consumer_id == consumer_id,
-                UsageTraceAttestationRow.revision == revision,
+        row = UsageTraceAttestationRow
+        value = (
+            self.session.execute(
+                select(*row.__table__.c).where(
+                    row.consumer_id == consumer_id, row.revision == revision
+                )
             )
+            .mappings()
+            .one_or_none()
         )
-        return self.get(UUID(id)) if id is not None else None
+        return self._decode(value) if value is not None else None
