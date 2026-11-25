@@ -58,7 +58,6 @@ def service_for(writer, *, method="strict_sampled_residency_edges"):
         writer.sessions,
         source.attestations,
         source.archive,
-        writer.derivations.observations,
         writer.acceptances.identities,
         configuration=config,
         clock=source.clock,

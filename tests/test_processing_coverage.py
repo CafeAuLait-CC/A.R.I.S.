@@ -103,7 +103,6 @@ def coverage(closed):
         writer.sessions,
         proofs,
         writer.archive,
-        writer.derivations.observations,
         identities,
         configuration=configuration,
         clock=writer.clock,
@@ -142,14 +141,24 @@ def incoming(state, **changes):
     "method", ["strict_sampled_residency_edges", "indexed_sampled_residency_edges"]
 )
 def test_closed_processing_changes_pending_to_known_without_rewriting_the_old_manifest(
-    coverage, method
+    coverage, method, monkeypatch
 ):
     state = coverage
     service = state.service
     service.configuration = service.configuration.model_copy(update={"method": method})
     request = incoming(state)
     before = snapshot(service)
-    pending = service.record(CONTEXT, request)
+    pages = []
+    original_page = service.archive.page_in_transaction
+
+    def read_original(session, query):
+        pages.append(query)
+        return original_page(session, query)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(service.archive, "page_in_transaction", read_original)
+        pending = service.record(CONTEXT, request)
+    assert len(pages) == 2 and pages[0] == pages[1]
     assert not pending.duplicate
     analysis = pending.manifest.analysis
     assert not analysis.complete_within_source_window
@@ -338,7 +347,6 @@ def test_indexed_source_without_positive_edges_does_not_scan_a_ledger_window(con
         state.sessions,
         proofs,
         state.archive,
-        state.observations,
         NodeUserHistoryService(state.sessions),
         configuration=config,
         clock=state.now,
@@ -387,7 +395,6 @@ def test_idle_edges_are_complete_locally_while_unobserved_boundaries_remain_unco
         state.sessions,
         proof_service,
         state.archive,
-        state.observations,
         NodeUserHistoryService(state.sessions),
         configuration=config,
         clock=state.now,
@@ -561,7 +568,6 @@ def test_cached_quality_clock_and_unresolved_ownership_keep_their_meaning(consum
         state.sessions,
         proofs,
         state.archive,
-        state.observations,
         NodeUserHistoryService(state.sessions),
         configuration=config,
         clock=state.now,
@@ -609,7 +615,6 @@ def test_partition_receipt_covers_only_its_measured_slice_and_uses_the_whole_par
         writer.sessions,
         proofs,
         writer.evidence.archive,
-        writer.derivations.observations,
         writer.identities,
         configuration=config,
         clock=writer.clock,

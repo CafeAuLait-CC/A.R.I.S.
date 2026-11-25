@@ -63,6 +63,13 @@ class TraceObservationReader(Protocol):
 
 
 @dataclass(frozen=True)
+class VerifiedTraceSources:
+    record: StoredTraceConsumption
+    page: UsageArchivePage
+    anchor: UsageObservationFact | None
+
+
+@dataclass(frozen=True)
 class _TraceEvaluation:
     trace: UsageTraceCheckpoint | None
     residency: ResidencyFormationCheckpoint | None
@@ -183,7 +190,7 @@ class UsageTraceConsumerService:
         page: UsageArchivePage,
         *,
         source_cutoff: datetime | None = None,
-    ) -> _TraceEvaluation:
+    ) -> tuple[_TraceEvaluation, UsageObservationFact | None]:
         checkpoint, anchor = before.trace, None
         if checkpoint is not None and any(item.observation is not None for item in page.items):
             ref = checkpoint.anchor.reference
@@ -208,17 +215,17 @@ class UsageTraceConsumerService:
         inputs = _ReplayInput(before, page.items, anchor, source_cutoff)
         scope = _active_replay_scope(session)
         if scope is None:
-            return self._replay(inputs)
+            return self._replay(inputs), anchor
         # Page and anchor were read and validated again above. Only reuse the
         # computation when all the current inputs match within this transaction.
         key = (page.fingerprint, source_cutoff)
         previous = scope.results.get(key)
         if previous is not None and previous[0] == inputs:
-            return previous[1]
+            return previous[1], anchor
         result = self._replay(inputs)
         if len(scope.results) < _MAX_REPLAYS:
             scope.results[key] = (inputs, result)
-        return result
+        return result, anchor
 
     @staticmethod
     def _replay(inputs: _ReplayInput) -> _TraceEvaluation:
@@ -296,7 +303,7 @@ class UsageTraceConsumerService:
         record: StoredTraceConsumption,
         *,
         source_cutoff: datetime | None = None,
-    ) -> None:
+    ) -> VerifiedTraceSources:
         before, config = record.before, record.before.configuration
         page = self._page(
             session,
@@ -308,7 +315,7 @@ class UsageTraceConsumerService:
                 limit=len(record.sources),
             ),
         )
-        evaluated = self._evaluate(session, before, page, source_cutoff=source_cutoff)
+        evaluated, anchor = self._evaluate(session, before, page, source_cutoff=source_cutoff)
         if (
             page.state != "range_end"
             or evaluated.sources != record.sources
@@ -318,6 +325,7 @@ class UsageTraceConsumerService:
             or evaluated.transitions_fingerprint != record.transitions_fingerprint
         ):
             raise DomainError("CONFLICT", "Candidate source prefix changed during processing", 409)
+        return VerifiedTraceSources(record=record, page=page, anchor=anchor)
 
     def verify_record_in_transaction(
         self,
@@ -326,6 +334,17 @@ class UsageTraceConsumerService:
         expected_fingerprint: str,
         source_cutoff: datetime,
     ) -> StoredTraceConsumption:
+        return self.verify_sources_in_transaction(
+            session, record_id, expected_fingerprint, source_cutoff
+        ).record
+
+    def verify_sources_in_transaction(
+        self,
+        session: Session,
+        record_id: UUID,
+        expected_fingerprint: str,
+        source_cutoff: datetime,
+    ) -> VerifiedTraceSources:
         """Reproduce one bounded record from originals, not its entire prior history.
 
         The caller owns the transaction budget and must independently establish
@@ -339,8 +358,7 @@ class UsageTraceConsumerService:
                 raise DomainError("CONFLICT", "Candidate consumption fingerprint differs", 409)
             if record.created_at > source_cutoff:
                 raise DomainError("CONFLICT", "Candidate record follows the source cutoff", 409)
-            self._verify_sources(session, record, source_cutoff=source_cutoff)
-            return record
+            return self._verify_sources(session, record, source_cutoff=source_cutoff)
 
     def consume(
         self, context: UsageTraceConsumeContext, request: UsageTraceConsumeRequest
@@ -413,7 +431,7 @@ class UsageTraceConsumerService:
                         position=before,
                         missing_seq=before.after_seq + 1,
                     )
-                evaluated = self._evaluate(session, before, page)
+                evaluated, _ = self._evaluate(session, before, page)
                 now = self._now()
                 if before.recorded_at is not None and now < before.recorded_at:
                     raise DomainError(

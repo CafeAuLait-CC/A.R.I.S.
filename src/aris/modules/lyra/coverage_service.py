@@ -43,11 +43,8 @@ from aris.modules.lyra.processing_coverage import (
 )
 from aris.modules.lyra.trace_attestation_schemas import StoredTraceAttestation
 from aris.modules.lyra.trace_attestation_service import TraceAttestationService
-from aris.modules.lyra.trace_consumer_repo import UsageTraceRepository
 from aris.modules.lyra.trace_consumer_schemas import UsageTraceConsumeContext
-from aris.modules.lyra.trace_consumer_service import TraceArchiveReader, TraceObservationReader
-from aris.modules.vega.usage_archive_schemas import UsageArchiveQuery
-from aris.modules.vega.usage_schemas import UsageObservationQuery
+from aris.modules.lyra.trace_consumer_service import TraceArchiveReader
 
 
 class ProcessingCoverageService:
@@ -56,7 +53,6 @@ class ProcessingCoverageService:
         sessions: sessionmaker[Session],
         attestations: TraceAttestationService,
         archive: TraceArchiveReader,
-        observations: TraceObservationReader,
         identities: NodeUserHistoryService,
         *,
         configuration: ProcessingCoverageConfiguration | None = None,
@@ -66,7 +62,7 @@ class ProcessingCoverageService:
         if type(timeout_ms) is not int or not 100 <= timeout_ms <= 10000:
             raise ValueError("processing coverage requires a bounded internal timeout")
         self.sessions, self.attestations = sessions, attestations
-        self.archive, self.observations, self.identities = archive, observations, identities
+        self.archive, self.identities = archive, identities
         self.configuration, self.timeout_ms = configuration, timeout_ms
         self.clock = clock or (lambda: datetime.now(UTC))
 
@@ -91,38 +87,15 @@ class ProcessingCoverageService:
         request: ProcessingCoverageRequest,
         config: ProcessingCoverageConfiguration,
     ) -> tuple[StoredTraceAttestation, CoverageReplay]:
-        attested = self.attestations.reverify_in_transaction(session, request.attestation_id)
+        attested, verified = self.attestations.reverify_sources_in_transaction(
+            session, request.attestation_id
+        )
         if (
             attested.fingerprint != request.expected_attestation_fingerprint
             or attested.configuration_fingerprint != config.trace.fingerprint
         ):
             raise DomainError("CONFLICT", "Coverage attestation binding differs", 409)
-        record = UsageTraceRepository(session).get(attested.request.record_id)
-        if record is None:
-            raise DomainError("DEPENDENCY_UNAVAILABLE", "Coverage source record is missing", 503)
-        page = self.archive.page_in_transaction(
-            session,
-            UsageArchiveQuery(
-                agent_id=config.trace.agent_id,
-                node_id=config.trace.node_id,
-                after_seq=record.before.after_seq,
-                through_seq=record.position.after_seq,
-                limit=len(record.sources),
-            ),
-        )
-        anchor = None
-        if record.before.trace is not None and any(value.observation for value in page.items):
-            ref = record.before.trace.anchor.reference
-            anchor = self.observations.observation_in_transaction(
-                session,
-                UsageObservationQuery(
-                    agent_id=ref.agent_id,
-                    node_id=ref.node_id,
-                    message_id=ref.message_id,
-                    expected_seq=ref.seq,
-                ),
-            )
-        return attested, replay_coverage(record, page, anchor, config)
+        return attested, replay_coverage(verified.record, verified.page, verified.anchor, config)
 
     def _analysis(
         self,

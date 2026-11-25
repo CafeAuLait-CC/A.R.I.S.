@@ -192,7 +192,6 @@ def test_due_week_target_admits_and_resumes_original_build_without_claiming_full
         state[0].sessions,
         producer.attestations,
         producer.trace.archive,
-        producer.trace.observations,
         producer.plans.acceptances.identities,
         configuration=config,
         clock=lambda: state[4]["now"],

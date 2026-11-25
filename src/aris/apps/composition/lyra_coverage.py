@@ -231,7 +231,6 @@ def build_lyra_coverage_components(
         sessions,
         attestations,
         archive,
-        observations,
         identities,
         configuration=domain if config.enabled else None,
         clock=now,

@@ -296,7 +296,7 @@ def test_final_original_recheck_failure_and_outer_rollback_leave_no_attestation(
     value, before = incoming(state, receipt), snapshot(state)
     verifier = rebuild(state)
     app = TraceAttestationService(state.sessions, verifier, clock=state.now)
-    original, calls = verifier.verify_record_in_transaction, []
+    original, calls = verifier.verify_sources_in_transaction, []
 
     def changed(*args):
         calls.append(True)
@@ -305,7 +305,7 @@ def test_final_original_recheck_failure_and_outer_rollback_leave_no_attestation(
         return original(*args)
 
     with monkeypatch.context() as patch:
-        patch.setattr(verifier, "verify_record_in_transaction", changed)
+        patch.setattr(verifier, "verify_sources_in_transaction", changed)
         with pytest.raises(DomainError):
             app.record(CONTEXT, value)
     assert snapshot(state) == before

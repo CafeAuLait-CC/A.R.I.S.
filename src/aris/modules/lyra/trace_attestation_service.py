@@ -1,6 +1,7 @@
 """Append bounded original-source proofs without rescanning an unbounded run."""
 
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from time import monotonic
 from typing import Protocol
@@ -29,12 +30,17 @@ from aris.modules.lyra.trace_consumer_schemas import (
     StoredTraceConsumption,
     UsageTraceConsumeContext,
 )
+from aris.modules.lyra.trace_consumer_service import VerifiedTraceSources
 
 
 class TraceRecordVerifier(Protocol):
     def verify_record_in_transaction(
         self, session: Session, record_id: UUID, expected_fingerprint: str, source_cutoff: datetime
     ) -> StoredTraceConsumption: ...
+
+    def verify_sources_in_transaction(
+        self, session: Session, record_id: UUID, expected_fingerprint: str, source_cutoff: datetime
+    ) -> VerifiedTraceSources: ...
 
 
 class TraceAttestationService:
@@ -113,11 +119,11 @@ class TraceAttestationService:
 
     def _source(
         self, session: Session, request: TraceAttestationRequest
-    ) -> tuple[StoredTraceConsumption, StoredTraceAttestation | None]:
-        source = self.verifier.verify_record_in_transaction(
+    ) -> tuple[VerifiedTraceSources, StoredTraceAttestation | None]:
+        verified = self.verifier.verify_sources_in_transaction(
             session, request.record_id, request.expected_record_fingerprint, request.source_cutoff
         )
-        source = StoredTraceConsumption.model_validate(source.model_dump(mode="json"))
+        source = StoredTraceConsumption.model_validate(verified.record.model_dump(mode="json"))
         if (
             source.request.id != request.record_id
             or source.fingerprint != request.expected_record_fingerprint
@@ -127,7 +133,7 @@ class TraceAttestationService:
         previous = self._previous(session, source, request.source_cutoff)
         if previous is not None and previous.created_at > self._now():
             raise DomainError("DEPENDENCY_UNAVAILABLE", "Preceding attestation is not reached", 503)
-        return source, previous
+        return replace(verified, record=source), previous
 
     @staticmethod
     def _matches(
@@ -158,6 +164,11 @@ class TraceAttestationService:
             raise self._failure(error) from None
 
     def reverify_in_transaction(self, session: Session, id: UUID) -> StoredTraceAttestation:
+        return self.reverify_sources_in_transaction(session, id)[0]
+
+    def reverify_sources_in_transaction(
+        self, session: Session, id: UUID
+    ) -> tuple[StoredTraceAttestation, VerifiedTraceSources]:
         """Verify this segment, its anchor and direct binding, not all prior sources."""
         deadline = monotonic() + self.timeout_ms / 1000
         try:
@@ -170,11 +181,12 @@ class TraceAttestationService:
                     raise DomainError(
                         "DEPENDENCY_UNAVAILABLE", "Source attestation is not reached", 503
                     )
-                self._matches(value, *self._source(session, value.request))
+                verified, previous = self._source(session, value.request)
+                self._matches(value, verified.record, previous)
                 if repo.get(id) != value:
                     raise inconsistent_attestation()
                 self._deadline(deadline)
-                return value
+                return value, verified
         except DBAPIError as error:
             raise self._failure(error) from None
         except (ValueError, TypeError, KeyError, RecursionError):
@@ -215,7 +227,8 @@ class TraceAttestationService:
                 repo.lock("consumer", original.before.configuration.consumer_id)
                 if repo.get(request.record_id, by_record=True) is not None:
                     raise DomainError("CONFLICT", "Source segment already has an attestation", 409)
-                source, previous = self._source(session, request)
+                verified, previous = self._source(session, request)
+                source = verified.record
                 self._deadline(deadline)
                 now, event_id = self._now(), uuid4()
                 unchecked = StoredTraceAttestation.model_construct(

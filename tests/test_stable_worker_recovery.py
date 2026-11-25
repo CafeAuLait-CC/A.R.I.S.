@@ -208,7 +208,6 @@ def test_composed_worker_records_long_live_prefixes_and_final_tail_with_bounded_
         state[0].sessions,
         pipeline.attestations,
         pipeline.trace.archive,
-        pipeline.trace.observations,
         pipeline.plans.acceptances.identities,
         configuration=ProcessingCoverageConfiguration(
             trace=pipeline.configuration.trace, recording=config.recording, gpu_uuids=("GPU-a",)
