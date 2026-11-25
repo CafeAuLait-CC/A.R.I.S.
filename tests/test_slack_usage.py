@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from urllib.parse import urlencode
 from uuid import uuid4
 
@@ -39,6 +39,10 @@ def usage_slack(readings, settings, slack_settings, monkeypatch):
     queries = PersonalUsageQueries(
         original.sessions, NAMESPACE, ("node-a", "node-b"), clock=original.clock
     )
+    # Relative Slack periods follow these fixture observations. Keep the underlying
+    # ledger read clock at its actual posting cutoff, so snapshot checks remain real.
+    period_at = state[3].recording_start_at + timedelta(minutes=5)
+    queries.clock = lambda: period_at
     adapter = SlackUsageQueries(queries)
     slack = slack_settings.model_copy(update={"team_id": "TFIXTURE"})
 
