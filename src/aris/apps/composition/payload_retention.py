@@ -1,5 +1,6 @@
 """One explicit old-prefix operation; no HTTP route, daemon or blanket age deletion."""
 
+from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -32,6 +33,10 @@ def retire_pre_recording_prefix(
     maintenance = VegaPayloadMaintenance(sessions)
     try:
         with sessions() as db:
+            # Dependencies committed by a capture that held the shared source
+            # lock must be visible after our exclusive lock finishes waiting.
+            if db.get_bind().dialect.name == "postgresql":
+                db.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
             transaction_budget(db, 1000, 3000, ORIGIN_READ_SECONDS * 1000)
             completed = maintenance.completed_in_transaction(db, context, request)
             if completed is not None:

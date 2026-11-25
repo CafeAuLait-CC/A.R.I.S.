@@ -1,11 +1,14 @@
 import hashlib
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, time, timedelta
+from threading import Event
 from uuid import uuid4
 
 import pytest
 from sqlalchemy import event, select
+from sqlalchemy.orm import sessionmaker
 
 from aris.apps.composition.payload_retention import retire_pre_recording_prefix
 from aris.apps.ops import storage
@@ -261,3 +264,72 @@ def test_origin_maintenance_rechecks_dependencies_and_replays_its_original_resul
     assert blocked.payload_prefix is None
     replay = retire_pre_recording_prefix(state.sessions, context, incoming, timezone="UTC")
     assert replay.duplicate and replay.fingerprint == result.fingerprint
+
+
+def test_postgresql_maintenance_sees_capture_committed_while_waiting(consumer):
+    state = consumer
+    engine = state.sessions.kw["bind"]
+    if engine.dialect.name != "postgresql":
+        pytest.skip("requires independent PostgreSQL transactions and row locks")
+    cutoff, now = seed_early_prefix(state)
+    state.service.consume(CONTEXT, request(state))
+    save_early_health(state)
+    preview = preview_pre_recording_retention(
+        state.sessions, SOURCE, before=cutoff, timezone="UTC", now=now
+    )
+    with state.sessions() as db:
+        reports = state.archive.reporting_page_in_transaction(
+            db,
+            UsageArchiveQuery(
+                **SOURCE.model_dump(),
+                after_seq=0,
+                through_seq=2,
+            ),
+        ).reports
+    incoming = PayloadRetirementRequest(
+        id=uuid4(),
+        source=SOURCE,
+        before=cutoff,
+        dependency_fingerprint=preview.fingerprint,
+        reports=reports,
+    )
+    rr_sessions = sessionmaker(engine.execution_options(isolation_level="REPEATABLE READ"))
+    waiting = Event()
+
+    def capture(conn, cursor, statement, *args):
+        if "agent_archive_states" in statement.lower() and "FOR UPDATE" in statement:
+            waiting.set()
+
+    config = configuration(
+        consumer_id="earlier-source-commits-during-maintenance", initial_after_seq=0
+    )
+    early = rebuild(state, config=config)
+    with state.sessions() as writer:
+        early.consume_in_transaction(
+            writer,
+            CONTEXT,
+            UsageTraceConsumeRequest(
+                id=uuid4(),
+                expected_configuration_fingerprint=config.fingerprint,
+                expected_revision=0,
+                through_seq=6,
+            ),
+        )
+        event.listen(engine, "before_cursor_execute", capture)
+        try:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(
+                    retire_pre_recording_prefix,
+                    rr_sessions,
+                    PayloadRetirementContext(request_id="fixture-rr-maintenance"),
+                    incoming,
+                    timezone="UTC",
+                )
+                assert waiting.wait(timeout=5)
+                writer.commit()
+                with pytest.raises(DomainError, match="dependencies or selected prefix changed"):
+                    future.result(timeout=8)
+        finally:
+            event.remove(engine, "before_cursor_execute", capture)
+    with state.sessions() as db:
+        assert db.scalar(select(AgentMessage.seq).where(AgentMessage.seq == 1)) == 1
