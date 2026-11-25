@@ -18,6 +18,8 @@ from aris.core.relay.service import DatabaseEventConsumer, EventRelay
 from aris.core.time import utc
 from aris.modules.vega.models import AgentMessage
 from aris.modules.vega.payload_retirement_service import VegaPayloadMaintenance
+from aris.modules.vega.receipt_compaction_service import VegaReceiptMaintenance
+from aris.modules.vega.receipt_evidence_service import original_receipts_in_transaction
 from aris.modules.vega.repo import VegaRepository
 from tests.test_event_relay import LIMITS
 from tests.test_heartbeat import beat, heartbeat
@@ -98,16 +100,15 @@ def log_counts(state):
         )
 
 
-def test_log_expiry_requires_retired_originals_and_is_atomic_and_idempotent(consumer):
+def test_log_expiry_preserves_originals_across_storage_tiers_and_is_atomic_and_idempotent(consumer):
     state = consumer
     scope, pairs = legacy_logs(state)
     before = log_counts(state)
     operation = uuid4()
-    with pytest.raises(DomainError, match="have not left"):
-        retire_transport_logs(state.sessions, MAINTENANCE, operation, SOURCE, scope, pairs)
-    assert log_counts(state) == before
-    VegaPayloadMaintenance(state.sessions).retire(MAINTENANCE, prepare(state))
-    before = log_counts(state)
+    with state.sessions() as db:
+        original = original_receipts_in_transaction(db, SOURCE, first=1, last=2)
+        with pytest.raises(DomainError, match="incomplete"):
+            original_receipts_in_transaction(db, SOURCE, first=1, last=7)
     engine = state.sessions.kw["bind"]
 
     def fail_after_outbox(conn, cursor, statement, *args):
@@ -139,6 +140,23 @@ def test_log_expiry_requires_retired_originals_and_is_atomic_and_idempotent(cons
     result = retire_transport_logs(state.sessions, MAINTENANCE, operation, SOURCE, scope, pairs)
     assert (result.events, result.audits, result.duplicate) == (2, 2, False)
     assert log_counts(state) == (before[0] - 2, before[1] - 2, before[2] - 1)
+    assert retire_transport_logs(
+        state.sessions, MAINTENANCE, operation, SOURCE, scope, pairs
+    ).duplicate
+    with state.sessions() as db:
+        assert db.scalar(select(func.count()).select_from(AgentMessage)) == 6
+    VegaPayloadMaintenance(state.sessions).retire(MAINTENANCE, prepare(state))
+    with state.sessions() as db:
+        assert original_receipts_in_transaction(db, SOURCE, first=1, last=2) == original
+        mixed = original_receipts_in_transaction(db, SOURCE, first=1, last=4)
+        assert len(mixed.receipts) == 4
+    compaction = VegaReceiptMaintenance(state.sessions)
+    compact = compaction.prepare(SOURCE, uuid4())
+    assert compact is not None
+    compaction.compact(MAINTENANCE, compact)
+    with state.sessions() as db:
+        assert original_receipts_in_transaction(db, SOURCE, first=1, last=2) == original
+        assert original_receipts_in_transaction(db, SOURCE, first=1, last=4) == mixed
     assert retire_transport_logs(
         state.sessions, MAINTENANCE, operation, SOURCE, scope, pairs
     ).duplicate

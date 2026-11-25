@@ -18,7 +18,7 @@ from aris.core.log_expiry_schemas import (
 )
 from aris.core.log_expiry_service import CoreLogMaintenance
 from aris.modules.vega.payload_retirement_schemas import PayloadRetirementContext
-from aris.modules.vega.retired_receipt_service import retired_receipts_in_transaction
+from aris.modules.vega.receipt_evidence_service import original_receipts_in_transaction
 from aris.modules.vega.usage_archive_schemas import UsageArchiveHeadQuery
 
 TRANSPORT_TYPES = frozenset(("vega.telemetry.accepted", "vega.heartbeat.accepted"))
@@ -80,7 +80,7 @@ def retire_transport_logs(
             if db.get_bind().dialect.name == "postgresql":
                 db.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
             transaction_budget(db, 1000, 3000, 15000)
-            evidence = retired_receipts_in_transaction(db, source, first=first, last=last)
+            evidence = original_receipts_in_transaction(db, source, first=first, last=last)
             originals = {row.seq: row for row in evidence.receipts}
             for pair in pairs:
                 original = originals[pair.event.aggregate_version]

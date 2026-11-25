@@ -5,62 +5,58 @@ import json
 from uuid import UUID
 
 from pydantic import Field
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from aris.core.contracts import Contract, DomainError
-from aris.modules.vega.models import AgentArchiveState
 from aris.modules.vega.receipt_block_repo import ReceiptBlockRepository
 from aris.modules.vega.usage_archive_schemas import UsageArchiveHeadQuery
 
 
-class RetiredReceipt(Contract):
+class OriginalAcknowledgment(Contract):
     seq: int = Field(ge=1)
     message_id: UUID
     fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
     applied_to_current: bool = Field(strict=True)
 
 
-class RetiredReceiptBatch(Contract):
+class OriginalAcknowledgmentBatch(Contract):
     source: UsageArchiveHeadQuery
-    receipts: tuple[RetiredReceipt, ...] = Field(min_length=1, max_length=1024)
+    receipts: tuple[OriginalAcknowledgment, ...] = Field(min_length=1, max_length=1024)
 
     @property
     def fingerprint(self) -> str:
         raw = json.dumps(self.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+        # Existing saved maintenance proofs bind logical acknowledgments. Their
+        # digest stays stable when the same facts move between storage tiers.
         return hashlib.sha256(b"aris.vega.retired-receipts\x00" + raw.encode()).hexdigest()
 
 
-def retired_receipts_in_transaction(
+def original_receipts_in_transaction(
     db: Session, source: UsageArchiveHeadQuery, *, first: int, last: int
-) -> RetiredReceiptBatch:
+) -> OriginalAcknowledgmentBatch:
     source = UsageArchiveHeadQuery.model_validate(source.model_dump(mode="json"))
     if first < 1 or not 1 <= last - first + 1 <= 1024:
-        raise ValueError("Retired acknowledgment lookup requires a bounded positive range")
-    boundary = db.scalar(
-        select(AgentArchiveState.retired_through_seq)
-        .where(
-            AgentArchiveState.agent_id == source.agent_id,
-            AgentArchiveState.node_id == source.node_id,
-        )
-        .with_for_update(read=True)
-    )
-    if boundary is None or last > boundary:
-        raise DomainError("CONFLICT", "Original payloads have not left this source range", 409)
+        raise ValueError("Original acknowledgment lookup requires a bounded positive range")
     repo = ReceiptBlockRepository(db)
-    records = tuple(
+    boundary = repo.source_retirement_boundary(source.agent_id, source.node_id)
+    if boundary is None:
+        raise DomainError("CONFLICT", "Original acknowledgment source does not match", 409)
+    records = list(repo.raw_originals(source.agent_id, source.node_id, first, last))
+    retired_last = min(last, boundary)
+    records.extend(
         row
-        for start in range(first, last + 1, 128)
-        for row in repo.original(source.agent_id, start, min(start + 127, last))
+        for start in range(first, retired_last + 1, 128)
+        for row in repo.original(source.agent_id, start, min(start + 127, retired_last))
     )
+    records.sort(key=lambda row: row.seq)
     if tuple(row.seq for row in records) != tuple(range(first, last + 1)):
         raise DomainError(
-            "DEPENDENCY_UNAVAILABLE", "Retired source acknowledgments are incomplete", 503
+            "DEPENDENCY_UNAVAILABLE", "Original source acknowledgments are incomplete", 503
         )
-    return RetiredReceiptBatch(
+    return OriginalAcknowledgmentBatch(
         source=source,
         receipts=tuple(
-            RetiredReceipt(
+            OriginalAcknowledgment(
                 seq=row.seq,
                 message_id=row.message_id,
                 fingerprint=row.fingerprint,

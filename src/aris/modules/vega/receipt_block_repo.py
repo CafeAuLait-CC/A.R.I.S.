@@ -48,6 +48,30 @@ class ReceiptBlockRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
 
+    def source_retirement_boundary(self, agent_id: str, node_id: str) -> int | None:
+        return self.session.scalar(
+            select(AgentArchiveState.retired_through_seq)
+            .where(AgentArchiveState.agent_id == agent_id, AgentArchiveState.node_id == node_id)
+            .with_for_update(read=True)
+        )
+
+    def raw_originals(
+        self, agent_id: str, node_id: str, first: int, last: int
+    ) -> tuple[OriginalReceipt, ...]:
+        row = AgentMessage
+        return tuple(
+            OriginalReceipt(*value)
+            for value in self.session.execute(
+                select(row.seq, row.message_id, row.fingerprint, row.applied_to_current)
+                .where(
+                    row.agent_id == agent_id,
+                    row.node_id == node_id,
+                    row.seq.between(first, last),
+                )
+                .order_by(row.seq)
+            )
+        )
+
     def message(self, agent_id: str, message_id: str) -> OriginalReceipt | None:
         block = AgentReceiptBlock
         contains: ColumnElement[bool]
