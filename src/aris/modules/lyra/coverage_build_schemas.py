@@ -146,6 +146,9 @@ class CoverageBuildProgress(IntervalContract):
     plan_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
     processed_revision: int = Field(ge=0, le=9223372036854775807, strict=True)
     target_revision: int = Field(ge=0, le=9223372036854775807, strict=True)
+    completed_steps: int = Field(ge=0, le=MAX_WINDOW_MANIFESTS, strict=True)
+    total_steps: int = Field(ge=0, le=MAX_WINDOW_MANIFESTS, strict=True)
+    last_step_at: AwareDatetime | None
     sources_built: bool = Field(strict=True)
     window_id: UUID
     window_saved: bool = Field(strict=True)
@@ -156,6 +159,10 @@ class CoverageBuildProgress(IntervalContract):
     def generation_is_not_usage_authority(self) -> "CoverageBuildProgress":
         if (
             self.processed_revision > self.target_revision
+            or self.total_steps > self.target_revision
+            or self.total_steps - self.completed_steps
+            != self.target_revision - self.processed_revision
+            or (self.last_step_at is None) != (self.completed_steps == 0)
             or self.sources_built != (self.processed_revision == self.target_revision)
             or (self.window_saved and not self.sources_built)
             or self.quota_usage_available

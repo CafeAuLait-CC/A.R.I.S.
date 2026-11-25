@@ -554,10 +554,12 @@ def test_closed_days_survive_restart_and_feed_weekly_report_without_raw_samples(
                 event.remove(engine, "before_cursor_execute", no_status_writes)
             assert status["state"] == "pending" and status["day"] == progress["day"]
             assert status["build"]["state"] == "pending"
-            assert (
-                status["build"]["progress"]["processed_revision"]
-                == progress["build"]["progress"]["processed_revision"]
-            )
+            persisted = status["build"]["progress"]
+            worker = progress["build"]["progress"]
+            assert persisted["processed_revision"] == worker["processed_revision"]
+            assert 0 < persisted["completed_steps"] <= persisted["total_steps"]
+            assert persisted["last_step_at"] == worker["last_step_at"]
+            assert persisted["last_step_at"] is not None
             pending_checked = True
         if progress["state"] == "day_saved":
             saved.append(progress["day"])
