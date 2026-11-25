@@ -2,13 +2,33 @@
 window.createActivityUsage = ({el:$, request, lock, message, isBusy, selection, timezone}) => {
   let active=false, report=null, offset=0, generation=0, windowEnd=null, historyCeiling=null;
   const size=32;
+  let historyCursor=null,historyLoaded=false,historyCount=0;
   const text=(tag,value,cls)=>{const item=document.createElement(tag);item.textContent=value;if(cls)item.className=cls;return item;};
   const states={reported_busy:'报告有计算进程',reported_idle:'报告无计算进程',unknown:'未知'};
   const reasons={PROCESSES_REPORTED:'有计算进程',NO_COMPUTE_PROCESSES_REPORTED:'无计算进程',COMPONENT_TIME_STALE:'组件采样陈旧',GPU_OBSERVATION_UNAVAILABLE:'GPU 采集不可用',NOT_IN_REPORTED_INVENTORY:'未出现在该次 GPU 清单',COMPUTE_OBSERVATION_UNAVAILABLE:'计算进程采集不可用',SOURCE_CLOCK_REGRESSION:'原采样时钟回拨',SAME_TIME_FACT_CONFLICT:'同一时点事实冲突'};
   const boundaries={RANGE_START:'所选范围首次观测',SAMPLE_GAP:'采样间隔超限',CLOCK_OR_FACT_CONFLICT:'时钟或事实冲突',OBSERVATION_CHANGED:'状态、归属或质量变化'};
   const hardware=window.createHardwarePreview({el:$,text,stamp});
   function stamp(value){return new Intl.DateTimeFormat('zh-CN',{timeZone:timezone(),month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(new Date(value));}
-  function reset(keepWindow=false){if(!keepWindow){windowEnd=null;historyCeiling=null;}hardware.reset();generation++;report=null;offset=0;$('activity-data').hidden=true;$('activity-rows').replaceChildren();$('activity-gaps').replaceChildren();$('activity-gpu').replaceChildren(new Option('全部 GPU',''));['title','range','quality','rule','fingerprint','page-note','packets','packet-note','frames','cache-note','groups','coverage'].forEach(id=>$(`activity-${id}`).textContent='');$('activity-evidence')?.removeAttribute('open');navigation(false);}
+  function reset(keepWindow=false){if(!keepWindow){windowEnd=null;historyCeiling=null;}hardware.reset();generation++;resetHistory();report=null;offset=0;$('activity-data').hidden=true;$('activity-rows').replaceChildren();$('activity-gaps').replaceChildren();$('activity-gpu').replaceChildren(new Option('全部 GPU',''));['title','range','quality','rule','fingerprint','page-note','packets','packet-note','frames','cache-note','groups','coverage'].forEach(id=>$(`activity-${id}`).textContent='');$('activity-evidence')?.removeAttribute('open');navigation(false);}
+  function resetHistory(){historyCursor=null;historyLoaded=false;historyCount=0;$('reporting-history').open=false;$('reporting-history-list').replaceChildren();$('reporting-history-note').textContent='展开后查看已保存的异常记录。';$('reporting-history-older').hidden=true;}
+  function interval(start,end){const seconds=(new Date(end)-new Date(start))/1000;if(seconds<0)return '时间顺序异常';if(seconds<60)return `${seconds.toLocaleString('zh-CN',{maximumFractionDigits:1})} 秒`;if(seconds<3600)return `${(seconds/60).toLocaleString('zh-CN',{maximumFractionDigits:1})} 分钟`;return `${(seconds/3600).toLocaleString('zh-CN',{maximumFractionDigits:2})} 小时`;}
+  async function loadHistory(more=false){
+    if(isBusy() || !active)return;
+    const ticket=generation,input={view:'reporting_history',node_id:selection(),limit:16,...(more && historyCursor ? {before_seq:historyCursor}:{})};
+    lock(true);message('正在读取上报异常…');
+    try{
+      const result=await(await request('activity/query',input)).json();if(ticket!==generation || !active)return;
+      if(!more){$('reporting-history-list').replaceChildren();historyCount=0;}
+      const cards=result.items.map(item=>{const card=text('li','');card.append(text('strong',[item.large_report_interval?'报告间隔较长':'',item.large_received_interval?'收包间隔较长':''].filter(Boolean).join(' · ')),text('p',`报告 ${stamp(item.report_start_at)} → ${stamp(item.report_end_at)} · ${interval(item.report_start_at,item.report_end_at)}`),text('p',`接收 ${stamp(item.received_start_at)} → ${stamp(item.received_end_at)} · ${interval(item.received_start_at,item.received_end_at)}`,'muted'));return card;});
+      $('reporting-history-list').append(...cards);historyCount+=cards.length;historyCursor=result.next_before_seq;historyLoaded=true;
+      $('reporting-history-older').hidden=!historyCursor;
+      $('reporting-history-note').textContent=historyCount ? `${result.node_id} · 已显示 ${historyCount} 条异常 · 查询于 ${stamp(result.read_at)}`:`${result.node_id} · 暂无已保存的上报异常记录。`;
+      message('');
+    }catch(error){if(ticket===generation)message(error.message,true);}finally{if(ticket===generation)lock(false);}
+  }
+  $('reporting-history').addEventListener('toggle',()=>{if($('reporting-history').open && !historyLoaded)loadHistory();});
+  $('reporting-history-refresh').addEventListener('click',()=>loadHistory());
+  $('reporting-history-older').addEventListener('click',()=>loadHistory(true));
   function navigation(value){$('activity-older').disabled=value || !report || report.requested_after_seq==='0';$('activity-newer').disabled=value || !report || !historyCeiling || BigInt(report.selected_through_seq)>=BigInt(historyCeiling);$('activity-latest').disabled=value || windowEnd===null;}
   function rows(){if(!report)return;hardware.filter($('activity-gpu').value);const values=report.groups.filter(value=>!$('activity-gpu').value || value.gpu_uuid===$('activity-gpu').value), page=values.slice(offset,offset+size);
     $('activity-rows').replaceChildren(...page.map(group=>{const row=document.createElement('tr'),gpu=text('td',group.index===null?'GPU 未列入清单':`GPU ${group.index}`),status=text('span',states[group.state] || '未知',`activity-state ${group.state}`);gpu.append(text('small',group.model || group.gpu_uuid),status);
@@ -30,5 +50,5 @@ window.createActivityUsage = ({el:$, request, lock, message, isBusy, selection, 
   $('activity-newer').addEventListener('click',()=>{if(isBusy() || !report || !historyCeiling)return;const next=BigInt(report.selected_through_seq)+BigInt($('activity-limit').value);windowEnd=String(next>BigInt(historyCeiling)?BigInt(historyCeiling):next);load();});
   $('activity-latest').addEventListener('click',()=>{if(isBusy())return;windowEnd=null;historyCeiling=null;load();});
   $('activity-gpu').addEventListener('change',()=>{offset=0;rows();});$('activity-limit').addEventListener('change',()=>{reset();message('每段数量已改变，点击查询返回最新原包窗口。');});$('activity-previous').addEventListener('click',()=>{offset=Math.max(0,offset-size);rows();});$('activity-next').addEventListener('click',()=>{offset+=size;rows();});
-  return {get active(){return active;},set active(value){if(active!==value)reset();active=value;$('activity-results').hidden=!value;},reset,load,setBusy(value){navigation(value);hardware.setBusy(value);['activity-limit','activity-gpu','activity-previous','activity-next'].forEach(id=>$(id).disabled=value);if(!value)rows();}};
+  return {get active(){return active;},set active(value){if(active!==value)reset();active=value;$('activity-results').hidden=!value;},reset,load,setBusy(value){navigation(value);hardware.setBusy(value);['activity-limit','activity-gpu','activity-previous','activity-next','reporting-history-refresh','reporting-history-older'].forEach(id=>$(id).disabled=value);if(!value)rows();}};
 };

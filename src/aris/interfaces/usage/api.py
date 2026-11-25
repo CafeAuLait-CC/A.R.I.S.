@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, Request
+from pydantic import RootModel
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import HTMLResponse, JSONResponse, Response
 
@@ -9,6 +10,7 @@ from aris.core.contracts import DomainError
 from aris.interfaces.commands.api import authorization, bounded_input
 from aris.interfaces.usage.activity_service import ActivityPreviewInput, activity_usage
 from aris.interfaces.usage.group_service import GroupUsageInput, group_usage
+from aris.interfaces.usage.reporting_history import ReportingHistoryInput, reporting_history
 from aris.interfaces.usage.saved_service import SavedUsageQuery, SavedUsageRead, saved_usage
 from aris.interfaces.usage.service import UsageHistoryInput, UsageHistorySurface
 from aris.interfaces.usage.weekly_service import (
@@ -32,6 +34,10 @@ PAGE_HEADERS = {
 }
 
 
+class ActivityReadInput(RootModel[ActivityPreviewInput | ReportingHistoryInput]):
+    pass
+
+
 def build_router(service: UsageHistorySurface, paths: BrowserPaths = INTERNAL_PATHS) -> APIRouter:
     router = APIRouter(tags=["recorded-usage"])
 
@@ -41,7 +47,16 @@ def build_router(service: UsageHistorySurface, paths: BrowserPaths = INTERNAL_PA
         async def activity(request: Request) -> JSONResponse:
             if request.query_params:
                 raise DomainError("VALIDATION_ERROR", "Unexpected activity query parameters", 422)
-            selection = await bounded_input(request, ActivityPreviewInput)
+            selection = (await bounded_input(request, ActivityReadInput)).root
+            if isinstance(selection, ReportingHistoryInput):
+                history = await run_in_threadpool(
+                    reporting_history,
+                    service,
+                    authorization(request),
+                    request.state.request_id,
+                    selection,
+                )
+                return JSONResponse(history.model_dump(mode="json"), headers=PAGE_HEADERS)
             result = await run_in_threadpool(
                 activity_usage, service, authorization(request), request.state.request_id, selection
             )
