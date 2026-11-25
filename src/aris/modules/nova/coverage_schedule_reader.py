@@ -16,6 +16,11 @@ from aris.core.commands.budgets import transaction_budget
 from aris.core.commands.schemas import ActorContext
 from aris.core.contracts import DomainError
 from aris.modules.lyra.coverage_rollup import CoverageDuration
+from aris.modules.lyra.reporting_status import (
+    DailyReportingProgress,
+    reporting_day_progress,
+    saved_reporting_days,
+)
 from aris.modules.nova.combined_coverage_week import CombinedCoverageWeek, combine_coverage_week
 from aris.modules.nova.coverage_schedule_repo import CoverageScheduleRepository
 from aris.modules.nova.coverage_schedule_schemas import (
@@ -23,6 +28,7 @@ from aris.modules.nova.coverage_schedule_schemas import (
     CoverageScheduleStatus,
     DailyCoveragePeriodResult,
 )
+from aris.modules.nova.daily_coverage_calendar import daily_coverage_targets
 from aris.modules.nova.report_calendar import weekly_report_period
 
 
@@ -34,6 +40,21 @@ class CoveragePlanResultView(AccessContract):
     saved_at: AwareDatetime
 
 
+class DailyPlanDayView(AccessContract):
+    day: date
+    scheduled_for: AwareDatetime
+    saved: bool
+    snapshot_id: UUID | None
+
+
+class DailyPlanView(AccessContract):
+    days: tuple[DailyPlanDayView, ...]
+    next_day: date | None
+    next_due_at: AwareDatetime | None
+    state: Literal["scheduled", "pending", "delayed", "days_saved"]
+    progress: DailyReportingProgress | None
+
+
 class CoveragePlanView(AccessContract):
     id: UUID
     node_id: str
@@ -43,6 +64,7 @@ class CoveragePlanView(AccessContract):
     state: Literal["scheduled", "pending", "delayed"]
     last_result: CoveragePlanResultView | None
     worker_health: Literal["not_assessed"] = "not_assessed"
+    daily: DailyPlanView | None = None
 
 
 class CoveragePlanPage(AccessContract):
@@ -290,6 +312,9 @@ class CoverageScheduleReader:
                         if now >= due
                         else "scheduled",
                         last_result=last_result,
+                        daily=self._daily_status(session, status, now)
+                        if status.definition.daily_rollups
+                        else None,
                     )
                 )
                 if monotonic() >= deadline:
@@ -302,3 +327,48 @@ class CoverageScheduleReader:
             raise DomainError(
                 "DEPENDENCY_UNAVAILABLE", "Coverage plan status is unavailable", 503
             ) from None
+
+    @staticmethod
+    def _daily_status(
+        session: Session, status: CoverageScheduleStatus, now: datetime
+    ) -> DailyPlanView:
+        definition = status.definition
+        targets = daily_coverage_targets(definition, status.next_week)
+        saved = saved_reporting_days(
+            session, definition.calendar.scope.id, tuple(target.snapshot_id for target in targets)
+        )
+        current = next((target for target in targets if target.snapshot_id not in saved), None)
+        progress = None
+        state: Literal["scheduled", "pending", "delayed", "days_saved"] = "days_saved"
+        if current is not None:
+            due = current.scheduled_for
+            state = (
+                "delayed"
+                if now >= due + timedelta(minutes=30)
+                else "pending"
+                if now >= due
+                else "scheduled"
+            )
+            if now >= due:
+                progress = reporting_day_progress(
+                    session,
+                    current.plan_id,
+                    current.query,
+                    definition.configuration.fingerprint,
+                    read_at=now,
+                )
+        return DailyPlanView(
+            days=tuple(
+                DailyPlanDayView(
+                    day=target.day,
+                    scheduled_for=target.scheduled_for,
+                    saved=target.snapshot_id in saved,
+                    snapshot_id=target.snapshot_id if target.snapshot_id in saved else None,
+                )
+                for target in targets
+            ),
+            next_day=current.day if current else None,
+            next_due_at=current.scheduled_for if current else None,
+            state=state,
+            progress=progress,
+        )

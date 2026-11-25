@@ -14,8 +14,33 @@ window.createSavedUsage = function ({el, request, lock, message, isBusy, selecti
     const stamp=(value,zone)=>new Intl.DateTimeFormat('zh-CN',{timeZone:zone,month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).format(new Date(value));
     const cards=page.items.map(item=>{
       const card=node('article','','weekly-plan-card'),head=node('div','','weekly-plan-head');
-      head.append(node('h3',`${item.node_id} · 每周统计`),node('span',stateNames[item.state],`coverage-badge ${item.state==='delayed'?'issue':item.state==='pending'?'waiting':''}`));
-      card.append(head,node('p',`下一统计周 · ${item.next_week}`),node('p',`预计生成 · ${stamp(item.next_due_at,item.timezone)}`));
+      const daily=item.daily;
+      const state=daily && daily.state!=='days_saved' ? daily.state : item.state;
+      const label=daily?.state==='days_saved' ? '日报已齐备' : stateNames[state];
+      head.append(node('h3',`${item.node_id} · ${daily ? '日报与周报':'每周统计'}`),node('span',label,`coverage-badge ${state==='delayed'?'issue':state==='pending'?'waiting':''}`));
+      card.append(head);
+      if(daily) {
+        card.append(node('p',`${item.next_week} 起的日报 · 已保存 ${daily.days.filter(day=>day.saved).length} / ${daily.days.length} 天`));
+        const days=node('div','','daily-plan-days');
+        for(const day of daily.days) {
+          const date=day.day.slice(5).replace('-','/');
+          const due=new Date(day.scheduled_for)<=new Date(page.read_at);
+          const dayLabel=day.saved ? `${date} 已保存` : `${date} ${due ? '待生成':'未到期'}`;
+          const entry=node(day.saved?'button':'span',dayLabel,day.saved?'secondary':'muted');
+          if(day.saved) {
+            entry.type='button';
+            entry.addEventListener('click',()=>open({id:day.snapshot_id},input));
+          }
+          days.append(entry);
+        }
+        card.append(days);
+        if(daily.next_day)card.append(node('p',`下一份日报 · ${daily.next_day} · ${stamp(daily.next_due_at,item.timezone)}`));
+        if(daily.progress) {
+          card.append(node('p',`整理进度 · ${daily.progress.completed_steps} / ${daily.progress.total_steps}`,'weekly-plan-counts'));
+          if(daily.progress.last_step_at)card.append(node('p',`最近进展 · ${stamp(daily.progress.last_step_at,item.timezone)}`,'muted'));
+        }
+      }
+      card.append(node('p',`下一统计周 · ${item.next_week}`),node('p',`周报生成 · ${stamp(item.next_due_at,item.timezone)}`));
       if(item.last_result)card.append(node('p',`最近保存 · ${item.last_result.week} · ${names[item.last_result.coverage]}`));
       else card.append(node('p','尚未保存周期结果','muted'));
       card.append(node('small',item.timezone));
@@ -32,7 +57,7 @@ window.createSavedUsage = function ({el, request, lock, message, isBusy, selecti
       return card;
     });
     el('saved-plan-list').replaceChildren(...cards);el('saved-plans').hidden=false;
-    el('saved-plan-note').textContent=cards.length ? '计划状态按周历和已保存结果显示；尚未判断后台进程是否运行。日期筛选仅影响下方快照列表。' : '当前节点和视图没有已登记的自动统计计划。';
+    el('saved-plan-note').textContent=cards.length ? `${page.items.some(item=>item.daily) ? '点击已保存的日期查看日报。':''}日期筛选仅影响下方快照列表。` : '当前节点和视图没有已登记的自动统计计划。';
   }
   function detail(result) {
     const view=result.view;const gpuLabel=id=>Object.hasOwn(result.gpu_indices||{},id)?`GPU ${result.gpu_indices[id]}`:id;

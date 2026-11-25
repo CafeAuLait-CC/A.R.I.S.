@@ -550,6 +550,21 @@ def test_closed_days_survive_restart_and_feed_weekly_report_without_raw_samples(
             event.listen(engine, "before_cursor_execute", no_status_writes)
             try:
                 status = run_tick(config, schedules, status_only=True)["plans"][0]
+                with schedules.sessions() as db:
+                    actor = ActorContext(
+                        actor_id=definition.calendar.owner_id, request_id="daily-portal-progress"
+                    )
+                    portal = CoverageScheduleReader(
+                        schedules.sessions,
+                        (definition.id,),
+                        clock=schedules.clock,
+                        include_node_for_personal=True,
+                    )
+                    daily = (
+                        portal.read_in_transaction(db, actor, node_id="node-a", mode="mine")
+                        .items[0]
+                        .daily
+                    )
             finally:
                 event.remove(engine, "before_cursor_execute", no_status_writes)
             assert status["state"] == "pending" and status["day"] == progress["day"]
@@ -560,6 +575,14 @@ def test_closed_days_survive_restart_and_feed_weekly_report_without_raw_samples(
             assert 0 < persisted["completed_steps"] <= persisted["total_steps"]
             assert persisted["last_step_at"] == worker["last_step_at"]
             assert persisted["last_step_at"] is not None
+            assert daily is not None and daily.progress is not None
+            assert daily.progress.completed_steps == persisted["completed_steps"]
+            assert daily.progress.total_steps == persisted["total_steps"]
+            assert (
+                daily.progress.model_dump(mode="json")["last_step_at"] == persisted["last_step_at"]
+            )
+            assert daily.next_day == targets[0].day
+            assert not any(day.saved or day.snapshot_id for day in daily.days)
             pending_checked = True
         if progress["state"] == "day_saved":
             saved.append(progress["day"])
@@ -572,6 +595,11 @@ def test_closed_days_survive_restart_and_feed_weekly_report_without_raw_samples(
         pytest.fail("Daily coverage did not converge")
     assert saved == [target.day.isoformat() for target in targets]
     assert pending_checked
+    with schedules.sessions() as db:
+        daily = portal.read_in_transaction(db, actor, node_id="node-a", mode="node").items[0].daily
+    assert daily is not None and daily.state == "days_saved"
+    assert daily.next_day is daily.next_due_at is daily.progress is None
+    assert [day.snapshot_id for day in daily.days] == [target.snapshot_id for target in targets]
     assert schedules.select(CONTEXT, definition, status_only=True) == initial
 
     complete = CoverageScheduleRepository.complete_daily

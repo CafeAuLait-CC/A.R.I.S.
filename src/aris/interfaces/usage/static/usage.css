@@ -67,3 +67,4 @@
   .workbench .section-head { flex-wrap: wrap; }
   .workbench .pagination { flex-wrap: wrap; }
 }
+.daily-plan-days{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}.daily-plan-days button,.daily-plan-days span{font-size:12px;padding:6px 8px}.daily-plan-days span{border:1px solid var(--line);border-radius:6px}
