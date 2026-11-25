@@ -214,6 +214,11 @@ def _periodic_wait_seconds(
     if not isinstance(plan, dict):
         return retry_seconds
     match plan.get("state"):
+        case "waiting" if plan.get("error_code") == "COVERAGE_SOURCE_NOT_CAUGHT_UP":
+            # A committed source can be caught up for only a few seconds before
+            # the next report arrives. Retry this active admission promptly;
+            # future days still sleep directly until their calendar deadline.
+            return min(1.0, retry_seconds)
         case "future_day":
             due_at = plan.get("due_at")
         case "caught_up":
