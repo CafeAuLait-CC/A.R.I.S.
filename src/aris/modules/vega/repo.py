@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from aris.core.contracts import DomainError
 from aris.core.time import utc
 from aris.modules.vega.models import (
+    AgentArchiveState,
     AgentMessage,
     AgentMessageReceipt,
     ArchivedComputeTime,
@@ -114,9 +115,85 @@ class VegaRepository:
             .on_conflict_do_nothing()
         )
         self.session.execute(statement)
-        return self.session.scalars(
-            select(Node).where(Node.id == batch.node_id).with_for_update()
+        found = self.session.execute(
+            select(Node, AgentArchiveState.retired_through_seq)
+            .outerjoin(
+                AgentArchiveState,
+                and_(
+                    AgentArchiveState.agent_id == Node.agent_id,
+                    AgentArchiveState.node_id == Node.id,
+                ),
+            )
+            .where(Node.id == batch.node_id)
+            .with_for_update(of=Node)
         ).one_or_none()
+        if found is None:
+            return None
+        node: Node = found[0]
+        retired = found[1]
+        if retired is None and node.agent_id == batch.agent_id:
+            self.session.add(AgentArchiveState(agent_id=node.agent_id, node_id=node.id))
+            self.session.flush()
+        return node
+
+    def protect_archive_source(self, agent_id: str, node_id: str) -> int:
+        row = AgentArchiveState
+        retired = self.session.scalar(
+            select(row.retired_through_seq)
+            .where(
+                row.agent_id == agent_id,
+                row.node_id == node_id,
+            )
+            .with_for_update(read=True)
+        )
+        if retired is None:
+            # Explicitly registered but still empty nodes need their first guard.
+            node = self.session.execute(
+                select(Node.last_seq)
+                .where(
+                    Node.id == node_id,
+                    Node.agent_id == agent_id,
+                )
+                .with_for_update()
+            ).one_or_none()
+            if node is None or node.last_seq != 0:
+                raise DomainError(
+                    "DEPENDENCY_UNAVAILABLE", "Archive source boundary is missing", 503
+                )
+            dialect = self.session.get_bind().dialect.name
+            insert = sqlite_insert if dialect == "sqlite" else pg_insert
+            self.session.execute(
+                insert(row)
+                .values(agent_id=agent_id, node_id=node_id)
+                .on_conflict_do_nothing(index_elements=[row.agent_id])
+            )
+            retired = self.session.scalar(
+                select(row.retired_through_seq)
+                .where(
+                    row.agent_id == agent_id,
+                    row.node_id == node_id,
+                )
+                .with_for_update(read=True)
+            )
+            if retired is None:
+                raise DomainError(
+                    "RETRYABLE_DATABASE_ERROR", "Archive source boundary changed", 503
+                )
+        return retired
+
+    def lock_archive_retirement(self, agent_id: str, node_id: str) -> int:
+        row = AgentArchiveState
+        retired = self.session.scalar(
+            select(row.retired_through_seq)
+            .where(
+                row.agent_id == agent_id,
+                row.node_id == node_id,
+            )
+            .with_for_update()
+        )
+        if retired is None:
+            raise DomainError("DEPENDENCY_UNAVAILABLE", "Archive source boundary is missing", 503)
+        return retired
 
     def message(self, agent_id: str, message_id: str) -> MessageAcknowledgment | None:
         archived = AgentMessage

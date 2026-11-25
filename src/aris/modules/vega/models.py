@@ -108,3 +108,14 @@ class AgentMessageReceipt(Base):
     message_id: Mapped[str] = mapped_column(String(36))
     fingerprint: Mapped[str] = mapped_column(String(64))
     applied_to_current: Mapped[bool] = mapped_column(Boolean)
+
+
+class AgentArchiveState(Base):
+    __tablename__ = "agent_archive_states"
+    __table_args__ = (
+        CheckConstraint("retired_through_seq>=0", name="ck_archive_retirement_prefix"),
+    )
+
+    agent_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    node_id: Mapped[str] = mapped_column(ForeignKey("nodes.id"))
+    retired_through_seq: Mapped[int] = mapped_column(BigInteger, server_default="0")

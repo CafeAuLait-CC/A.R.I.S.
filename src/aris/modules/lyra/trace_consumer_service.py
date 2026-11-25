@@ -42,8 +42,10 @@ from aris.modules.lyra.trace_state import (
     advance_usage_trace,
     observation_stamp,
 )
+from aris.modules.vega.archive_guard_service import protect_archive_sources_in_transaction
 from aris.modules.vega.usage_archive_schemas import (
     ArchivedUsageItem,
+    UsageArchiveHeadQuery,
     UsageArchivePage,
     UsageArchiveQuery,
 )
@@ -414,6 +416,13 @@ class UsageTraceConsumerService:
                     return TraceConsumptionIdle(
                         id=request.id, state="caught_up", position=before, missing_seq=None
                     )
+                protect_archive_sources_in_transaction(
+                    session,
+                    UsageArchiveHeadQuery(
+                        agent_id=configuration.agent_id, node_id=configuration.node_id
+                    ),
+                    after_seq=before.after_seq,
+                )
                 page = self._page(
                     session,
                     UsageArchiveQuery(

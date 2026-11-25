@@ -30,6 +30,8 @@ from aris.modules.lyra.derivation_schemas import (
 from aris.modules.lyra.models import UsageDerivation
 from aris.modules.lyra.reservation_links import ReservationLinkRequest, ResidencyReservationService
 from aris.modules.lyra.residency_attribution import ResidencyAttributionService
+from aris.modules.vega.archive_guard_service import protect_archive_sources_in_transaction
+from aris.modules.vega.usage_archive_schemas import UsageArchiveHeadQuery
 from aris.modules.vega.usage_schemas import UsageObservationBatchQuery, UsageObservationFact
 
 
@@ -173,6 +175,14 @@ class UsageDerivationService:
                     raise DomainError(
                         "VALIDATION_ERROR", "Usage derivation cutoff is in the future", 422
                     )
+                first_source = request.sources[0]
+                protect_archive_sources_in_transaction(
+                    session,
+                    UsageArchiveHeadQuery(
+                        agent_id=first_source.agent_id, node_id=first_source.node_id
+                    ),
+                    after_seq=first_source.expected_seq - 1,
+                )
                 artifact = self._compute(session, request)
                 raw_result = canonical_derivation(artifact)
                 if len(raw_result.encode()) > MAX_DERIVATION_RESULT_BYTES:

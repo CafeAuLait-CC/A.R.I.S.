@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from aris.core.commands.budgets import database_failure, transaction_budget
 from aris.core.contracts import DomainError
 from aris.core.time import utc
+from aris.modules.vega.archive_guard_service import protect_archive_sources_in_transaction
 from aris.modules.vega.repo import StoredUsageMessage, VegaRepository
 from aris.modules.vega.resource_schemas import ResourceTelemetryBatch
 from aris.modules.vega.storage_schemas import (
@@ -126,6 +127,12 @@ class VegaUsageArchive:
         self.sessions = sessions
         self.clock = clock or (lambda: datetime.now(UTC))
         self.timeout_ms = timeout_ms
+
+    def protect_source_in_transaction(
+        self, session: Session, source: UsageArchiveHeadQuery, *, after_seq: int | None = None
+    ) -> int:
+        """Lock before capturing new durable references; retired RR snapshots must retry."""
+        return protect_archive_sources_in_transaction(session, source, after_seq=after_seq)
 
     def observed_window_storage_in_transaction(
         self, session: Session, query: UsageArchiveHeadQuery, start: datetime, end: datetime

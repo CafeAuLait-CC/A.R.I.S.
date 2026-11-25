@@ -41,6 +41,7 @@ from aris.modules.lyra.window_snapshot_schemas import (
     WindowManifestSelection,
 )
 from aris.modules.lyra.window_snapshot_service import UsageWindowSnapshotService
+from aris.modules.vega.archive_guard_service import protect_archive_sources_in_transaction
 from aris.modules.vega.usage_archive_schemas import UsageArchiveHeadQuery
 
 
@@ -127,6 +128,12 @@ class CoverageBuildService:
                     ):
                         raise DomainError("CONFLICT", "Coverage target has different input", 409)
                     return prior
+                protect_archive_sources_in_transaction(
+                    db,
+                    UsageArchiveHeadQuery(
+                        agent_id=config.trace.agent_id, node_id=config.trace.node_id
+                    ),
+                )
                 source = self.windows.archive.head_in_transaction(
                     db,
                     UsageArchiveHeadQuery(
@@ -170,6 +177,12 @@ class CoverageBuildService:
                     or request.ledger.node_id != config.trace.node_id
                 ):
                     raise DomainError("CONFLICT", "Coverage build configuration differs", 409)
+                protect_archive_sources_in_transaction(
+                    db,
+                    UsageArchiveHeadQuery(
+                        agent_id=config.trace.agent_id, node_id=config.trace.node_id
+                    ),
+                )
                 source = self.windows.archive.head_in_transaction(
                     db,
                     UsageArchiveHeadQuery(

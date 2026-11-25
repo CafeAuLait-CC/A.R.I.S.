@@ -7,10 +7,11 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import event, select
 
+from aris.apps.composition.payload_retention import retire_pre_recording_prefix
 from aris.apps.ops import storage
 from aris.core.contracts import DomainError
 from aris.core.events import DomainEvent
-from aris.modules.lyra.models import UsageDerivation
+from aris.modules.lyra.models import UsageDerivation, UsageRecordingJobRow
 from aris.modules.lyra.reporting_gap_history_repo import ReportingGapHistoryRepository
 from aris.modules.lyra.reporting_gap_history_schemas import ReportingGapScanPosition
 from aris.modules.lyra.reporting_gaps import ReportingPoint
@@ -18,6 +19,10 @@ from aris.modules.lyra.retention_origin_service import preview_pre_recording_ret
 from aris.modules.lyra.retention_repo import RetentionRepository
 from aris.modules.lyra.trace_consumer_schemas import UsageTraceConsumeRequest
 from aris.modules.vega.models import AgentMessage
+from aris.modules.vega.payload_retirement_schemas import (
+    PayloadRetirementContext,
+    PayloadRetirementRequest,
+)
 from aris.modules.vega.usage_archive_schemas import UsageArchiveHeadQuery, UsageArchiveQuery
 from tests.test_administration import admin_state
 from tests.test_mapping_history import history_state
@@ -29,10 +34,7 @@ __all__ = ["consumer", "admin_state", "history_state", "derivations"]
 SOURCE = UsageArchiveHeadQuery(agent_id="agent-a", node_id="node-a")
 
 
-def test_pre_recording_prefix_requires_every_origin_and_saved_health(
-    consumer, settings, monkeypatch, capsys
-):
-    state = consumer
+def seed_early_prefix(state):
     now = datetime.now(UTC)
     monday = now.date() - timedelta(days=now.weekday())
     cutoff = datetime.combine(monday, time.min, UTC)
@@ -50,14 +52,10 @@ def test_pre_recording_prefix_requires_every_origin_and_saved_health(
                     json.dumps(row.payload, sort_keys=True, separators=(",", ":")).encode()
                 ).hexdigest()
 
-    def preview(**changes):
-        return preview_pre_recording_retention(
-            state.sessions, SOURCE, before=changes.get("before", cutoff), timezone="UTC", now=now
-        )
+    return cutoff, now
 
-    assert "recording_origins_missing" in preview().blockers
-    state.service.consume(CONTEXT, request(state))
-    assert preview().blockers == ("early_reporting_history_not_scanned",)
+
+def save_early_health(state):
     with state.sessions.begin() as db:
         page = state.archive.reporting_page_in_transaction(
             db, UsageArchiveQuery(**SOURCE.model_dump(), after_seq=5, through_seq=6)
@@ -76,6 +74,23 @@ def test_pre_recording_prefix_requires_every_origin_and_saved_health(
             }
         )
         ReportingGapHistoryRepository(db).advance(saved, None)
+
+
+def test_pre_recording_prefix_requires_every_origin_and_saved_health(
+    consumer, settings, monkeypatch, capsys
+):
+    state = consumer
+    cutoff, now = seed_early_prefix(state)
+
+    def preview(**changes):
+        return preview_pre_recording_retention(
+            state.sessions, SOURCE, before=changes.get("before", cutoff), timezone="UTC", now=now
+        )
+
+    assert "recording_origins_missing" in preview().blockers
+    state.service.consume(CONTEXT, request(state))
+    assert preview().blockers == ("early_reporting_history_not_scanned",)
+    save_early_health(state)
     statements = []
     engine = state.sessions.kw["bind"]
 
@@ -183,3 +198,66 @@ def test_pre_recording_derivations_use_verified_original_requests_without_result
             RetentionRepository(db).derivation_source_bounds(
                 "agent-a", "node-a", maximum_records=8, maximum_characters=8192
             )
+
+
+def test_origin_maintenance_rechecks_dependencies_and_replays_its_original_result(consumer):
+    state = consumer
+    cutoff, now = seed_early_prefix(state)
+    state.service.consume(CONTEXT, request(state))
+    save_early_health(state)
+    preview = preview_pre_recording_retention(
+        state.sessions, SOURCE, before=cutoff, timezone="UTC", now=now
+    )
+    with state.sessions() as db:
+        reports = state.archive.reporting_page_in_transaction(
+            db,
+            UsageArchiveQuery(
+                **SOURCE.model_dump(),
+                after_seq=0,
+                through_seq=2,
+            ),
+        ).reports
+    incoming = PayloadRetirementRequest(
+        id=uuid4(),
+        source=SOURCE,
+        before=cutoff,
+        dependency_fingerprint=preview.fingerprint,
+        reports=reports,
+    )
+    context = PayloadRetirementContext(request_id="fixture-origin-maintenance")
+    with pytest.raises(DomainError, match="dependencies or selected prefix changed"):
+        retire_pre_recording_prefix(
+            state.sessions,
+            context,
+            incoming.model_copy(
+                update={
+                    "dependency_fingerprint": "d" * 64,
+                }
+            ),
+            timezone="UTC",
+        )
+    result = retire_pre_recording_prefix(state.sessions, context, incoming, timezone="UTC")
+    assert result.retired_payloads == 2 and not result.duplicate
+    with state.sessions.begin() as db:
+        # An unsettled, unparseable job must retain data, even without usable source metadata.
+        db.add(
+            UsageRecordingJobRow(
+                id=str(uuid4()),
+                canonical_request="{}",
+                request_fingerprint="f" * 64,
+                state="queued",
+                version=1,
+                attempts=0,
+                created_at=now,
+                updated_at=now,
+                available_at=now,
+            )
+        )
+    blocked = preview_pre_recording_retention(
+        state.sessions, SOURCE, before=cutoff, timezone="UTC", now=now
+    )
+    assert blocked.unsettled_recording_jobs == {"queued": 1}
+    assert blocked.blockers == ("recording_jobs_not_settled",)
+    assert blocked.payload_prefix is None
+    replay = retire_pre_recording_prefix(state.sessions, context, incoming, timezone="UTC")
+    assert replay.duplicate and replay.fingerprint == result.fingerprint
