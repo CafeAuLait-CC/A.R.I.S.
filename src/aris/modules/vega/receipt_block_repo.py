@@ -56,7 +56,9 @@ class ReceiptBlockRepository:
         ]
         statement = (
             queries[0]
-            .union_all(
+            # DISTINCT is also a blocking plan boundary: LIMIT must not turn an
+            # absent UUID lookup into a source scan hoping to find four hits.
+            .union(
                 queries[1],
                 select(
                     block.first_seq,

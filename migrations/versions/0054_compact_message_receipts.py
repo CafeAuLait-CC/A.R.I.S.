@@ -53,6 +53,7 @@ def upgrade() -> None:
             ["message_ids"],
             postgresql_using="gin",
             postgresql_ops={"message_ids": "jsonb_path_ops"},
+            postgresql_with={"fastupdate": "off"},
         )
     protect_acknowledgments(compaction=True)
 

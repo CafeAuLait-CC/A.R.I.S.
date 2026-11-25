@@ -144,6 +144,7 @@ class AgentReceiptBlock(Base):
             "message_ids",
             postgresql_using="gin",
             postgresql_ops={"message_ids": "jsonb_path_ops"},
+            postgresql_with={"fastupdate": "off"},
         ).ddl_if(dialect="postgresql"),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
