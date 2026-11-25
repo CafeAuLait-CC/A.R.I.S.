@@ -16,6 +16,7 @@ from aris.core.log_expiry_schemas import (
     LogScope,
     digest,
 )
+from aris.core.time import utc
 
 ACTION = "core.history.logs_retired"
 
@@ -126,6 +127,14 @@ class CoreLogMaintenance:
                     "events": len(ids),
                     "audits": len(audit_ids),
                     "before": scope.before.isoformat(),
+                    "first_event_occurred_at": min(
+                        utc(row.occurred_at) for row in events
+                    ).isoformat(),
+                    "last_event_occurred_at": max(
+                        utc(row.occurred_at) for row in events
+                    ).isoformat(),
+                    "first_aggregate_version": min(row.aggregate_version for row in events),
+                    "last_aggregate_version": max(row.aggregate_version for row in events),
                 },
             )
         )

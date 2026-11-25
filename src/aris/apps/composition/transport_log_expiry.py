@@ -25,6 +25,7 @@ TRANSPORT_TYPES = frozenset(("vega.telemetry.accepted", "vega.heartbeat.accepted
 
 
 def normal_transport_pair(pair: LogPair) -> bool:
+    """Accepted transport has a preserved projection flag, which can also be False."""
     event, audit = pair.event, pair.audit
     changes = audit.changes
     return (
@@ -33,13 +34,13 @@ def normal_transport_pair(pair: LogPair) -> bool:
         and event.aggregate_type == "node"
         and set(event.payload) == {"message_id", "applied_to_current"}
         and event.payload["message_id"] == str(event.causation_id)
-        and event.payload["applied_to_current"] is True
+        and type(event.payload["applied_to_current"]) is bool
         and set(changes) == {"previous_seq", "received_seq", "applied_to_current"}
         and type(changes["previous_seq"]) is int
         and changes["previous_seq"] >= 0
         and type(changes["received_seq"]) is int
         and changes["received_seq"] == event.aggregate_version
-        and changes["applied_to_current"] is True
+        and changes["applied_to_current"] is event.payload["applied_to_current"]
         and (audit.actor, audit.action, audit.target, audit.request_id)
         == (event.actor, event.event_type, event.aggregate_id, event.correlation_id)
     )
@@ -83,9 +84,8 @@ def retire_transport_logs(
             originals = {row.seq: row for row in evidence.receipts}
             for pair in pairs:
                 original = originals[pair.event.aggregate_version]
-                if (
-                    original.message_id != pair.event.causation_id
-                    or not original.applied_to_current
+                if original.message_id != pair.event.causation_id or (
+                    original.applied_to_current is not pair.event.payload["applied_to_current"]
                 ):
                     raise DomainError(
                         "CONFLICT", "Transport log differs from its original acknowledgment", 409

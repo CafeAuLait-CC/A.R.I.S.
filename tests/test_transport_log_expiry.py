@@ -1,5 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from threading import Barrier
 from uuid import uuid4
 
@@ -20,17 +20,20 @@ from aris.modules.vega.models import AgentMessage
 from aris.modules.vega.payload_retirement_service import VegaPayloadMaintenance
 from aris.modules.vega.repo import VegaRepository
 from tests.test_event_relay import LIMITS
+from tests.test_heartbeat import beat, heartbeat
 from tests.test_payload_retirement import MAINTENANCE, SOURCE, prepare
+from tests.test_resource_telemetry import put, resource_batch
 from tests.test_trace_consumer import consumer, seed
 
 __all__ = ["consumer"]
 
 
-def legacy_logs(state):
+def legacy_logs(state, *, sequences=(1, 2), already_seeded=False):
     """Explicit historical fixture: new polling no longer creates these copies."""
-    seed(state)
+    if not already_seeded:
+        seed(state)
     with state.sessions.begin() as db:
-        for row in db.scalars(select(AgentMessage).where(AgentMessage.seq <= 2)):
+        for row in db.scalars(select(AgentMessage).where(AgentMessage.seq.in_(sequences))):
             id, audit_id = str(uuid4()), str(uuid4())
             kind = "vega." + row.message_kind + ".accepted"
             request_id = "fixture-old-ack-" + str(row.seq)
@@ -75,7 +78,7 @@ def legacy_logs(state):
         aggregate_type="node",
         aggregate_id=SOURCE.node_id,
         actor=SOURCE.agent_id,
-        through_seq=2,
+        through_seq=max(sequences),
         before=datetime.now(UTC),
     )
     pairs = tuple(
@@ -83,7 +86,7 @@ def legacy_logs(state):
             scope, audit_sequence_key="received_seq", maximum=1024
         )
     )
-    assert len(pairs) == 2
+    assert len(pairs) == len(sequences)
     return scope, pairs
 
 
@@ -178,6 +181,32 @@ def test_log_expiry_keeps_publications_and_unknown_foreign_key_references(consum
     with pytest.raises(DomainError, match="referenced") as failure:
         retire_transport_logs(state.sessions, MAINTENANCE, uuid4(), SOURCE, scope, pairs)
     assert failure.value.code == "CONFLICT" and log_counts(state) == before
+
+
+def test_unapplied_success_copy_expires_without_changing_its_original_flag(consumer):
+    state = consumer
+    seed(state)
+    old = resource_batch(seq=7, observed_at=state.base - timedelta(seconds=30))
+    response = put(state.client, old)
+    assert response.status_code == 200 and response.json()["applied_to_current"] is False
+    assert beat(state.client, heartbeat(seq=8)).status_code == 200
+    assert put(state.client, resource_batch(seq=9)).status_code == 200
+    assert beat(state.client, heartbeat(seq=10)).status_code == 200
+    scope, pairs = legacy_logs(state, sequences=(7,), already_seeded=True)
+    VegaPayloadMaintenance(state.sessions).retire(MAINTENANCE, prepare(state, 1, 8))
+    id = uuid4()
+    result = retire_transport_logs(state.sessions, MAINTENANCE, id, SOURCE, scope, pairs)
+    assert (result.events, result.audits) == (1, 1)
+    with state.sessions() as db:
+        ack = VegaRepository(db).message(SOURCE.agent_id, str(pairs[0].event.causation_id))
+        assert ack is not None and ack.applied_to_current is False
+        saved = db.get(AuditEntry, str(id))
+        assert saved.changes["first_aggregate_version"] == 7
+        assert saved.changes["last_aggregate_version"] == 7
+        assert saved.changes["first_event_occurred_at"] == pairs[0].event.occurred_at.isoformat()
+    replay = put(state.client, old)
+    assert replay.status_code == 200 and replay.json()["duplicate"]
+    assert replay.json()["applied_to_current"] is False
 
 
 def test_postgresql_log_expiry_serializes_with_an_unexpected_publisher(consumer):
