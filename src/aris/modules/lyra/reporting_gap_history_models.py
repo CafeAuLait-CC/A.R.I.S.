@@ -32,3 +32,20 @@ class ReportingGapScanRow(Base):
     agent_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     through_seq: Mapped[int] = mapped_column(BigInteger)
     canonical_position: Mapped[str] = mapped_column(Text)
+
+
+class ReportingPrefixScanRow(Base):
+    __tablename__ = "reporting_history_prefix_progress"
+    __table_args__ = (
+        CheckConstraint(
+            "last_seq > 0 AND target_through_seq >= last_seq "
+            "AND length(canonical_position) BETWEEN 1 AND 4096",
+            name="ck_reporting_history_prefix_value",
+        ),
+    )
+
+    node_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    agent_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    target_through_seq: Mapped[int] = mapped_column(BigInteger)
+    last_seq: Mapped[int] = mapped_column(BigInteger)
+    canonical_position: Mapped[str] = mapped_column(Text)

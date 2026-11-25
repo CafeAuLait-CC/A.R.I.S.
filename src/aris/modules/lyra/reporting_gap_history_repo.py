@@ -7,10 +7,12 @@ from aris.core.contracts import DomainError
 from aris.modules.lyra.reporting_gap_history_models import (
     ReportingGapHistoryRow,
     ReportingGapScanRow,
+    ReportingPrefixScanRow,
 )
 from aris.modules.lyra.reporting_gap_history_schemas import (
     MAX_GAP_RECORD_CHARACTERS,
     ReportingGapScanPosition,
+    ReportingPrefixPosition,
     StoredReportingGap,
 )
 from aris.modules.lyra.trace_consumer_schemas import canonical_trace
@@ -20,6 +22,73 @@ from aris.modules.vega.usage_archive_schemas import UsageArchiveHeadQuery
 class ReportingGapHistoryRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
+
+    def prefix_position(self, source: UsageArchiveHeadQuery) -> ReportingPrefixPosition | None:
+        row = self.session.get(ReportingPrefixScanRow, (source.node_id, source.agent_id))
+        if row is None:
+            return None
+        try:
+            raw = row.canonical_position
+            if len(raw) > MAX_GAP_RECORD_CHARACTERS:
+                raise ValueError("Oversized historical reporting prefix")
+            value = ReportingPrefixPosition.model_validate_json(raw)
+            if (
+                value.source != source
+                or value.target_through_seq != row.target_through_seq
+                or int(value.last_report.seq) != row.last_seq
+                or canonical_trace(value) != raw
+            ):
+                raise ValueError("Historical prefix metadata differs")
+            return value
+        except (ValueError, TypeError, RecursionError):
+            raise DomainError(
+                "DEPENDENCY_UNAVAILABLE", "Historical reporting prefix is inconsistent", 503
+            ) from None
+
+    def advance_prefix(
+        self, position: ReportingPrefixPosition, previous: ReportingPrefixPosition | None
+    ) -> None:
+        row, source = ReportingPrefixScanRow, position.source
+        if previous is not None and (
+            position.source != previous.source
+            or position.target_through_seq != previous.target_through_seq
+            or int(position.last_report.seq) <= int(previous.last_report.seq)
+        ):
+            raise DomainError("CONFLICT", "Historical reporting prefix cannot change range", 409)
+        raw = canonical_trace(position)
+        values = {
+            "last_seq": int(position.last_report.seq),
+            "target_through_seq": position.target_through_seq,
+            "canonical_position": raw,
+        }
+        if len(raw) > MAX_GAP_RECORD_CHARACTERS:
+            raise DomainError("VALIDATION_ERROR", "Historical prefix exceeds its size limit", 422)
+        statement: Insert | Update
+        if previous is None:
+            insert = (
+                sqlite_insert if self.session.get_bind().dialect.name == "sqlite" else pg_insert
+            )
+            statement = (
+                insert(row)
+                .values(node_id=source.node_id, agent_id=source.agent_id, **values)
+                .on_conflict_do_nothing(index_elements=[row.node_id, row.agent_id])
+            )
+        else:
+            statement = (
+                update(row)
+                .where(
+                    row.node_id == source.node_id,
+                    row.agent_id == source.agent_id,
+                    row.last_seq == int(previous.last_report.seq),
+                    row.target_through_seq == previous.target_through_seq,
+                    row.canonical_position == canonical_trace(previous),
+                )
+                .values(**values)
+            )
+        if self.session.scalar(statement.returning(row.last_seq)) != values["last_seq"]:
+            raise DomainError(
+                "RETRYABLE_DATABASE_ERROR", "Historical reporting prefix changed; retry", 503
+            )
 
     def latest(
         self, source: UsageArchiveHeadQuery, limit: int, before_seq: int | None

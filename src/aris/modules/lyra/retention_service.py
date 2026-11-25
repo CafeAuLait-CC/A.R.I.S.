@@ -14,8 +14,10 @@ from sqlalchemy.orm import Session, sessionmaker
 from aris.core.commands.budgets import database_failure, transaction_budget
 from aris.core.contracts import Contract, DomainError
 from aris.modules.lyra.coverage_build_schemas import completed_coverage_window_id
-from aris.modules.lyra.reporting_gap_history_repo import ReportingGapHistoryRepository
 from aris.modules.lyra.reporting_gap_history_schemas import ReportingGapScanPosition
+from aris.modules.lyra.reporting_gap_history_service import (
+    covered_reporting_position_in_transaction,
+)
 from aris.modules.lyra.retention_repo import RetentionRepository
 from aris.modules.lyra.session_occupancy import SessionOccupancyRule
 from aris.modules.lyra.source_prefix_repo import SourcePrefixRepository
@@ -81,7 +83,7 @@ class CoverageBuildDependencies(Contract):
 def reporting_history_position_in_transaction(
     session: Session, source: UsageArchiveHeadQuery
 ) -> ReportingGapScanPosition | None:
-    return ReportingGapHistoryRepository(session).position(source)
+    return covered_reporting_position_in_transaction(session, source)
 
 
 def coverage_build_dependencies_in_transaction(

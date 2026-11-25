@@ -82,3 +82,37 @@ class ReportingGapScan(IntervalContract):
     saved: int
     already_saved: int
     uncertain_clock_pairs: int
+
+
+class ReportingPrefixPosition(IntervalContract):
+    source: UsageArchiveHeadQuery
+    target_through_seq: int = Field(ge=1, le=MAX_ARCHIVE_SEQ, strict=True)
+    last_report: ReportingPoint
+    uncertain_clock_pairs: int = Field(ge=0, le=MAX_ARCHIVE_SEQ, strict=True)
+    fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+    def content_fingerprint(self) -> str:
+        return trace_fingerprint(
+            "reporting_history_prefix", canonical_trace(self, exclude={"fingerprint"})
+        )
+
+    @model_validator(mode="after")
+    def verified_prefix(self) -> "ReportingPrefixPosition":
+        if (
+            not 1 <= int(self.last_report.seq) <= self.target_through_seq
+            or self.uncertain_clock_pairs >= int(self.last_report.seq)
+            or self.fingerprint != self.content_fingerprint()
+        ):
+            raise ValueError("Historical reporting prefix is inconsistent")
+        return self
+
+
+class ReportingPrefixScan(IntervalContract):
+    source: UsageArchiveHeadQuery
+    target_through_seq: int
+    through_seq: int
+    state: Literal["more", "missing", "caught_up"]
+    missing_seq: int | None
+    saved: int
+    already_saved: int
+    uncertain_clock_pairs: int

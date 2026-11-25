@@ -6,6 +6,7 @@ from itertools import chain
 
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
+from sqlalchemy.orm import Session
 
 from aris.core.access.schemas import AccessRequest, AccessScope
 from aris.core.access.service import AccessService
@@ -21,6 +22,8 @@ from aris.modules.lyra.reporting_gap_history_schemas import (
     ReportingGapCapture,
     ReportingGapScan,
     ReportingGapScanPosition,
+    ReportingPrefixPosition,
+    ReportingPrefixScan,
     StoredReportingGap,
 )
 from aris.modules.lyra.reporting_gaps import (
@@ -34,6 +37,29 @@ from aris.modules.vega.usage_archive_schemas import (
     UsageArchiveHeadQuery,
     UsageArchiveQuery,
 )
+
+
+def covered_reporting_position_in_transaction(
+    session: Session, source: UsageArchiveHeadQuery
+) -> ReportingGapScanPosition | None:
+    repo = ReportingGapHistoryRepository(session)
+    live, prefix = repo.position(source), repo.prefix_position(source)
+    if prefix is None:
+        return live
+    if live is None or prefix.target_through_seq != live.first_seq:
+        raise DomainError("CONFLICT", "Historical and live reporting ranges differ", 409)
+    complete = int(prefix.last_report.seq) == prefix.target_through_seq
+    draft = ReportingGapScanPosition.model_construct(
+        source=source,
+        first_seq=1,
+        last_report=live.last_report if complete else prefix.last_report,
+        uncertain_clock_pairs=prefix.uncertain_clock_pairs
+        + (live.uncertain_clock_pairs if complete else 0),
+        fingerprint="0" * 64,
+    )
+    return ReportingGapScanPosition.model_validate(
+        {**draft.model_dump(mode="json"), "fingerprint": draft.content_fingerprint()}
+    )
 
 
 class ReportingGapHistoryService:
@@ -252,5 +278,95 @@ class ReportingGapHistoryService:
                 result = ReportingGapHistoryRepository(db).latest(source, limit, before_seq)
             self.access.require_permission(request)
             return result
+        except DBAPIError as error:
+            raise self._failure(error) from None
+
+    def scan_prefix(
+        self, actor: ActorContext, source: UsageArchiveHeadQuery, *, max_messages: int = 128
+    ) -> ReportingPrefixScan:
+        """Scan only the historical prefix ending at the live scan's original first report."""
+        actor = ActorContext.model_validate(actor.model_dump(mode="json"))
+        source = UsageArchiveHeadQuery.model_validate(source.model_dump(mode="json"))
+        if type(max_messages) is not int or not 1 <= max_messages <= MAX_SAVED_GAPS:
+            raise DomainError("VALIDATION_ERROR", "Select a bounded historical scan", 422)
+        request = self._permission(actor, source)
+        try:
+            with self.sessions() as db, db.no_autoflush:
+                transaction_budget(db, 100, 1000, 5000)
+                self.access.require_in_transaction(db, request)
+                repo = ReportingGapHistoryRepository(db)
+                live, previous = repo.position(source), repo.prefix_position(source)
+                if live is None:
+                    raise DomainError(
+                        "DEPENDENCY_UNAVAILABLE", "A live reporting scan must exist first", 503
+                    )
+                target = live.first_seq
+                if previous is not None and previous.target_through_seq != target:
+                    raise DomainError("CONFLICT", "Historical reporting range changed", 409)
+                after = int(previous.last_report.seq) if previous else 0
+                uncertain = previous.uncertain_clock_pairs if previous else 0
+                if target == 1 or after == target:
+                    self.access.require_in_transaction(db, request)
+                    return ReportingPrefixScan(
+                        source=source,
+                        target_through_seq=target,
+                        through_seq=target,
+                        state="caught_up",
+                        missing_seq=None,
+                        saved=0,
+                        already_saved=0,
+                        uncertain_clock_pairs=uncertain,
+                    )
+                page = self.preview.source.reporting_page_in_transaction(
+                    db,
+                    UsageArchiveQuery(
+                        agent_id=source.agent_id,
+                        node_id=source.node_id,
+                        after_seq=after,
+                        through_seq=target,
+                        limit=max_messages,
+                    ),
+                )
+                reports = tuple(ReportingPoint.from_archive(value) for value in page.reports)
+                records: tuple[StoredReportingGap, ...] = ()
+                saved = 0
+                if reports:
+                    anchor = (previous.last_report,) if previous else ()
+                    gaps, additional = reporting_gaps(
+                        chain(anchor, reports), DEFAULT_REPORTING_GAP_SECONDS
+                    )
+                    uncertain += additional
+                    draft = ReportingPrefixPosition.model_construct(
+                        source=source,
+                        target_through_seq=target,
+                        last_report=reports[-1],
+                        uncertain_clock_pairs=uncertain,
+                        fingerprint="0" * 64,
+                    )
+                    position = ReportingPrefixPosition.model_validate(
+                        {
+                            **draft.model_dump(mode="json"),
+                            "fingerprint": draft.content_fingerprint(),
+                        }
+                    )
+                    repo.advance_prefix(position, previous)
+                    records = self._records(source, gaps, DEFAULT_REPORTING_GAP_SECONDS)
+                    if records:
+                        saved = repo.save(source, records)
+                self.access.require_in_transaction(db, request)
+                if reports:
+                    commit_owned_transaction(db)
+                return ReportingPrefixScan(
+                    source=source,
+                    target_through_seq=target,
+                    through_seq=page.next_after_seq,
+                    state={"range_end": "caught_up", "page_end": "more", "gap": "missing"}[
+                        page.state
+                    ],
+                    missing_seq=page.missing_seq,
+                    saved=saved,
+                    already_saved=len(records) - saved,
+                    uncertain_clock_pairs=uncertain,
+                )
         except DBAPIError as error:
             raise self._failure(error) from None

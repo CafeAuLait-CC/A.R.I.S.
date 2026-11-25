@@ -109,6 +109,7 @@ def main(argv: list[str] | None = None) -> int:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--capture-through", type=int, metavar="SEQ")
     mode.add_argument("--scan-next", action="store_true")
+    mode.add_argument("--scan-prefix", action="store_true")
     mode.add_argument("--run", action="store_true")
     mode.add_argument("--list", action="store_true")
     parser.add_argument("--first-seq", type=int)
@@ -126,7 +127,9 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--first-seq must be a valid sequence")
     if args.capture_through is not None and not 1 <= args.capture_through <= MAX_ARCHIVE_SEQ:
         parser.error("--capture-through requires a valid committed sequence")
-    maximum = MAX_SAVED_GAPS if args.scan_next or args.run else MAX_PREVIEW_MESSAGES
+    maximum = (
+        MAX_SAVED_GAPS if args.scan_next or args.scan_prefix or args.run else MAX_PREVIEW_MESSAGES
+    )
     if args.max_messages is not None and not 1 <= args.max_messages <= maximum:
         parser.error("--max-messages must be within the archive preview range")
     if args.limit is not None and not 1 <= args.limit <= MAX_SAVED_GAPS:
@@ -155,6 +158,12 @@ def main(argv: list[str] | None = None) -> int:
         actor = ActorContext(actor_id=config.actor_id, request_id="reporting-gap-history")
         if isinstance(config, GapHistoryWorkerConfig):
             _run_scans(history, actor, config, args.max_messages or MAX_SAVED_GAPS)
+        elif args.scan_prefix:
+            print(
+                history.scan_prefix(
+                    actor, config.source, max_messages=args.max_messages or MAX_SAVED_GAPS
+                ).model_dump_json()
+            )
         elif args.scan_next:
             print(
                 history.scan_next(
