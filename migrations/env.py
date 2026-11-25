@@ -49,6 +49,11 @@ else:
                 target_metadata=target_metadata,
                 compare_type=True,
                 transactional_ddl=True,
+                include_object=lambda obj, name, kind, reflected, compare_to: (
+                    not (
+                        sqlite and kind == "index" and name == "ix_agent_receipt_block_message_ids"
+                    )
+                ),
             )
             with context.begin_transaction():
                 context.run_migrations()

@@ -8,10 +8,13 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
+    LargeBinary,
     String,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from aris.core.db import Base
@@ -114,8 +117,39 @@ class AgentArchiveState(Base):
     __tablename__ = "agent_archive_states"
     __table_args__ = (
         CheckConstraint("retired_through_seq>=0", name="ck_archive_retirement_prefix"),
+        CheckConstraint(
+            "receipts_compacted_through_seq>=0 AND "
+            "receipts_compacted_through_seq<=retired_through_seq",
+            name="ck_archive_receipt_compaction_prefix",
+        ),
     )
 
     agent_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     node_id: Mapped[str] = mapped_column(ForeignKey("nodes.id"))
     retired_through_seq: Mapped[int] = mapped_column(BigInteger, server_default="0")
+    receipts_compacted_through_seq: Mapped[int] = mapped_column(BigInteger, server_default="0")
+
+
+class AgentReceiptBlock(Base):
+    __tablename__ = "agent_receipt_blocks"
+    __table_args__ = (
+        UniqueConstraint("agent_id", "first_seq", name="uq_agent_receipt_block_start"),
+        CheckConstraint(
+            "first_seq>0 AND through_seq>=first_seq AND through_seq-first_seq<128 "
+            "AND length(fingerprint)=64 AND length(packed_receipts)=(through_seq-first_seq+1)*49",
+            name="ck_agent_receipt_block_shape",
+        ),
+        Index(
+            "ix_agent_receipt_block_message_ids",
+            "message_ids",
+            postgresql_using="gin",
+            postgresql_ops={"message_ids": "jsonb_path_ops"},
+        ).ddl_if(dialect="postgresql"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    agent_id: Mapped[str] = mapped_column(ForeignKey("agent_archive_states.agent_id"))
+    first_seq: Mapped[int] = mapped_column(BigInteger)
+    through_seq: Mapped[int] = mapped_column(BigInteger)
+    packed_receipts: Mapped[bytes] = mapped_column(LargeBinary(6272))
+    message_ids: Mapped[list[str]] = mapped_column(JSON().with_variant(JSONB(), "postgresql"))
+    fingerprint: Mapped[str] = mapped_column(String(64))

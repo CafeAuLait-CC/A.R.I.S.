@@ -11,6 +11,7 @@ from sqlalchemy.exc import DBAPIError
 
 from aris.core.audit import AuditEntry
 from aris.core.contracts import DomainError
+from aris.core.db import SCHEMA_REVISION
 from aris.core.events import DomainEvent, OutboxEntry
 from aris.modules.vega.archive_guard_service import protect_archive_sources_in_transaction
 from aris.modules.vega.models import (
@@ -235,4 +236,4 @@ def test_postgresql_retirement_invalidates_old_rr_capture_and_protects_migration
     with pytest.raises(RuntimeError, match="retirement source boundaries"):
         command.downgrade(cfg, "0052")
     with state.sessions() as db:
-        assert db.scalar(text("SELECT version_num FROM alembic_version")) == "0053"
+        assert db.scalar(text("SELECT version_num FROM alembic_version")) == SCHEMA_REVISION

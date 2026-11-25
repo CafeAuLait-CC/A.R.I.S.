@@ -19,6 +19,7 @@ from aris.modules.vega.models import (
     Node,
     NodeResource,
 )
+from aris.modules.vega.receipt_block_repo import ReceiptBlockRepository
 from aris.modules.vega.reports import AgentReport
 from aris.modules.vega.storage_schemas import MessageStorage, ObservedWindowStorage
 from aris.modules.vega.target_schemas import GpuInventoryLabel
@@ -196,20 +197,8 @@ class VegaRepository:
         return retired
 
     def message(self, agent_id: str, message_id: str) -> MessageAcknowledgment | None:
-        archived = AgentMessage
-        receipt = AgentMessageReceipt
-        rows = self.session.execute(
-            select(archived.seq, archived.fingerprint, archived.applied_to_current)
-            .where(archived.agent_id == agent_id, archived.message_id == message_id)
-            .union(
-                select(receipt.seq, receipt.fingerprint, receipt.applied_to_current).where(
-                    receipt.agent_id == agent_id, receipt.message_id == message_id
-                )
-            )
-        ).all()
-        if len(rows) > 1:
-            raise DomainError("DEPENDENCY_UNAVAILABLE", "Stored message receipts disagree", 503)
-        return MessageAcknowledgment(rows[0][1], rows[0][2]) if rows else None
+        row = ReceiptBlockRepository(self.session).message(agent_id, message_id)
+        return MessageAcknowledgment(row.fingerprint, row.applied_to_current) if row else None
 
     def usage_message(self, agent_id: str, message_id: str) -> StoredUsageMessage | None:
         row = self.session.execute(
@@ -325,7 +314,14 @@ class VegaRepository:
         present = self.session.scalar(
             select(archived.seq)
             .where(archived.agent_id == agent_id, archived.seq == seq)
-            .union_all(select(receipt.seq).where(receipt.agent_id == agent_id, receipt.seq == seq))
+            .union_all(
+                select(receipt.seq).where(receipt.agent_id == agent_id, receipt.seq == seq),
+                select(AgentArchiveState.retired_through_seq).where(
+                    AgentArchiveState.agent_id == agent_id,
+                    literal(seq) > 0,
+                    AgentArchiveState.retired_through_seq >= seq,
+                ),
+            )
             .limit(1)
         )
         return present is not None
@@ -407,11 +403,15 @@ class VegaRepository:
 
     def retired_sequence_count_before(self, agent_id: str, seq: int) -> int:
         receipt = AgentMessageReceipt
-        return self.session.execute(
-            select(func.count())
-            .select_from(receipt)
-            .where(receipt.agent_id == agent_id, receipt.seq > 0, receipt.seq < seq)
-        ).scalar_one()
+        compacted = ReceiptBlockRepository(self.session).compacted_through(agent_id)
+        return (
+            min(compacted, max(seq - 1, 0))
+            + self.session.execute(
+                select(func.count())
+                .select_from(receipt)
+                .where(receipt.agent_id == agent_id, receipt.seq > compacted, receipt.seq < seq)
+            ).scalar_one()
+        )
 
     def arrivals_outside_freezes(self, freezes: tuple[UsageArchiveFreeze, ...]) -> tuple[int, ...]:
         if not freezes:

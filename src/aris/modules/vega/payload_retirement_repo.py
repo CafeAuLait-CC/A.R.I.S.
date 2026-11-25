@@ -14,6 +14,7 @@ from aris.modules.vega.models import (
     Node,
     NodeResource,
 )
+from aris.modules.vega.receipt_block_repo import ReceiptBlockRepository
 from aris.modules.vega.usage_archive_schemas import UsageArchiveHeadQuery
 
 
@@ -90,13 +91,9 @@ class PayloadRetirementRepository:
     def original_receipts(
         self, agent_id: str, first: int, last: int
     ) -> tuple[tuple[int, str, str], ...]:
-        row = AgentMessageReceipt
         return tuple(
-            self.session.execute(
-                select(row.seq, row.message_id, row.fingerprint)
-                .where(row.agent_id == agent_id, row.seq.between(first, last))
-                .order_by(row.seq)
-            ).tuples()
+            (row.seq, row.message_id, row.fingerprint)
+            for row in ReceiptBlockRepository(self.session).original(agent_id, first, last)
         )
 
     def replace(self, source: UsageArchiveHeadQuery, rows: tuple[RetiredPayload, ...]) -> None:
