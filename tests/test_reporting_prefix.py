@@ -2,11 +2,12 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from threading import Barrier
+from time import monotonic, sleep
 
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import delete
+from sqlalchemy import delete, text
 
 from aris.apps.ops import reporting_gap_history
 from aris.core.access.models import RolePermission
@@ -122,8 +123,22 @@ def test_historical_prefix_keeps_live_progress_and_resumes_without_old_payload(
     with monkeypatch.context() as patch:
         patch.setenv("ARIS_DATABASE_URL", settings.database_url)
         patch.setenv("ARIS_ENVIRONMENT", "test")
+        engine = archive.sessions.kw["bind"]
+
+        def connections():
+            with engine.connect() as db:
+                return db.scalar(
+                    text("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database()")
+                )
+
+        before = connections() if engine.dialect.name == "postgresql" else None
         with pytest.raises(RuntimeError, match="historical reporting prefix progress"):
             command.downgrade(Config("alembic.ini"), "0051")
+        if before is not None:
+            deadline = monotonic() + 1
+            while connections() > before and monotonic() < deadline:
+                sleep(0.01)
+            assert connections() <= before
 
 
 def test_prefix_requires_current_authority_and_rolls_back_on_revocation(
