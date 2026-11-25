@@ -110,8 +110,8 @@ def daily_coverage_step(
         return report
     current = pending[0]
     report.update(day=current.day.isoformat(), due_at=current.scheduled_for.isoformat())
-    if current.scheduled_for > now or status_only:
-        return {**report, "state": "future_day" if current.scheduled_for > now else "pending"}
+    if current.scheduled_for > now:
+        return {**report, "state": "future_day"}
     return {
         **report,
         **_build_day(
@@ -121,6 +121,7 @@ def daily_coverage_step(
             actor,
             reports,
             clock=clock,
+            status_only=status_only,
             prefix_proofs_per_tick=prefix_proofs_per_tick,
             transaction_timeout_ms=transaction_timeout_ms,
         ),
@@ -135,6 +136,7 @@ def _build_day(
     reports: WeeklyFromDailyReader,
     *,
     clock: Callable[[], datetime],
+    status_only: bool = False,
     prefix_proofs_per_tick: int,
     transaction_timeout_ms: int,
 ) -> dict[str, JsonValue]:
@@ -150,8 +152,8 @@ def _build_day(
         ),
         clock=clock,
     )
-    step = graph.run_once()
-    if step["state"] == "finished":
+    step = graph.run_once(status_only=status_only)
+    if not status_only and step["state"] == "finished":
         completed = reports.daily_windows.node_snapshot_fingerprints(
             actor, current.query.node_id, (current.snapshot_id,)
         )
@@ -165,6 +167,8 @@ def _build_day(
         )
     else:
         reports.stored_references(actor, current.query.node_id, (current.snapshot_id,))
+    if status_only:
+        return {"state": "pending", "build": step}
     return {
         "state": "day_saved" if step["state"] == "finished" else step["state"],
         "build": step,

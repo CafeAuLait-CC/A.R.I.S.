@@ -536,10 +536,29 @@ def test_closed_days_survive_restart_and_feed_weekly_report_without_raw_samples(
         schedules.complete_daily(CONTEXT, definition, week)
     assert missing.value.code == "COVERAGE_BUILD_PENDING"
     saved = []
+    pending_checked = False
+    engine = schedules.sessions.kw["bind"]
+
+    def no_status_writes(conn, cursor, statement, parameters, context, executemany):
+        assert statement.split(None, 1)[0].upper() in {"SELECT", "SHOW", "SET", "BEGIN"}
+
     for _ in range(64):
         tick = run_tick(config, schedules, clock=schedules.clock)
         assert not tick["needs_attention"], tick
         progress = tick["plans"][0]
+        if not pending_checked and progress["state"] == "source_built":
+            event.listen(engine, "before_cursor_execute", no_status_writes)
+            try:
+                status = run_tick(config, schedules, status_only=True)["plans"][0]
+            finally:
+                event.remove(engine, "before_cursor_execute", no_status_writes)
+            assert status["state"] == "pending" and status["day"] == progress["day"]
+            assert status["build"]["state"] == "pending"
+            assert (
+                status["build"]["progress"]["processed_revision"]
+                == progress["build"]["progress"]["processed_revision"]
+            )
+            pending_checked = True
         if progress["state"] == "day_saved":
             saved.append(progress["day"])
             schedules = CoverageScheduleService(
@@ -550,6 +569,7 @@ def test_closed_days_survive_restart_and_feed_weekly_report_without_raw_samples(
     else:
         pytest.fail("Daily coverage did not converge")
     assert saved == [target.day.isoformat() for target in targets]
+    assert pending_checked
     assert schedules.select(CONTEXT, definition, status_only=True) == initial
 
     complete = CoverageScheduleRepository.complete_daily
@@ -563,7 +583,6 @@ def test_closed_days_survive_restart_and_feed_weekly_report_without_raw_samples(
         sql = statement.lower()
         assert "agent_messages" not in sql and "usage_window_snapshots" not in sql
 
-    engine = schedules.sessions.kw["bind"]
     event.listen(engine, "before_cursor_execute", require_saved_data)
     try:
         with monkeypatch.context() as patch:
