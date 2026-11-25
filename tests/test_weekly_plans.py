@@ -3,9 +3,10 @@ import os
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from threading import Barrier
+from zoneinfo import ZoneInfo
 
 import pytest
 from alembic import command
@@ -221,6 +222,23 @@ def test_real_cli_processes_resume_persistent_weeks_then_run_and_stop(
     plans, database_url, tmp_path
 ):
     _, plan, _, sessions, _ = plans
+    # Keep the native wall-clock exercise bounded to twelve closed weeks.
+    # Fixed offsets also avoid crossing a reporting boundary during the run.
+    now = datetime.now(UTC)
+    delay = timedelta(minutes=plan.delay_minutes)
+    calendars = []
+    for zone in ("Etc/GMT+12", "UTC", "Etc/GMT-12"):
+        local = now.astimezone(ZoneInfo(zone)) - delay
+        week = local.date() - timedelta(days=local.weekday())
+        boundary = datetime.combine(week + timedelta(days=7), time.min, ZoneInfo(zone)) + delay
+        calendars.append((boundary - now, zone, week))
+    _, zone, expected_next_week = max(calendars)
+    plan = plan.model_copy(
+        update={
+            "timezone": zone,
+            "first_week": expected_next_week - timedelta(weeks=12),
+        }
+    )
     config = tmp_path / "weekly-private.json"
     config.write_text(
         json.dumps(
@@ -255,7 +273,7 @@ def test_real_cli_processes_resume_persistent_weeks_then_run_and_stop(
     assert run("--once")[0]["plans"][0]["tasks_prepared"] == 4
     assert count(sessions, ScheduledJobRow) == count(sessions, WeeklyReportRow) == 12
     status = run("--status")[0]
-    assert status["plans"][0]["next_week"] == "2026-11-16"
+    assert status["plans"][0]["next_week"] == expected_next_week.isoformat()
     assert status["plans"][0]["worker_health"] == "not_assessed"
     loop = run("--run", "--max-seconds", "1")
     assert loop[0]["result"] == "worker_started" and loop[-1]["result"] == "worker_stopped"
