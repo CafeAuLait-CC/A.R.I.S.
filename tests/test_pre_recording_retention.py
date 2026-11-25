@@ -10,7 +10,10 @@ import pytest
 from sqlalchemy import event, select
 from sqlalchemy.orm import sessionmaker
 
-from aris.apps.composition.payload_retention import retire_pre_recording_prefix
+from aris.apps.composition.payload_retention import (
+    retire_pre_recording_group,
+    retire_pre_recording_prefix,
+)
 from aris.apps.ops import storage
 from aris.core.contracts import DomainError
 from aris.core.events import DomainEvent
@@ -29,12 +32,107 @@ from aris.modules.vega.payload_retirement_schemas import (
 from aris.modules.vega.usage_archive_schemas import UsageArchiveHeadQuery, UsageArchiveQuery
 from tests.test_administration import admin_state
 from tests.test_mapping_history import history_state
+from tests.test_payload_retirement import counts
 from tests.test_trace_consumer import CONTEXT, configuration, consumer, rebuild, request, seed
 from tests.test_usage_derivations import CONTEXT as DERIVATION_CONTEXT
 from tests.test_usage_derivations import derivations
 
 __all__ = ["consumer", "admin_state", "history_state", "derivations"]
 SOURCE = UsageArchiveHeadQuery(agent_id="agent-a", node_id="node-a")
+
+
+def group_fixture(state, *, initial):
+    cutoff, now = seed_early_prefix(state)
+    state.config = configuration(initial_after_seq=initial)
+    state.service = rebuild(state)
+    with state.sessions.begin() as db:
+        for row in db.scalars(select(AgentMessage).where(AgentMessage.seq.in_((3, 4)))):
+            row.received_at = state.base + timedelta(seconds=60 + row.seq)
+            if row.seq == 4:
+                row.observed_at = state.base + timedelta(seconds=30)
+                row.payload = {**row.payload, "observed_at": row.observed_at.isoformat()}
+                row.fingerprint = hashlib.sha256(
+                    json.dumps(row.payload, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest()
+    state.service.consume(CONTEXT, request(state))
+    save_early_health(state)
+    preview = preview_pre_recording_retention(
+        state.sessions, SOURCE, before=cutoff, timezone="UTC", now=now
+    )
+    values = []
+    for first, last in ((1, 2), (3, 4)):
+        with state.sessions() as db:
+            reports = state.archive.reporting_page_in_transaction(
+                db, UsageArchiveQuery(**SOURCE.model_dump(), after_seq=first - 1, through_seq=last)
+            ).reports
+        values.append(
+            PayloadRetirementRequest(
+                id=uuid4(),
+                source=SOURCE,
+                before=cutoff,
+                dependency_fingerprint=preview.fingerprint,
+                reports=reports,
+            )
+        )
+    return tuple(values)
+
+
+def test_group_retirement_captures_dependencies_once_and_rolls_back_all_batches(
+    consumer, monkeypatch
+):
+    import aris.apps.composition.payload_retention as coordinator
+
+    state = consumer
+    values = group_fixture(state, initial=4)
+    context = PayloadRetirementContext(request_id="fixture-bounded-group")
+    before = counts(state)
+    engine = state.sessions.kw["bind"]
+    removed = 0
+    captures = 0
+    capture = coordinator.pre_recording_retention_in_transaction
+
+    def capture_once(*args, **kwargs):
+        nonlocal captures
+        captures += 1
+        return capture(*args, **kwargs)
+
+    def fail_second(conn, cursor, statement, *args):
+        nonlocal removed
+        if statement.lower().startswith("delete from agent_messages"):
+            removed += 1
+            if removed == 2:
+                raise DomainError("RETRYABLE_DATABASE_ERROR", "Injected second-batch failure", 503)
+
+    monkeypatch.setattr(coordinator, "pre_recording_retention_in_transaction", capture_once)
+    event.listen(engine, "before_cursor_execute", fail_second)
+    try:
+        with pytest.raises(DomainError, match="second-batch failure"):
+            retire_pre_recording_group(state.sessions, context, values, timezone="UTC")
+    finally:
+        event.remove(engine, "before_cursor_execute", fail_second)
+    assert captures == 1 and counts(state) == before
+    results = retire_pre_recording_group(state.sessions, context, values, timezone="UTC")
+    assert captures == 2 and tuple(value.retired_payloads for value in results) == (2, 2)
+    assert all(not value.duplicate for value in results)
+    assert all(
+        value.duplicate
+        for value in retire_pre_recording_group(state.sessions, context, values, timezone="UTC")
+    )
+    assert captures == 2
+    with pytest.raises(ValueError, match="eight"):
+        retire_pre_recording_group(state.sessions, context, values * 5, timezone="UTC")
+    with pytest.raises(ValueError, match="consecutive"):
+        retire_pre_recording_group(state.sessions, context, values[::-1], timezone="UTC")
+
+
+def test_group_retirement_cannot_cross_an_existing_recording_origin(consumer):
+    state = consumer
+    values = group_fixture(state, initial=2)
+    context = PayloadRetirementContext(request_id="fixture-group-origin-bound")
+    before = counts(state)
+    with pytest.raises(DomainError, match="group dependencies"):
+        retire_pre_recording_group(state.sessions, context, values, timezone="UTC")
+    assert counts(state) == before
 
 
 def seed_early_prefix(state):

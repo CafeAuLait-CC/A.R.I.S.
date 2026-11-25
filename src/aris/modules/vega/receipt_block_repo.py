@@ -1,6 +1,19 @@
 """Queries for hot acknowledgments and their lossless compacted prefix."""
 
-from sqlalchemy import BigInteger, LargeBinary, and_, cast, delete, func, literal, select, update
+from typing import cast as type_cast
+
+from sqlalchemy import (
+    BigInteger,
+    LargeBinary,
+    Table,
+    and_,
+    cast,
+    delete,
+    func,
+    literal,
+    select,
+    update,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
@@ -138,9 +151,13 @@ class ReceiptBlockRepository:
     def replace(self, block: AgentReceiptBlock, previous: int) -> None:
         self.session.add(block)
         self.session.flush()
-        hot = AgentMessageReceipt
+        # Use Core columns here. ORM fetch synchronization can prepend this
+        # table's composite PK to RETURNING after an interrupted cached DELETE,
+        # causing scalars() to expose agent_id instead of the requested seq.
+        table = type_cast(Table, AgentMessageReceipt.__table__)
+        hot = table.c
         removed = self.session.scalars(
-            delete(hot)
+            delete(table)
             .where(
                 hot.agent_id == block.agent_id, hot.seq.between(block.first_seq, block.through_seq)
             )
