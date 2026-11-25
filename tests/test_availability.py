@@ -34,7 +34,7 @@ def query(start=None, end=None, gpu="GPU-target"):
 def calendar(*windows, gpu="GPU-target", start=NOW, end=None):
     return MaintenanceCoverage(
         gpu_uuid=gpu,
-        coverage=AvailabilityWindow(start_at=start, end_at=end or NOW + timedelta(days=8)),
+        coverage=AvailabilityWindow(start_at=start, end_at=end or start + timedelta(days=8)),
         windows=windows,
     )
 
