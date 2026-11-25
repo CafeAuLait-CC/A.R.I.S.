@@ -81,7 +81,7 @@ def status(client):
     return {**data, "nodes": [item["node"] for item in data["nodes"]]}
 
 
-def test_idle_snapshot_is_persistent_and_audited(client):
+def test_idle_snapshot_is_durable_without_redundant_transport_events(client):
     assert client.get("/health/live").status_code == 200
     assert client.get("/health/ready").status_code == 200
     with client.app.state.engine.connect() as connection:
@@ -94,8 +94,9 @@ def test_idle_snapshot_is_persistent_and_audited(client):
     assert node["gpus"][0]["availability"] == "not_evaluated"
     with Session(client.app.state.engine) as session:
         for model in (AgentMessage, DomainEvent, OutboxEntry, AuditEntry):
-            assert session.scalar(select(func.count()).select_from(model)) == 1
-        assert session.scalars(select(AuditEntry)).one().request_id == "contract-test"
+            assert session.scalar(select(func.count()).select_from(model)) == int(
+                model in (Node, AgentMessage)
+            )
 
 
 def test_external_paths_use_vega_collector_without_redundant_api_prefix(client):
@@ -134,7 +135,7 @@ def test_duplicates_and_conflicting_reuse(client):
     assert post(client, {**payload, "hostname": "tampered"}).status_code == 409
     assert post(client, batch()).status_code == 409
     with Session(client.app.state.engine) as session:
-        assert session.scalar(select(func.count()).select_from(OutboxEntry)) == 1
+        assert session.scalar(select(func.count()).select_from(OutboxEntry)) == 0
 
 
 def test_out_of_order_and_clock_rollback_do_not_overwrite_current(client):
@@ -176,7 +177,9 @@ def test_node_cannot_claim_another_nodes_gpu_and_transaction_rolls_back(client):
     with Session(client.app.state.engine) as session:
         assert session.get(Node, "node-b") is None
         for model in (AgentMessage, DomainEvent, OutboxEntry, AuditEntry):
-            assert session.scalar(select(func.count()).select_from(model)) == 1
+            assert session.scalar(select(func.count()).select_from(model)) == int(
+                model in (Node, AgentMessage)
+            )
 
 
 def test_configuration_cannot_rebind_a_persisted_agent_to_another_node(client, settings):
@@ -194,7 +197,9 @@ def test_configuration_cannot_rebind_a_persisted_agent_to_another_node(client, s
     with Session(client.app.state.engine) as session:
         assert session.get(Node, "node-b") is None
         for model in (AgentMessage, DomainEvent, OutboxEntry, AuditEntry):
-            assert session.scalar(select(func.count()).select_from(model)) == 1
+            assert session.scalar(select(func.count()).select_from(model)) == int(
+                model in (Node, AgentMessage)
+            )
 
 
 @pytest.mark.parametrize(
@@ -257,4 +262,6 @@ def test_postgres_concurrent_duplicate_is_serialized(client):
     assert sorted(response.json()["duplicate"] for response in responses) == [False, True]
     with Session(client.app.state.engine) as session:
         for model in (Node, AgentMessage, DomainEvent, OutboxEntry, AuditEntry):
-            assert session.scalar(select(func.count()).select_from(model)) == 1
+            assert session.scalar(select(func.count()).select_from(model)) == int(
+                model in (Node, AgentMessage)
+            )

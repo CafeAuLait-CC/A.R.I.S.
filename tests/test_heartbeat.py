@@ -44,8 +44,10 @@ def test_heartbeat_registers_alive_node_without_inventing_gpu_facts(client):
     assert node["gpus"] == []
     with Session(client.app.state.engine) as session:
         for model in (AgentMessage, DomainEvent, OutboxEntry, AuditEntry):
-            assert session.scalar(select(func.count()).select_from(model)) == 1
-        assert session.scalars(select(DomainEvent)).one().event_type == "vega.heartbeat.accepted"
+            assert session.scalar(select(func.count()).select_from(model)) == int(
+                model in (Node, AgentMessage)
+            )
+        assert session.scalars(select(AgentMessage)).one().message_kind == "heartbeat"
 
 
 def test_heartbeat_does_not_refresh_old_samples_or_hide_collector_failure(client):
@@ -134,7 +136,7 @@ def test_heartbeat_auth_validation_and_global_message_identity(client):
     assert status(client)["nodes"][0]["seq"] == 2
     with Session(client.app.state.engine) as session:
         assert session.scalar(select(func.count()).select_from(AgentMessage)) == 1
-        assert session.scalar(select(func.count()).select_from(DomainEvent)) == 2
+        assert session.scalar(select(func.count()).select_from(DomainEvent)) == 0
 
 
 def test_postgres_heartbeat_and_sample_concurrent_first_reports(client):
@@ -161,7 +163,9 @@ def test_postgres_heartbeat_and_sample_concurrent_first_reports(client):
     with Session(client.app.state.engine) as session:
         assert session.scalar(select(func.count()).select_from(Node)) == 1
         for model in (AgentMessage, DomainEvent, OutboxEntry, AuditEntry):
-            assert session.scalar(select(func.count()).select_from(model)) == 2
+            assert session.scalar(select(func.count()).select_from(model)) == (
+                2 if model is AgentMessage else 0
+            )
 
 
 def test_upgrade_preserves_existing_telemetry_and_replay(client):

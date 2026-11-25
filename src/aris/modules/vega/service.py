@@ -6,10 +6,8 @@ from uuid import uuid4
 
 from sqlalchemy.orm import Session, sessionmaker
 
-from aris.core.audit import AuditEntry
 from aris.core.config import Settings
 from aris.core.contracts import DomainError
-from aris.core.events import DomainEvent, OutboxEntry
 from aris.core.time import utc
 from aris.modules.vega.disk_schemas import DISK_STALE_AFTER_SECONDS
 from aris.modules.vega.gpu_activity import gpu_activity
@@ -55,9 +53,9 @@ class VegaService:
             cutoff=cutoff,
             messages=messages,
             blockers=[
-                "Raw message IDs and fingerprints currently provide durable deduplication",
+                "Original message identities and acknowledgments provide durable deduplication",
                 "Domain events, pending Outbox, audit and future ledger need separate retention",
-                "Retention periods and recovery requirements have not been approved",
+                "Payload exit requires verified consumer, report and health dependencies",
             ],
         )
 
@@ -87,7 +85,6 @@ class VegaService:
                 )
             if repo.sequence_exists(batch.agent_id, batch.seq):
                 raise DomainError("CONFLICT", "Sequence reused by a different message", 409)
-            previous_seq = node.last_seq
             if batch.seq > node.last_seq and batch.observed_at >= utc(node.observed_at):
                 node.hostname = batch.hostname
                 node.agent_version = batch.agent_version
@@ -129,41 +126,9 @@ class VegaService:
                     payload=payload,
                 )
             )
-            event_id = str(uuid4())
-            action = f"vega.{kind}.accepted"
-            session.add(
-                DomainEvent(
-                    event_id=event_id,
-                    event_type=action,
-                    event_version=1,
-                    aggregate_type="node",
-                    aggregate_id=batch.node_id,
-                    aggregate_version=batch.seq,
-                    occurred_at=utc(batch.observed_at),
-                    recorded_at=now,
-                    actor=batch.agent_id,
-                    correlation_id=request_id,
-                    causation_id=str(batch.message_id),
-                    payload={"message_id": str(batch.message_id), "applied_to_current": applied},
-                )
-            )
-            session.flush()
-            session.add(OutboxEntry(event_id=event_id, created_at=now))
-            session.add(
-                AuditEntry(
-                    id=str(uuid4()),
-                    actor=batch.agent_id,
-                    action=action,
-                    target=batch.node_id,
-                    request_id=request_id,
-                    recorded_at=now,
-                    changes={
-                        "previous_seq": previous_seq,
-                        "received_seq": batch.seq,
-                        "applied_to_current": applied,
-                    },
-                )
-            )
+            # The archived fact and its original acknowledgment are the durable
+            # transport record. Successful polling is not a business event:
+            # Lyra consumes the archive, and no relay subscribes to packet ACKs.
         return IngestResult(
             message_id=batch.message_id, duplicate=False, applied_to_current=applied
         )

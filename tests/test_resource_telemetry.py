@@ -66,7 +66,9 @@ def test_components_are_one_atomic_message_with_gpu_and_resource_views(client):
     assert put(client, changed).status_code == 409
     with Session(client.app.state.engine) as db:
         for model in [AgentMessage, DomainEvent, OutboxEntry, AuditEntry, NodeResource]:
-            assert db.scalar(select(func.count()).select_from(model)) == 1
+            assert db.scalar(select(func.count()).select_from(model)) == int(
+                model in (AgentMessage, NodeResource)
+            )
 
 
 def test_new_gpu_failure_does_not_erase_system_or_get_hidden_by_older_heartbeat(client):
