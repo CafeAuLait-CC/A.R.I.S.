@@ -6,9 +6,17 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from aris.core.contracts import DomainError
+from aris.core.time import utc
+from aris.modules.lyra.derivation_schemas import (
+    MAX_DERIVATION_INPUT_BYTES,
+    UsageDerivationRequest,
+    canonical_derivation,
+    derivation_fingerprint,
+)
 from aris.modules.lyra.models import (
     CoverageBuildPlanRow,
     CoverageBuildStepRow,
+    UsageDerivation,
     UsageRecordingJobRow,
     UsageTraceAttestationRow,
     UsageTraceCursorRow,
@@ -86,6 +94,68 @@ class RetentionRepository:
                 select(row.state, func.count()).group_by(row.state).order_by(row.state)
             )
         }
+
+    def derivation_source_bounds(
+        self, agent_id: str, node_id: str, *, maximum_records: int, maximum_characters: int
+    ) -> tuple[int, int, int | None]:
+        """Verify bounded original requests; source age never substitutes for references."""
+        row = UsageDerivation
+        selected = (row.agent_id == agent_id, row.node_id == node_id)
+        count, characters = self.session.execute(
+            select(
+                func.count(), func.coalesce(func.sum(func.length(row.canonical_request)), 0)
+            ).where(*selected)
+        ).one()
+        if count > maximum_records or characters > maximum_characters:
+            raise DomainError(
+                "DEPENDENCY_UNAVAILABLE", "Derivation retention inventory exceeds its budget", 503
+            )
+        values = self.session.execute(
+            select(
+                row.id,
+                row.source_count,
+                row.identity_revision,
+                row.as_of,
+                row.request_fingerprint,
+                row.canonical_request,
+            )
+            .where(*selected)
+            .order_by(row.id)
+            .limit(maximum_records + 1)
+        )
+        first = None
+        reviewed = 0
+        consumed = 0
+        for record in values:
+            reviewed += 1
+            raw = record.canonical_request
+            consumed += len(raw)
+            if reviewed > count or consumed > maximum_characters:
+                raise DomainError("RETRYABLE_DATABASE_ERROR", "Derivation inventory changed", 503)
+            try:
+                if len(raw.encode()) > MAX_DERIVATION_INPUT_BYTES:
+                    raise ValueError("Oversized derivation request")
+                request = UsageDerivationRequest.model_validate_json(raw)
+                if (
+                    canonical_derivation(request) != raw
+                    or derivation_fingerprint(raw, result=False) != record.request_fingerprint
+                    or str(request.id) != record.id
+                    or len(request.sources) != record.source_count
+                    or request.identity_revision != record.identity_revision
+                    or request.as_of != utc(record.as_of)
+                    or (request.sources[0].agent_id, request.sources[0].node_id)
+                    != (agent_id, node_id)
+                ):
+                    raise ValueError("Derivation request metadata differs")
+            except (ValueError, TypeError, RecursionError):
+                raise DomainError(
+                    "DEPENDENCY_UNAVAILABLE", "Derivation retention sources are inconsistent", 503
+                ) from None
+            candidate = request.sources[0].expected_seq
+            first = candidate if first is None else min(first, candidate)
+        if (reviewed, consumed) != (count, characters):
+            raise DomainError("RETRYABLE_DATABASE_ERROR", "Derivation inventory changed", 503)
+        return reviewed, consumed, first
 
     def coverage_build_ids(self, node_id: str, limit: int) -> tuple[UUID, ...]:
         row = CoverageBuildPlanRow
